@@ -287,6 +287,10 @@ img {
   justify-content: space-between;
 }
 
+.error-header-row {
+  justify-content: flex-end;
+}
+
 .home-header-row {
   display: grid;
   grid-template-columns: 40px minmax(0, 1fr) 40px;
@@ -1704,10 +1708,11 @@ html[data-theme="dark"] .toast.is-error {
   display: flex;
   flex: 1;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
-  padding-top: 70px;
-  padding-bottom: 120px;
+  padding-top: 40px;
+  padding-bottom: 40px;
+  text-align: center;
 }
 
 .error-code {
