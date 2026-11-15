@@ -1,0 +1,47 @@
+# Package metadata for the Linux .deb and .rpm builds. The release workflow
+# supplies VERSION, ARCH, and BINARY_PATH.
+name: grapho
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+release: 1
+section: utils
+priority: optional
+maintainer: Igor Couto <igor.fcouto@gmail.com>
+vendor: Grapho
+homepage: https://github.com/igor-couto/grapho
+license: GPL-3.0-only
+description: |
+  A quiet, local-first document editor.
+  Grapho is a single-user writing app that runs in the browser and stores
+  documents as JSON files on disk.
+
+contents:
+  - src: ${BINARY_PATH}
+    dst: /usr/bin/grapho
+    expand: true
+    file_info:
+      mode: 0755
+
+  - src: README.md
+    dst: /usr/share/doc/grapho/README.md
+    file_info:
+      mode: 0644
+
+  - src: LICENSE
+    dst: /usr/share/doc/grapho/LICENSE
+    packager: deb
+    file_info:
+      mode: 0644
+
+  - src: LICENSE
+    dst: /usr/share/licenses/grapho/LICENSE
+    packager: rpm
+    type: license
+    file_info:
+      mode: 0644
+
+rpm:
+  group: Applications/Productivity
+  summary: A quiet, local-first document editor
+  packager: Igor Couto <igor.fcouto@gmail.com>
