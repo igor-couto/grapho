@@ -200,6 +200,142 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  cross-setup:
+    name: Build cross
+    needs: validate
+    runs-on: ubuntu-latest
+    # cross 0.2.5 has no riscv64 musl image. Build a pinned main commit and
+    # use its matching :main images.
+    steps:
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore cross
+        id: cross-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/cross
+          key: cross-a9301e91f72bba3850460512685f6b16062015ff
+
+      - name: Build cross
+        if: steps.cross-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cross \
+            --git https://github.com/cross-rs/cross \
+            --rev a9301e91f72bba3850460512685f6b16062015ff \
+            --locked \
+            --root "$RUNNER_TEMP/cross"
+
+      - name: Save cross
+        if: steps.cross-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/cross
+          key: cross-a9301e91f72bba3850460512685f6b16062015ff
+
+      - name: Check cross
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x "$RUNNER_TEMP/cross/bin/cross"
+          test -x "$RUNNER_TEMP/cross/bin/cross"
+
+  cross:
+    name: Build ${{ matrix.name }}
+    needs: [validate, cross-setup]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-armv7
+            target: armv7-unknown-linux-musleabihf
+            toolchain: stable
+          - name: linux-riscv64
+            target: riscv64gc-unknown-linux-musl
+            toolchain: stable
+          # The FreeBSD cross image is Ubuntu 20.04 (glibc 2.31). Builds with
+          # the current stable toolchain need a newer glibc for build scripts.
+          - name: freebsd-x86_64
+            target: x86_64-unknown-freebsd
+            toolchain: "1.89.0"
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v7
+
+      - name: Install Rust (stable)
+        if: matrix.toolchain == 'stable'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Rust (FreeBSD)
+        if: matrix.toolchain == '1.89.0'
+        uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: cross-${{ matrix.name }}
+
+      - name: Restore cross
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/cross
+          key: cross-a9301e91f72bba3850460512685f6b16062015ff
+          fail-on-cache-miss: true
+
+      - name: Add cross to PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x "$RUNNER_TEMP/cross/bin/cross"
+          echo "$RUNNER_TEMP/cross/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cross build --locked --release --target "$TARGET" --bin grapho
+
+      - name: Package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+
+          version="${GITHUB_REF_NAME#v}"
+          stage="grapho-${version}-${{ matrix.name }}"
+          mkdir -p "dist/$stage"
+          cp "target/$TARGET/release/grapho" "dist/$stage/grapho"
+          cp README.md LICENSE "dist/$stage/"
+          chmod +x "dist/$stage/grapho"
+
+          file -b "dist/$stage/grapho"
+          if [[ "$TARGET" == *-linux-musl ]]; then
+            if ! file -b "dist/$stage/grapho" | grep -qE 'static-pie linked|statically linked'; then
+              echo "::error::Expected a static Linux binary."
+              exit 1
+            fi
+          fi
+
+          tar -C dist -czf "dist/$stage.tar.gz" "$stage"
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: cross-${{ matrix.name }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
   packages:
     name: Build Linux packages
     needs: build
@@ -289,7 +425,7 @@ jobs:
 
   publish:
     name: Publish release
-    needs: [build, packages]
+    needs: [build, cross, packages]
     runs-on: ubuntu-latest
     permissions:
       contents: write

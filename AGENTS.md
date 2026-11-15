@@ -71,6 +71,7 @@ src/store.rs    document model, JSON persistence, HTML sanitization
 src/assets.rs   embedded HTML/CSS/JS/font lookup
 assets/         browser UI; no build step
 assets/fonts/   bundled Inter/Literata files and their licenses
+Cross.toml      cross-rs target images
 ```
 
 Data flow is deliberately simple:
@@ -108,6 +109,11 @@ These should not be casually changed:
 A pushed `v<version>` tag runs `.github/workflows/release.yml`. The tag must
 match `Cargo.toml`. The workflow builds Linux, macOS, and Windows binaries,
 adds `.deb`/`.rpm` packages, and writes `SHA256SUMS.txt`.
+
+The `cross` job adds armv7 Linux, riscv64 Linux, and x86_64 FreeBSD builds using
+a pinned build of cross-rs. Those cross-compiled binaries are not executed in
+CI. FreeBSD uses Rust 1.89 because its cross image is Ubuntu 20.04 with glibc
+2.31, which cannot run build scripts from newer toolchains.
 
 Signing uses repository secrets:
 
