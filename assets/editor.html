@@ -18,18 +18,6 @@
 
   <header class="editor-header">
     <div class="editor-header-start">
-      <a class="brand brand-compact" href="/" aria-label="Grapho home">
-        <span class="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 32 32" fill="none">
-            <rect width="32" height="32" rx="9" fill="var(--brand-tile)"/>
-            <path d="M10 8.5h8.8L23 12.7v10.8H10V8.5Z" fill="var(--brand-page)"/>
-            <path d="M18.8 8.5v4.2H23" stroke="var(--brand-tile)" stroke-width="1.6" stroke-linejoin="round"/>
-            <path d="M13.4 17.4h6.2M13.4 20.5h4.2" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"/>
-          </svg>
-        </span>
-        <span class="brand-word">grapho<span class="brand-dot">.</span></span>
-      </a>
-      <span class="header-rule" aria-hidden="true"></span>
       <a class="back-link" href="/" id="backToLibrary" aria-label="Back to library">
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <path d="m14.5 5-7 7 7 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
@@ -38,10 +26,64 @@
       </a>
     </div>
 
+    <div class="format-toolbar" id="formatToolbar" role="toolbar" aria-label="Text formatting">
+      <div class="toolbar-group">
+        <button class="toolbar-button" type="button" data-command="undo" title="Undo (Ctrl+Z)" aria-label="Undo" disabled>
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 6.8 4.4 11.4 9 16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M4.8 11.4h9.1a4.7 4.7 0 0 1 0 9.4h-2.2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+        </button>
+        <button class="toolbar-button" type="button" data-command="redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo" disabled>
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M15 6.8 19.6 11.4 15 16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M19.2 11.4H10.1a4.7 4.7 0 0 0 0 9.4h2.2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+
+      <span class="toolbar-rule" aria-hidden="true"></span>
+
+      <label class="style-select-wrap">
+        <span class="sr-only">Paragraph style</span>
+        <select id="blockStyle" aria-label="Paragraph style" disabled>
+          <option value="p">Paragraph</option>
+          <option value="h1">Heading 1</option>
+          <option value="h2">Heading 2</option>
+          <option value="blockquote">Quote</option>
+          <option value="pre">Code block</option>
+        </select>
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m7 9.5 5 5 5-5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </label>
+
+      <span class="toolbar-rule" aria-hidden="true"></span>
+
+      <div class="toolbar-group">
+        <button class="toolbar-button toolbar-letter" type="button" data-command="bold" title="Bold (Ctrl+B)" aria-label="Bold" aria-pressed="false" disabled><span class="letter-bold">B</span></button>
+        <button class="toolbar-button toolbar-letter" type="button" data-command="italic" title="Italic (Ctrl+I)" aria-label="Italic" aria-pressed="false" disabled><span class="letter-italic">I</span></button>
+        <button class="toolbar-button toolbar-letter" type="button" data-command="underline" title="Underline (Ctrl+U)" aria-label="Underline" aria-pressed="false" disabled><span class="letter-underline">U</span></button>
+        <button class="toolbar-button toolbar-letter" type="button" data-command="strikeThrough" title="Strikethrough" aria-label="Strikethrough" aria-pressed="false" disabled><span class="letter-strike">S</span></button>
+      </div>
+
+      <span class="toolbar-rule" aria-hidden="true"></span>
+
+      <div class="toolbar-group">
+        <button class="toolbar-button" type="button" data-command="insertUnorderedList" title="Bulleted list" aria-label="Bulleted list" aria-pressed="false" disabled>
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 7h11M9 12h11M9 17h11" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="4.5" cy="7" r="1.25" fill="currentColor"/><circle cx="4.5" cy="12" r="1.25" fill="currentColor"/><circle cx="4.5" cy="17" r="1.25" fill="currentColor"/></svg>
+        </button>
+        <button class="toolbar-button" type="button" data-command="insertOrderedList" title="Numbered list" aria-label="Numbered list" aria-pressed="false" disabled>
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M10 7h10M10 12h10M10 17h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M4 6h1.4v3M3.5 12h2.3l-2.3 2.6H6M3.7 16.5h2.1v1.8H3.7v1.2h2.1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button class="toolbar-button" type="button" id="linkButton" title="Add link (Ctrl+K)" aria-label="Add link" aria-pressed="false" disabled>
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9.5 14.5 5-5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M11 7.5 12.7 5.8a3.8 3.8 0 0 1 5.4 5.4L16.4 13M13 16.5l-1.7 1.7a3.8 3.8 0 0 1-5.4-5.4L7.6 11" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+        </button>
+        <button class="toolbar-button" type="button" id="imageButton" title="Add image" aria-label="Add image" disabled>
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5" stroke="currentColor" stroke-width="1.7"/><circle cx="8.6" cy="9.2" r="1.5" stroke="currentColor" stroke-width="1.5"/><path d="m5 16.8 4.6-4.2 2.9 2.6 2.9-2.5 3.6 4.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button class="toolbar-button" type="button" data-command="removeFormat" title="Clear formatting" aria-label="Clear formatting" disabled>
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 17 8.8-11.2M9.4 5.8h6.8M4 5.8h7.2M14.5 13l5 6M19.5 13l-5 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </div>
+
     <div class="editor-header-end">
-      <button class="save-status" type="button" id="saveStatus" title="Save now" aria-live="polite" disabled>
+      <button class="save-status" type="button" id="saveStatus" title="Save failed. Click to retry." aria-label="Save failed. Click to retry." aria-live="polite" hidden disabled>
         <span class="save-dot" aria-hidden="true"></span>
-        <span id="saveLabel">Loading</span>
+        <span>Save failed</span>
       </button>
 
       <button class="icon-button theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme">
@@ -68,6 +110,10 @@
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v12M7.5 10.5 12 15l4.5-4.5M5 16.5V20h14v-3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Download as HTML
           </button>
+          <button class="menu-item" type="button" role="menuitem" data-doc-action="export-markdown">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3.5 17.5v-11L8 13l4.5-6.5v11" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M18.4 6.5v10.8m0 0-2.4-2.4m2.4 2.4 2.4-2.4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Download as Markdown
+          </button>
           <button class="menu-item" type="button" role="menuitem" data-doc-action="export-text">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 4h8l4 4v12H6V4Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 4v4h4M9 12h6M9 16h4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
             Download as plain text
@@ -84,83 +130,12 @@
 
   <main class="editor-workspace">
     <div class="editor-column">
-      <div class="toolbar-wrap">
-        <div class="format-toolbar" id="formatToolbar" role="toolbar" aria-label="Text formatting">
-          <div class="toolbar-group">
-            <button class="toolbar-button" type="button" data-command="undo" title="Undo (Ctrl+Z)" aria-label="Undo" disabled>
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 6.8 4.4 11.4 9 16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M4.8 11.4h9.1a4.7 4.7 0 0 1 0 9.4h-2.2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-            </button>
-            <button class="toolbar-button" type="button" data-command="redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo" disabled>
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M15 6.8 19.6 11.4 15 16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M19.2 11.4H10.1a4.7 4.7 0 0 0 0 9.4h2.2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-            </button>
-          </div>
-
-          <span class="toolbar-rule" aria-hidden="true"></span>
-
-          <label class="style-select-wrap">
-            <span class="sr-only">Paragraph style</span>
-            <select id="blockStyle" aria-label="Paragraph style" disabled>
-              <option value="p">Paragraph</option>
-              <option value="h1">Heading 1</option>
-              <option value="h2">Heading 2</option>
-              <option value="blockquote">Quote</option>
-              <option value="pre">Code block</option>
-            </select>
-            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m7 9.5 5 5 5-5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </label>
-
-          <span class="toolbar-rule" aria-hidden="true"></span>
-
-          <div class="toolbar-group">
-            <button class="toolbar-button toolbar-letter" type="button" data-command="bold" title="Bold (Ctrl+B)" aria-label="Bold" aria-pressed="false" disabled><span class="letter-bold">B</span></button>
-            <button class="toolbar-button toolbar-letter" type="button" data-command="italic" title="Italic (Ctrl+I)" aria-label="Italic" aria-pressed="false" disabled><span class="letter-italic">I</span></button>
-            <button class="toolbar-button toolbar-letter" type="button" data-command="underline" title="Underline (Ctrl+U)" aria-label="Underline" aria-pressed="false" disabled><span class="letter-underline">U</span></button>
-            <button class="toolbar-button toolbar-letter" type="button" data-command="strikeThrough" title="Strikethrough" aria-label="Strikethrough" aria-pressed="false" disabled><span class="letter-strike">S</span></button>
-          </div>
-
-          <span class="toolbar-rule" aria-hidden="true"></span>
-
-          <div class="toolbar-group">
-            <button class="toolbar-button" type="button" data-command="insertUnorderedList" title="Bulleted list" aria-label="Bulleted list" aria-pressed="false" disabled>
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 7h11M9 12h11M9 17h11" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="4.5" cy="7" r="1.25" fill="currentColor"/><circle cx="4.5" cy="12" r="1.25" fill="currentColor"/><circle cx="4.5" cy="17" r="1.25" fill="currentColor"/></svg>
-            </button>
-            <button class="toolbar-button" type="button" data-command="insertOrderedList" title="Numbered list" aria-label="Numbered list" aria-pressed="false" disabled>
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M10 7h10M10 12h10M10 17h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M4 6h1.4v3M3.5 12h2.3l-2.3 2.6H6M3.7 16.5h2.1v1.8H3.7v1.2h2.1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>
-            <button class="toolbar-button" type="button" id="linkButton" title="Add link (Ctrl+K)" aria-label="Add link" aria-pressed="false" disabled>
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9.5 14.5 5-5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M11 7.5 12.7 5.8a3.8 3.8 0 0 1 5.4 5.4L16.4 13M13 16.5l-1.7 1.7a3.8 3.8 0 0 1-5.4-5.4L7.6 11" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-            </button>
-            <button class="toolbar-button" type="button" data-command="removeFormat" title="Clear formatting" aria-label="Clear formatting" disabled>
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 17 8.8-11.2M9.4 5.8h6.8M4 5.8h7.2M14.5 13l5 6M19.5 13l-5 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-            </button>
-          </div>
-        </div>
-      </div>
-
       <article class="paper" id="paper" aria-busy="true">
         <header class="paper-head">
-          <div class="paper-kicker">
-            <span class="document-chip">
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 3.5h8l4 4V20H6V3.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M14 3.5v4h4M9 12h6M9 15.5h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-              Document
-            </span>
-            <span class="paper-meta" id="docMeta">Opening…</span>
-          </div>
-
           <input class="document-title" id="documentTitle" type="text" placeholder="Untitled document" maxlength="200" autocomplete="off" spellcheck="false" aria-label="Document title" disabled>
-
-          <div class="title-rule" aria-hidden="true"></div>
         </header>
 
         <div class="prose" id="editor" contenteditable="false" role="textbox" aria-multiline="true" aria-label="Document content" spellcheck="true" data-placeholder="Start writing…" data-empty="true"></div>
-
-        <footer class="paper-foot" id="paperFoot" hidden>
-          <span id="wordCount">0 words</span>
-          <span class="paper-foot-dot" aria-hidden="true">·</span>
-          <span id="readingTime">0 min read</span>
-          <span class="paper-foot-spacer" aria-hidden="true"></span>
-          <span class="paper-foot-note">Saved as you write</span>
-        </footer>
 
         <div class="load-error" id="loadError" hidden>
           <span class="load-error-mark" aria-hidden="true">404</span>
@@ -169,14 +144,19 @@
           <a class="button button-primary" href="/">Back to the library</a>
         </div>
       </article>
-
-      <p class="editor-hint">
-        <span>Saved automatically</span>
-        <span class="hint-dot" aria-hidden="true">·</span>
-        <span><kbd>Ctrl</kbd><span class="hint-plus">+</span><kbd>S</kbd> to save now</span>
-      </p>
     </div>
   </main>
+
+  <input type="file" id="imageInput" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+
+  <div class="popover-menu image-menu" id="imageMenu" role="menu" aria-label="Image options" hidden>
+    <p class="popover-label">Image</p>
+    <button class="menu-item" type="button" role="menuitemradio" data-image-align="block" aria-checked="true">Block</button>
+    <button class="menu-item" type="button" role="menuitemradio" data-image-align="left" aria-checked="false">Wrap left</button>
+    <button class="menu-item" type="button" role="menuitemradio" data-image-align="right" aria-checked="false">Wrap right</button>
+    <div class="menu-rule" role="separator"></div>
+    <button class="menu-item menu-item-danger" type="button" role="menuitem" data-image-action="remove">Remove image</button>
+  </div>
 
   <dialog class="modal modal-small" id="linkDialog" aria-labelledby="linkTitle">
     <form class="modal-panel" id="linkForm" novalidate>

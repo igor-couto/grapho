@@ -88,11 +88,14 @@ These should not be casually changed:
 
 - Stored HTML is sanitized on save and again on load. The allowlist in
   `store.rs` is the trust boundary.
+- Images are embedded in that HTML as base64 data URLs. The sanitizer accepts only
+  PNG, JPEG, WebP, and GIF data URLs on `img src`, never remote URLs: opening a
+  document must not touch the network.
 - Formatting must produce semantic tags (`<b>`, `<i>`, `<u>`, headings, lists),
   never inline styles. The Content-Security-Policy forbids inline styles; do not
   turn on `styleWithCSS`.
-- Rich HTML paste is reduced to plain text on purpose. Keep it that way unless
-  the user asks for sanitized paste support.
+- Rich HTML paste is reduced to plain text on purpose. Image files are the one
+  exception; keep it that way unless the user asks for sanitized paste support.
 - The CSP, frame denial, no-referrer policy, and same-origin mutation check are
   part of the app. Do not loosen them for convenience.
 - The server binds to loopback by default and has no authentication or TLS. Keep

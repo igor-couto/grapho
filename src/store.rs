@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
@@ -280,6 +281,7 @@ pub fn sanitize_content(html: &str) -> String {
         "h3",
         "h4",
         "i",
+        "img",
         "li",
         "ol",
         "p",
@@ -297,16 +299,56 @@ pub fn sanitize_content(html: &str) -> String {
     let mut link_attributes = HashSet::new();
     link_attributes.insert("href");
     link_attributes.insert("title");
-    let tag_attributes = HashMap::from([("a", link_attributes)]);
-    let url_schemes = ["http", "https", "mailto"].into_iter().collect();
+
+    let mut image_attributes = HashSet::new();
+    image_attributes.insert("src");
+    image_attributes.insert("alt");
+    image_attributes.insert("class");
+
+    let tag_attributes = HashMap::from([("a", link_attributes), ("img", image_attributes)]);
+
+    // `data:` carries embedded image bytes. The attribute filter below keeps it
+    // on images and removes it from links, so a stored document can never turn
+    // a click into a `data:text/html` page.
+    let url_schemes = ["http", "https", "mailto", "data"].into_iter().collect();
 
     Builder::default()
         .tags(tags)
         .tag_attributes(tag_attributes)
         .url_schemes(url_schemes)
         .link_rel(Some("noopener noreferrer"))
+        .attribute_filter(|element, attribute, value| match (element, attribute) {
+            ("img", "src") if !is_embedded_image(value) => None,
+            ("img", "class") => {
+                let kept: Vec<&str> = value
+                    .split_whitespace()
+                    .filter(|name| matches!(*name, "wrap-left" | "wrap-right"))
+                    .collect();
+                if kept.is_empty() {
+                    None
+                } else {
+                    Some(Cow::Owned(kept.join(" ")))
+                }
+            }
+            ("a", "href") if value.to_ascii_lowercase().starts_with("data:") => None,
+            _ => Some(Cow::Borrowed(value)),
+        })
         .clean(html)
         .to_string()
+}
+
+/// Images are stored inline as base64 data URLs. Only the bitmap formats the
+/// editor writes are accepted; an SVG data URL is markup and stays out.
+fn is_embedded_image(value: &str) -> bool {
+    const PREFIXES: [&str; 4] = [
+        "data:image/png;base64,",
+        "data:image/jpeg;base64,",
+        "data:image/webp;base64,",
+        "data:image/gif;base64,",
+    ];
+    PREFIXES
+        .iter()
+        .any(|prefix| value.len() > prefix.len() && value.starts_with(prefix))
 }
 
 /// Convert safe stored HTML into text for summaries and word counts.
@@ -347,6 +389,7 @@ fn is_line_break_tag(tag: &str) -> bool {
     tag == "br"
         || tag == "br/"
         || tag.starts_with("br ")
+        || tag.starts_with("img")
         || [
             "/p",
             "/div",
@@ -476,6 +519,58 @@ mod tests {
             html_to_text("<h1>A title</h1><p>One &amp; two<br>three</p><ul><li>four</li></ul>");
         assert_eq!(text, "A title One & two three four");
         assert_eq!(text.split_whitespace().count(), 7);
+    }
+
+    #[test]
+    fn images_must_be_embedded_bitmaps() {
+        let pixel = "data:image/png;base64,iVBORw0KGgo=";
+        let dirty = format!(
+            concat!(
+                "<p>Before</p>",
+                "<p><img src=\"{}\" alt=\"A pixel\"></p>",
+                "<p><img src=\"data:image/svg+xml;base64,PHN2Zz4=\" alt=\"svg\"></p>",
+                "<p><img src=\"data:text/html;base64,PHNjcmlwdD4=\" alt=\"html\"></p>",
+                "<p><img src=\"https://example.com/tracker.png\" alt=\"remote\"></p>",
+                "<p><img src=\"{}\" onerror=\"steal()\"></p>"
+            ),
+            pixel, pixel
+        );
+        let clean = sanitize_content(&dirty);
+
+        assert!(clean.contains("Before"));
+        assert!(clean.contains(pixel));
+        assert!(clean.contains("alt=\"A pixel\""));
+        assert!(!clean.contains("data:image/svg+xml"));
+        assert!(!clean.contains("data:text/html"));
+        assert!(!clean.contains("example.com"));
+        assert!(!clean.contains("onerror"));
+    }
+
+    #[test]
+    fn image_wrapping_survives_only_as_classes() {
+        let pixel = "data:image/png;base64,iVBORw0KGgo=";
+        let dirty = format!(
+            concat!(
+                "<img src=\"{}\" class=\"wrap-left portrait\" alt=\"left\">",
+                "<img src=\"{}\" class=\"wrap-right\" style=\"float:right\" alt=\"right\">"
+            ),
+            pixel, pixel
+        );
+        let clean = sanitize_content(&dirty);
+
+        assert!(clean.contains("class=\"wrap-left\""));
+        assert!(clean.contains("class=\"wrap-right\""));
+        assert!(!clean.contains("portrait"));
+        assert!(!clean.contains("style"));
+    }
+
+    #[test]
+    fn data_urls_never_become_links() {
+        let clean =
+            sanitize_content("<a href=\"data:text/html;base64,PHNjcmlwdD4=\">click</a><p>text</p>");
+
+        assert!(clean.contains("click"));
+        assert!(!clean.contains("text/html"));
     }
 
     #[test]

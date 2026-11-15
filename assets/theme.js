@@ -33,7 +33,7 @@
     });
 
     document.querySelectorAll('meta[name="theme-color"]').forEach(function (meta) {
-      meta.setAttribute("content", theme === "dark" ? "#171914" : "#f3efe6");
+      meta.setAttribute("content", theme === "dark" ? "#232126" : "#f3efe6");
     });
   }
 

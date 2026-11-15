@@ -5,8 +5,8 @@ no database, account system, or frontend build step. Documents are plain JSON
 files on disk.
 
 The home screen lists and searches documents. The editor has the formatting I use
-most, saves as you type, and can export to HTML or plain text. Light and dark
-themes are included.
+most, holds images, saves as you type, and can export to HTML, Markdown, or plain
+text. Light and dark themes are included.
 
 ## Running
 
@@ -48,9 +48,10 @@ an authenticating reverse proxy in front of it. If you use a proxy, preserve the
 ## Data
 
 Documents are stored in `GRAPHO_DATA_DIR/<document-id>.json` (under `data/` by
-default). Each file contains the title, sanitized HTML, and timestamps. A save
-replaces the file through a temporary file, so a crash is unlikely to leave a
-half-written document.
+default). Each file contains the title, sanitized HTML, and timestamps. Images are
+embedded as base64 data URLs, so a document stays one self-contained file; photos
+are shrunk in the browser first. A save replaces the file through a temporary
+file, so a crash is unlikely to leave a half-written document.
 
 Copy the whole directory to back it up. Stop Grapho first if you want a
 consistent snapshot.

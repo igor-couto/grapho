@@ -3,7 +3,6 @@
 
   var state = {
     documentId: null,
-    document: null,
     loaded: false,
     dirty: false,
     saving: false,
@@ -15,19 +14,10 @@
     lastRange: null,
     linkRange: null,
     linkAnchor: null,
-    metaTimer: null,
     toastTimer: null,
   };
 
   var els = {};
-  var numberFormatter = new Intl.NumberFormat(undefined);
-  var dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-  var relativeFormatter = new Intl.RelativeTimeFormat(undefined, {
-    numeric: "auto",
-  });
 
   var TOGGLE_COMMANDS = [
     "bold",
@@ -49,20 +39,18 @@
 
   function init() {
     els.saveStatus = document.getElementById("saveStatus");
-    els.saveLabel = document.getElementById("saveLabel");
     els.backToLibrary = document.getElementById("backToLibrary");
     els.documentMenuButton = document.getElementById("documentMenuButton");
     els.documentMenu = document.getElementById("documentMenu");
     els.formatToolbar = document.getElementById("formatToolbar");
     els.blockStyle = document.getElementById("blockStyle");
     els.linkButton = document.getElementById("linkButton");
+    els.imageButton = document.getElementById("imageButton");
+    els.imageInput = document.getElementById("imageInput");
+    els.imageMenu = document.getElementById("imageMenu");
     els.paper = document.getElementById("paper");
     els.documentTitle = document.getElementById("documentTitle");
     els.editor = document.getElementById("editor");
-    els.docMeta = document.getElementById("docMeta");
-    els.wordCount = document.getElementById("wordCount");
-    els.readingTime = document.getElementById("readingTime");
-    els.paperFoot = document.getElementById("paperFoot");
     els.loadError = document.getElementById("loadError");
     els.toast = document.getElementById("toast");
 
@@ -105,10 +93,19 @@
     els.editor.addEventListener("input", handleEditorInput);
     els.editor.addEventListener("paste", handlePaste);
     els.editor.addEventListener("drop", handleDrop);
+    els.editor.addEventListener("click", handleEditorClick);
     els.editor.addEventListener("focus", updateToolbarState);
     els.editor.addEventListener("keydown", handleEditorKeydown);
 
+    els.imageButton.addEventListener("click", openImagePicker);
+    els.imageInput.addEventListener("change", handleImagePicked);
+    els.imageMenu.addEventListener("click", handleImageMenuClick);
+
     document.addEventListener("selectionchange", handleSelectionChange);
+    document.addEventListener("mousedown", handleDocumentPointer);
+
+    window.addEventListener("scroll", closeImageMenu, { passive: true });
+    window.addEventListener("resize", closeImageMenu);
 
     els.saveStatus.addEventListener("click", function () {
       if (!state.loaded || state.saving) {
@@ -255,7 +252,6 @@
   }
 
   function applyDocument(document) {
-    state.document = document;
     state.loaded = true;
     state.dirty = false;
 
@@ -264,23 +260,16 @@
     els.editor.innerHTML = document.content || "";
     els.editor.setAttribute("contenteditable", "true");
     els.paper.setAttribute("aria-busy", "false");
-    els.paperFoot.hidden = false;
 
     setToolbarEnabled(true);
     els.documentMenuButton.disabled = false;
     els.saveStatus.disabled = false;
 
     updatePageTitle();
-    updateWordStats();
     updateEditorPlaceholder();
-    updateDocumentMeta();
-    setSaveStatus("saved", "Saved");
+    hideSaveStatus();
     updateToolbarState();
     useSemanticMarkup();
-
-    if (!state.metaTimer) {
-      state.metaTimer = window.setInterval(updateDocumentMeta, 60000);
-    }
 
     var params = new URLSearchParams(window.location.search);
     if (params.get("new") === "1") {
@@ -299,7 +288,6 @@
     els.paper.setAttribute("aria-busy", "false");
     els.paper.querySelector(".paper-head").hidden = true;
     els.editor.hidden = true;
-    els.paperFoot.hidden = true;
     els.loadError.hidden = false;
 
     markNode.textContent = notFound ? "404" : "!";
@@ -310,7 +298,7 @@
       ? "It may have been deleted, or the link might be incomplete."
       : "Grapho couldn't reach the document. Check the server, then refresh the page.";
 
-    setSaveStatus("error", notFound ? "Not found" : "Offline");
+    hideSaveStatus();
     els.saveStatus.disabled = true;
     els.documentTitle.disabled = true;
     els.documentMenuButton.disabled = true;
@@ -345,7 +333,7 @@
     if (!state.loaded) {
       return;
     }
-    updateWordStats();
+    closeImageMenu();
     updateEditorPlaceholder();
     notifyEditorChanged();
   }
@@ -356,9 +344,6 @@
     }
 
     state.dirty = true;
-    if (!state.saving) {
-      setSaveStatus("dirty", "Unsaved");
-    }
     scheduleSave();
   }
 
@@ -399,57 +384,6 @@
     var text = els.editor.innerText.replace(/\u00a0/g, " ").trim();
     var hasNonText = Boolean(els.editor.querySelector("hr, img"));
     els.editor.dataset.empty = text || hasNonText ? "false" : "true";
-  }
-
-  function updateWordStats() {
-    if (!state.loaded) {
-      return;
-    }
-
-    var text = els.editor.innerText.replace(/\u00a0/g, " ").trim();
-    var words = text ? text.split(/\s+/u).length : 0;
-    var minutes = words ? Math.max(1, Math.ceil(words / 220)) : 0;
-
-    els.wordCount.textContent =
-      numberFormatter.format(words) + (words === 1 ? " word" : " words");
-    els.readingTime.textContent = minutes + " min read";
-  }
-
-  function updateDocumentMeta() {
-    if (!state.document) {
-      return;
-    }
-
-    var timestamp = state.document.updated_at;
-    els.docMeta.textContent = "Edited " + relativeTime(timestamp);
-    els.docMeta.title = dateTimeFormatter.format(new Date(timestamp));
-  }
-
-  function relativeTime(timestamp) {
-    var now = Date.now();
-    var difference = Math.max(0, now - timestamp);
-    var seconds = Math.floor(difference / 1000);
-
-    if (seconds < 45) {
-      return "just now";
-    }
-
-    var minutes = Math.floor(seconds / 60);
-    if (minutes < 60) {
-      return relativeFormatter.format(-Math.max(1, minutes), "minute");
-    }
-
-    var hours = Math.floor(minutes / 60);
-    if (hours < 24) {
-      return relativeFormatter.format(-Math.max(1, hours), "hour");
-    }
-
-    var days = Math.floor(hours / 24);
-    if (days < 7) {
-      return relativeFormatter.format(-days, "day");
-    }
-
-    return dateTimeFormatter.format(new Date(timestamp));
   }
 
   function buildPayload() {
@@ -496,11 +430,10 @@
     var payload = buildPayload();
     state.dirty = false;
     state.saving = true;
-    setSaveStatus("saving", "Saving…");
 
     state.savePromise = (async function () {
       try {
-        var updated = await request(
+        await request(
           "/api/documents/" + encodeURIComponent(state.documentId),
           {
             method: "PUT",
@@ -508,22 +441,18 @@
           },
         );
 
-        state.document = updated;
         state.saving = false;
         state.saveErrorNotified = false;
-        updateDocumentMeta();
+        hideSaveStatus();
 
         if (state.dirty) {
-          setSaveStatus("dirty", "Unsaved");
           scheduleSave(350);
-        } else {
-          setSaveStatus("saved", "Saved");
         }
         return true;
       } catch (error) {
         state.saving = false;
         state.dirty = true;
-        setSaveStatus("error", "Save failed");
+        showSaveStatus();
 
         if (!state.saveErrorNotified) {
           showToast(
@@ -613,25 +542,12 @@
     }
   }
 
-  function setSaveStatus(kind, label) {
-    els.saveStatus.classList.remove("is-dirty", "is-saving", "is-error");
-    if (kind === "dirty") {
-      els.saveStatus.classList.add("is-dirty");
-    } else if (kind === "saving") {
-      els.saveStatus.classList.add("is-saving");
-    } else if (kind === "error") {
-      els.saveStatus.classList.add("is-error");
-    }
+  function hideSaveStatus() {
+    els.saveStatus.hidden = true;
+  }
 
-    els.saveLabel.textContent = label;
-    var titles = {
-      saved: "All changes saved",
-      dirty: "Save now",
-      saving: "Saving changes…",
-      error: "Save failed. Click to retry.",
-    };
-    els.saveStatus.title = titles[kind] || "Save";
-    els.saveStatus.setAttribute("aria-label", titles[kind] || "Save");
+  function showSaveStatus() {
+    els.saveStatus.hidden = false;
   }
 
   /* -----------------------------------------------------------------------
@@ -732,7 +648,6 @@
     }
 
     notifyEditorChanged();
-    updateWordStats();
     updateEditorPlaceholder();
     updateToolbarState();
   }
@@ -1036,6 +951,392 @@
   }
 
   /* -----------------------------------------------------------------------
+     Images
+     ----------------------------------------------------------------------- */
+
+  var IMAGE_MAX_EDGE = 1600;
+  var IMAGE_MAX_DATA_URL = 1500000;
+  var IMAGE_PASSTHROUGH_BYTES = 600 * 1024;
+  var activeImage = null;
+
+  function openImagePicker() {
+    if (!state.loaded) {
+      return;
+    }
+    els.imageInput.value = "";
+    els.imageInput.click();
+  }
+
+  function handleImagePicked() {
+    var files = Array.prototype.slice.call(els.imageInput.files || []);
+    els.imageInput.value = "";
+    if (files.length) {
+      addImages(files);
+    }
+  }
+
+  function imageFilesFrom(list) {
+    var files = [];
+    Array.prototype.forEach.call(list || [], function (file) {
+      if (file && /^image\//.test(file.type)) {
+        files.push(file);
+      }
+    });
+    return files;
+  }
+
+  function clipboardImages(clipboard) {
+    if (!clipboard) {
+      return [];
+    }
+
+    var files = [];
+    if (clipboard.items && clipboard.items.length) {
+      Array.prototype.forEach.call(clipboard.items, function (item) {
+        if (item.kind !== "file" || !/^image\//.test(item.type)) {
+          return;
+        }
+        var file = item.getAsFile();
+        if (file) {
+          files.push(file);
+        }
+      });
+    }
+
+    return files.length ? files : imageFilesFrom(clipboard.files);
+  }
+
+  async function addImages(files) {
+    var images = imageFilesFrom(files);
+    if (!images.length) {
+      showToast("Only image files can go in a document.", true);
+      return;
+    }
+
+    var added = 0;
+    for (var index = 0; index < images.length; index += 1) {
+      try {
+        var prepared = await prepareImage(images[index]);
+        insertImage(prepared.src, prepared.alt);
+        added += 1;
+      } catch (error) {
+        showToast(
+          error && error.message ? error.message : "That image couldn't be added.",
+          true,
+        );
+      }
+    }
+
+    if (added > 0) {
+      notifyEditorChanged();
+      updateEditorPlaceholder();
+      showToast(added === 1 ? "Image added." : added + " images added.");
+    }
+  }
+
+  async function prepareImage(file) {
+    if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) {
+      throw new Error("Use a PNG, JPEG, WebP, or GIF image.");
+    }
+
+    var alt = imageAltFromName(file.name);
+
+    // Small files keep their exact bytes, so photos stay untouched and small
+    // GIFs keep animating. Anything larger is re-encoded to keep documents small.
+    if (file.size <= IMAGE_PASSTHROUGH_BYTES) {
+      return { src: await readImageFile(file), alt: alt };
+    }
+
+    var bitmap;
+    try {
+      bitmap = await decodeImage(file);
+    } catch (error) {
+      throw new Error("That image couldn't be read.");
+    }
+
+    var scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+    var width = Math.max(1, Math.round(bitmap.width * scale));
+    var height = Math.max(1, Math.round(bitmap.height * scale));
+
+    var canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, width, height);
+    if (bitmap.close) {
+      bitmap.close();
+    }
+
+    var src = encodeCanvas(canvas, 0.82);
+
+    if (src.length > IMAGE_MAX_DATA_URL) {
+      var smaller = document.createElement("canvas");
+      smaller.width = Math.max(1, Math.round(width * 0.72));
+      smaller.height = Math.max(1, Math.round(height * 0.72));
+      smaller.getContext("2d").drawImage(canvas, 0, 0, smaller.width, smaller.height);
+      src = encodeCanvas(smaller, 0.7);
+    }
+
+    if (src.length > IMAGE_MAX_DATA_URL) {
+      throw new Error("That image is too large to embed, even after shrinking.");
+    }
+
+    return { src: src, alt: alt };
+  }
+
+  function encodeCanvas(canvas, quality) {
+    var src = canvas.toDataURL("image/webp", quality);
+    if (src.indexOf("data:image/webp") === 0) {
+      return src;
+    }
+    return canvas.toDataURL("image/jpeg", quality);
+  }
+
+  function decodeImage(file) {
+    if (window.createImageBitmap) {
+      return createImageBitmap(file).catch(function () {
+        return decodeImageElement(file);
+      });
+    }
+    return decodeImageElement(file);
+  }
+
+  function decodeImageElement(file) {
+    return new Promise(function (resolve, reject) {
+      var url = URL.createObjectURL(file);
+      var image = new Image();
+      image.onload = function () {
+        URL.revokeObjectURL(url);
+        resolve(image);
+      };
+      image.onerror = function () {
+        URL.revokeObjectURL(url);
+        reject(new Error("That image couldn't be read."));
+      };
+      image.src = url;
+    });
+  }
+
+  function readImageFile(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        if (typeof reader.result === "string" && reader.result.indexOf("data:image/") === 0) {
+          resolve(reader.result);
+        } else {
+          reject(new Error("That image couldn't be read."));
+        }
+      };
+      reader.onerror = function () {
+        reject(new Error("That image couldn't be read."));
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function imageAltFromName(name) {
+    var base = String(name || "")
+      .replace(/\.[^.]+$/, "")
+      .replace(/[_-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return base.slice(0, 160) || "Image";
+  }
+
+  function insertImage(src, alt) {
+    focusEditorForCommand();
+
+    var selection = window.getSelection();
+    var inEditor =
+      selection &&
+      selection.rangeCount > 0 &&
+      els.editor.contains(selection.getRangeAt(0).startContainer);
+    if (!inEditor) {
+      focusEditorAtEnd();
+    }
+
+    var markup =
+      '<img src="' + escapeHtml(src) + '" alt="' + escapeHtml(alt) + '">';
+    var inserted = false;
+    try {
+      inserted = document.execCommand("insertHTML", false, markup);
+    } catch (error) {
+      inserted = false;
+    }
+
+    if (!inserted) {
+      insertImageNode(src, alt);
+    }
+  }
+
+  function insertImageNode(src, alt) {
+    var selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      return;
+    }
+
+    var range = selection.getRangeAt(0);
+    if (!els.editor.contains(range.startContainer)) {
+      return;
+    }
+
+    var image = document.createElement("img");
+    image.src = src;
+    image.alt = alt;
+    range.deleteContents();
+    range.insertNode(image);
+    range.setStartAfter(image);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function handleEditorClick(event) {
+    var target = event.target;
+    if (!target || !target.closest) {
+      return;
+    }
+
+    var image = target.closest("img");
+    if (!image || !els.editor.contains(image)) {
+      closeImageMenu();
+      return;
+    }
+
+    openImageMenu(image);
+  }
+
+  function openImageMenu(image) {
+    activeImage = image;
+    updateImageMenuChecks();
+    els.imageMenu.hidden = false;
+    positionImageMenu(image);
+
+    var current =
+      els.imageMenu.querySelector('[aria-checked="true"]') ||
+      els.imageMenu.querySelector("button");
+    if (current) {
+      current.focus({ preventScroll: true });
+    }
+  }
+
+  function positionImageMenu(image) {
+    var menu = els.imageMenu;
+    var imageRect = image.getBoundingClientRect();
+    var menuRect = menu.getBoundingClientRect();
+    var margin = 12;
+    var gap = 10;
+
+    var left = Math.min(imageRect.right - menuRect.width, window.innerWidth - menuRect.width - margin);
+    left = Math.max(margin, left);
+
+    var top = imageRect.top - menuRect.height - gap;
+    if (top < margin) {
+      top = Math.min(imageRect.bottom + gap, window.innerHeight - menuRect.height - margin);
+      top = Math.max(margin, top);
+    }
+
+    menu.style.left = Math.round(left) + "px";
+    menu.style.top = Math.round(top) + "px";
+  }
+
+  function updateImageMenuChecks() {
+    if (!activeImage) {
+      return;
+    }
+
+    els.imageMenu.querySelectorAll("[data-image-align]").forEach(function (button) {
+      var align = button.dataset.imageAlign;
+      var active =
+        align === "block"
+          ? !activeImage.classList.contains("wrap-left") &&
+            !activeImage.classList.contains("wrap-right")
+          : activeImage.classList.contains("wrap-" + align);
+      button.setAttribute("aria-checked", active ? "true" : "false");
+    });
+  }
+
+  function handleImageMenuClick(event) {
+    var button = event.target.closest("button");
+    if (!button || !activeImage) {
+      return;
+    }
+
+    var image = activeImage;
+
+    if (button.dataset.imageAction === "remove") {
+      removeImage(image);
+      return;
+    }
+
+    var align = button.dataset.imageAlign;
+    image.classList.remove("wrap-left", "wrap-right");
+    if (align === "left" || align === "right") {
+      image.classList.add("wrap-" + align);
+    }
+
+    closeImageMenu();
+    notifyEditorChanged();
+    els.editor.focus({ preventScroll: true });
+  }
+
+  function removeImage(image) {
+    var parent = image.parentNode;
+    var selection = window.getSelection();
+    var range = document.createRange();
+    range.selectNode(image);
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    // Going through the editing command keeps removal on the undo stack.
+    var removed = false;
+    try {
+      removed = document.execCommand("delete", false, null);
+    } catch (error) {
+      removed = false;
+    }
+    if (!removed || image.isConnected) {
+      image.remove();
+    }
+
+    closeImageMenu();
+    notifyEditorChanged();
+    updateEditorPlaceholder();
+
+    if (!parent || !els.editor.contains(parent)) {
+      return;
+    }
+
+    var caret = document.createRange();
+    caret.selectNodeContents(parent);
+    caret.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(caret);
+    state.lastRange = caret.cloneRange();
+    els.editor.focus({ preventScroll: true });
+  }
+
+  function closeImageMenu() {
+    if (els.imageMenu.hidden) {
+      return;
+    }
+    els.imageMenu.hidden = true;
+    activeImage = null;
+  }
+
+  function handleDocumentPointer(event) {
+    if (els.imageMenu.hidden) {
+      return;
+    }
+    if (els.imageMenu.contains(event.target)) {
+      return;
+    }
+    if (event.target.closest && event.target.closest("#editor img")) {
+      return;
+    }
+    closeImageMenu();
+  }
+
+  /* -----------------------------------------------------------------------
      Document menu, export, and delete
      ----------------------------------------------------------------------- */
 
@@ -1078,6 +1379,10 @@
         exportHtml();
         els.documentMenuButton.focus();
         break;
+      case "export-markdown":
+        exportMarkdown();
+        els.documentMenuButton.focus();
+        break;
       case "export-text":
         exportText();
         els.documentMenuButton.focus();
@@ -1114,6 +1419,10 @@
       "pre{padding:16px;background:#f1ece1;border-radius:8px;white-space:pre-wrap;",
       "font-family:ui-monospace,Consolas,monospace;font-size:.8em;}",
       "code{font-family:ui-monospace,Consolas,monospace;font-size:.84em;}",
+      "img{display:block;max-width:100%;height:auto;margin:1.6em auto;border-radius:6px;}",
+      "img.wrap-left{float:left;max-width:46%;margin:.35em 1.35em 0 0;}",
+      "img.wrap-right{float:right;max-width:46%;margin:.35em 0 0 1.35em;}",
+      "h2,h3,h4,blockquote,pre{clear:both;}",
       "a{color:#a83f1d;}footer{margin-top:3em;padding-top:1em;border-top:1px solid #ddd6c8;",
       "color:#8c8b7e;font:12px system-ui,sans-serif;}",
       "</style>",
@@ -1145,6 +1454,262 @@
     var exported = title + "\n\n" + text + (text ? "\n" : "");
     downloadFile(slugify(title) + ".txt", exported, "text/plain;charset=utf-8");
     showToast("Text download started.");
+  }
+
+  /* Markdown comes straight from the editor DOM: the blocks and inline marks
+     the editor can produce become their Markdown equivalents, and anything
+     else keeps its text so the export is always readable. */
+  function exportMarkdown() {
+    if (!state.loaded) {
+      return;
+    }
+
+    var title = normalizeTitle(els.documentTitle.value);
+    var body = markdownBlocks(els.editor).trim();
+    var exported = "# " + title + "\n" + (body ? "\n" + body + "\n" : "");
+    downloadFile(slugify(title) + ".md", exported, "text/markdown;charset=utf-8");
+    showToast("Markdown download started.");
+  }
+
+  /* Consecutive inline nodes belong to the same paragraph, which is how a
+     hand-formatted first line reaches the DOM. */
+  function markdownBlocks(parent) {
+    var blocks = [];
+    var line = "";
+    var children = parent.childNodes;
+
+    function flush() {
+      var text = line.trim();
+      if (text) {
+        blocks.push(text);
+      }
+      line = "";
+    }
+
+    for (var i = 0; i < children.length; i += 1) {
+      var node = children[i];
+      if (!isMarkdownBlock(node)) {
+        line += markdownInline(node);
+        continue;
+      }
+
+      flush();
+      var block = markdownBlock(node);
+      if (block) {
+        blocks.push(block);
+      }
+    }
+
+    flush();
+    return blocks.join("\n\n");
+  }
+
+  function isMarkdownBlock(node) {
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      return false;
+    }
+    var name = node.tagName;
+    return (
+      name === "P" ||
+      name === "DIV" ||
+      name === "BLOCKQUOTE" ||
+      name === "PRE" ||
+      name === "UL" ||
+      name === "OL" ||
+      name === "HR" ||
+      /^H[1-4]$/.test(name)
+    );
+  }
+
+  function markdownBlock(node) {
+    var name = node.tagName;
+    if (name === "UL" || name === "OL") {
+      return markdownList(node, "");
+    }
+    if (name === "PRE") {
+      return "```\n" + node.textContent.replace(/\s+$/, "") + "\n```";
+    }
+    if (name === "BLOCKQUOTE") {
+      return quoteMarkdown(markdownBlocks(node));
+    }
+    if (name === "HR") {
+      return "---";
+    }
+    if (/^H[1-4]$/.test(name)) {
+      return hashes(Number(name.charAt(1))) + " " + markdownInline(node).trim();
+    }
+
+    return markdownInline(node).trim();
+  }
+
+  function quoteMarkdown(text) {
+    var lines = text.split("\n");
+    for (var i = 0; i < lines.length; i += 1) {
+      lines[i] = lines[i] ? "> " + lines[i] : ">";
+    }
+    return lines.join("\n");
+  }
+
+  function hashes(level) {
+    var marks = "";
+    for (var i = 0; i < level; i += 1) {
+      marks += "#";
+    }
+    return marks;
+  }
+
+  function markdownList(list, indent) {
+    var ordered = list.tagName === "OL";
+    var lines = [];
+    var number = 1;
+    var items = list.children;
+
+    for (var i = 0; i < items.length; i += 1) {
+      var item = items[i];
+      if (item.tagName !== "LI") {
+        continue;
+      }
+
+      var marker = "- ";
+      if (ordered) {
+        marker = number + ". ";
+        number += 1;
+      }
+
+      var text = "";
+      var nested = [];
+      var children = item.childNodes;
+
+      for (var j = 0; j < children.length; j += 1) {
+        var child = children[j];
+        var isList = child.nodeType === Node.ELEMENT_NODE && (child.tagName === "UL" || child.tagName === "OL");
+        if (isList) {
+          nested.push(child);
+        } else {
+          text += markdownInline(child);
+        }
+      }
+
+      var content = text.replace(/\s+/g, " ").trim();
+      lines.push(indent + (content ? marker + content : marker.trim()));
+
+      for (var k = 0; k < nested.length; k += 1) {
+        lines.push(markdownList(nested[k], indent + spaces(marker.length)));
+      }
+    }
+
+    return lines.join("\n");
+  }
+
+  function spaces(count) {
+    var pad = "";
+    for (var i = 0; i < count; i += 1) {
+      pad += " ";
+    }
+    return pad;
+  }
+
+  function markdownInline(node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return escapeMarkdown(node.nodeValue);
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      return "";
+    }
+
+    var name = node.tagName;
+    if (name === "BR") {
+      return "  \n";
+    }
+    if (name === "IMG") {
+      return markdownImage(node);
+    }
+
+    var inner = markdownChildren(node);
+    if (!inner) {
+      return "";
+    }
+
+    if (name === "STRONG" || name === "B") {
+      return wrapMark(inner, "**");
+    }
+    if (name === "EM" || name === "I") {
+      return wrapMark(inner, "*");
+    }
+    if (name === "S" || name === "STRIKE" || name === "DEL") {
+      return wrapMark(inner, "~~");
+    }
+    if (name === "U") {
+      return wrapMark(inner, "<u>", "</u>");
+    }
+    if (name === "CODE") {
+      return inlineCode(node.textContent);
+    }
+    if (name === "A") {
+      return markdownLink(node, inner);
+    }
+
+    return inner;
+  }
+
+  function markdownChildren(node) {
+    var text = "";
+    var children = node.childNodes;
+
+    for (var i = 0; i < children.length; i += 1) {
+      text += markdownInline(children[i]);
+    }
+
+    return text;
+  }
+
+  function wrapMark(inner, open, close) {
+    var leading = /^\s*/.exec(inner)[0];
+    var trailing = /\s*$/.exec(inner)[0];
+    var core = inner.slice(leading.length, inner.length - trailing.length);
+
+    if (!core) {
+      return inner;
+    }
+
+    return leading + open + core + (close === undefined ? open : close) + trailing;
+  }
+
+  function inlineCode(text) {
+    var code = String(text).replace(/\s+/g, " ").trim();
+    if (!code) {
+      return "";
+    }
+    if (code.indexOf("`") === -1) {
+      return "`" + code + "`";
+    }
+    return "`` " + code + " ``";
+  }
+
+  function markdownLink(node, inner) {
+    var href = node.getAttribute("href");
+    if (!href) {
+      return inner;
+    }
+
+    var label = inner.trim() || href;
+    var target = /[\s()<>]/.test(href) ? "<" + href + ">" : href;
+    return "[" + label + "](" + target + ")";
+  }
+
+  function markdownImage(node) {
+    var src = node.getAttribute("src");
+    if (!src) {
+      return "";
+    }
+
+    var alt = String(node.getAttribute("alt") || "").replace(/\s+/g, " ").trim();
+    var target = /[\s()<>]/.test(src) ? "<" + src + ">" : src;
+    return "![" + alt + "](" + target + ")";
+  }
+
+  function escapeMarkdown(value) {
+    return String(value).replace(/([\\`*_[\]])/g, "\\$1");
   }
 
   function slugify(value) {
@@ -1246,6 +1811,12 @@
 
   function handleGlobalKeydown(event) {
     if (event.key === "Escape") {
+      if (!els.imageMenu.hidden) {
+        event.preventDefault();
+        closeImageMenu();
+        els.editor.focus({ preventScroll: true });
+        return;
+      }
       if (!els.documentMenu.hidden) {
         event.preventDefault();
         closeDocumentMenu(true);
@@ -1287,12 +1858,19 @@
       return;
     }
 
-    event.preventDefault();
     var clipboard = event.clipboardData;
+    var images = clipboardImages(clipboard);
+    if (images.length) {
+      event.preventDefault();
+      addImages(images);
+      return;
+    }
+
+    event.preventDefault();
     var plainText = clipboard ? clipboard.getData("text/plain") : "";
     if (!plainText) {
       if (clipboard && clipboard.files && clipboard.files.length > 0) {
-        showToast("Images and files aren't supported yet — text only for now.");
+        showToast("Only image files can be pasted into a document.", true);
       }
       return;
     }
@@ -1306,7 +1884,6 @@
 
     if (inserted) {
       notifyEditorChanged();
-      updateWordStats();
       updateEditorPlaceholder();
     }
   }
@@ -1315,8 +1892,44 @@
     if (!state.loaded) {
       return;
     }
+
     event.preventDefault();
-    showToast("Drag and drop isn't supported yet. Paste your text instead.");
+
+    var images = imageFilesFrom(event.dataTransfer && event.dataTransfer.files);
+    if (!images.length) {
+      showToast("Only image files can be dropped into a document.", true);
+      return;
+    }
+
+    var range = dropRange(event.clientX, event.clientY);
+    if (range) {
+      var selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      state.lastRange = range.cloneRange();
+    }
+
+    addImages(images);
+  }
+
+  function dropRange(x, y) {
+    var range = null;
+    try {
+      if (document.caretRangeFromPoint) {
+        range = document.caretRangeFromPoint(x, y);
+      } else if (document.caretPositionFromPoint) {
+        var position = document.caretPositionFromPoint(x, y);
+        if (position) {
+          range = document.createRange();
+          range.setStart(position.offsetNode, position.offset);
+          range.collapse(true);
+        }
+      }
+    } catch (error) {
+      range = null;
+    }
+
+    return range && els.editor.contains(range.startContainer) ? range : null;
   }
 
   /* -----------------------------------------------------------------------

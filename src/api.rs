@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::assets;
 use crate::store::{Document, DocumentSummary, SharedStore, StoreError};
 
-const BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+const BODY_LIMIT_BYTES: usize = 24 * 1024 * 1024;
 const CSP: &str = concat!(
     "default-src 'self'; ",
     "script-src 'self'; ",
