@@ -239,7 +239,7 @@
       els.emptyText.hidden = false;
       els.emptyActions.hidden = false;
     } else {
-      els.emptyTitle.textContent = "Your library is a blank page";
+      els.emptyTitle.textContent = "No documents yet";
       els.emptyText.hidden = true;
       els.emptyActions.hidden = true;
     }
