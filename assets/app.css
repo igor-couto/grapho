@@ -505,7 +505,6 @@ html[data-theme="dark"] .button-primary:hover {
 .library {
   padding-top: 32px;
   padding-bottom: 62px;
-  border-top: 1px solid var(--line);
 }
 
 

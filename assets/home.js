@@ -47,7 +47,7 @@
     els.emptyState = document.getElementById("emptyState");
     els.emptyTitle = document.getElementById("emptyTitle");
     els.emptyText = document.getElementById("emptyText");
-    els.emptyNewDocument = document.getElementById("emptyNewDocument");
+    els.emptyActions = document.getElementById("emptyActions");
     els.emptyClearSearch = document.getElementById("emptyClearSearch");
     els.newDocument = document.getElementById("newDocument");
     els.cardTemplate = document.getElementById("documentCardTemplate");
@@ -68,7 +68,6 @@
 
   function bindStaticEvents() {
     els.newDocument.addEventListener("click", createDocument);
-    els.emptyNewDocument.addEventListener("click", createDocument);
 
     els.searchDocuments.addEventListener("input", function () {
       state.query = els.searchDocuments.value.trim();
@@ -237,14 +236,12 @@
       els.emptyTitle.textContent = "Nothing matches that search";
       els.emptyText.textContent =
         "Try a different word, or clear the search to see everything.";
-      els.emptyNewDocument.hidden = true;
-      els.emptyClearSearch.hidden = false;
+      els.emptyText.hidden = false;
+      els.emptyActions.hidden = false;
     } else {
       els.emptyTitle.textContent = "Your library is a blank page";
-      els.emptyText.textContent =
-        "Make a home for the thing you've been meaning to write.";
-      els.emptyNewDocument.hidden = false;
-      els.emptyClearSearch.hidden = true;
+      els.emptyText.hidden = true;
+      els.emptyActions.hidden = true;
     }
   }
 
@@ -373,11 +370,6 @@
 
   function setCreatingState(isCreating) {
     els.newDocument.disabled = isCreating;
-    els.emptyNewDocument.disabled = isCreating;
-    els.newDocument.classList.toggle("is-busy", isCreating);
-    els.emptyNewDocument.textContent = isCreating
-      ? "Opening…"
-      : "Create your first document";
   }
 
   function openRenameDialog(document) {
