@@ -6,7 +6,7 @@
   <title>Grapho</title>
   <meta name="description" content="A calm, local-first document editor. No accounts, no clutter. Just a page when you need one.">
   <meta name="theme-color" content="#f3efe6">
-  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.ico">
   <link rel="preload" href="/assets/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/assets/fonts/literata-latin.woff2" as="font" type="font/woff2" crossorigin>
   <script src="/assets/theme.js"></script>
@@ -18,8 +18,6 @@
 
   <header class="site-header">
     <div class="shell site-header-inner home-header-row">
-      <span class="home-header-spacer" aria-hidden="true"></span>
-
       <label class="search-box">
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <circle cx="10.8" cy="10.8" r="6.3" stroke="currentColor" stroke-width="1.7"/>
@@ -28,16 +26,6 @@
         <input id="searchDocuments" type="search" placeholder="Search documents" autocomplete="off" spellcheck="false" aria-label="Search documents">
         <kbd aria-hidden="true">/</kbd>
       </label>
-
-      <button class="icon-button theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme">
-        <svg class="icon icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <circle cx="12" cy="12" r="3.5" stroke="currentColor" stroke-width="1.7"/>
-          <path d="M12 2.8v2M12 19.2v2M21.2 12h-2M4.8 12h-2M18.5 5.5l-1.4 1.4M6.9 17.1l-1.4 1.4M18.5 18.5l-1.4-1.4M6.9 6.9 5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-        </svg>
-        <svg class="icon icon-moon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path d="M20 14.4A8.2 8.2 0 0 1 9.6 4a8.2 8.2 0 1 0 10.4 10.4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
-        </svg>
-      </button>
     </div>
   </header>
 
@@ -82,6 +70,21 @@
               <button class="menu-item" type="button" role="menuitemradio" aria-checked="true" data-sort="modified">Last modified</button>
               <button class="menu-item" type="button" role="menuitemradio" aria-checked="false" data-sort="created">Date created</button>
               <button class="menu-item" type="button" role="menuitemradio" aria-checked="false" data-sort="title">Title</button>
+              <div class="menu-rule" role="separator"></div>
+              <p class="popover-label" id="themeLabel">Theme</p>
+              <div class="theme-choice" role="group" aria-labelledby="themeLabel">
+                <button class="theme-choice-button" type="button" role="menuitemradio" aria-checked="true" data-theme-choice="light" aria-label="Light">
+                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <circle cx="12" cy="12" r="3.5" stroke="currentColor" stroke-width="1.7"/>
+                    <path d="M12 2.8v2M12 19.2v2M21.2 12h-2M4.8 12h-2M18.5 5.5l-1.4 1.4M6.9 17.1l-1.4 1.4M18.5 18.5l-1.4-1.4M6.9 6.9 5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+                  </svg>
+                </button>
+                <button class="theme-choice-button" type="button" role="menuitemradio" aria-checked="false" data-theme-choice="dark" aria-label="Dark">
+                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M20 14.4A8.2 8.2 0 0 1 9.6 4a8.2 8.2 0 1 0 10.4 10.4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+              </div>
             </div>
           </div>
         </div>

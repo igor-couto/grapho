@@ -6,12 +6,12 @@
   <title>Document — Grapho</title>
   <meta name="description" content="Write in Grapho, a quiet local-first document editor.">
   <meta name="theme-color" content="#f3efe6">
-  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.ico">
   <link rel="preload" href="/assets/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/assets/fonts/literata-latin.woff2" as="font" type="font/woff2" crossorigin>
   <script src="/assets/theme.js"></script>
   <link rel="stylesheet" href="/assets/app.css">
-  <script src="/assets/editor.js" defer></script>
+  <script type="module" src="/assets/editor.js"></script>
 </head>
 <body class="editor-page">
   <a class="skip-link" href="#editor">Skip to writing</a>
@@ -75,7 +75,7 @@
           <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5" stroke="currentColor" stroke-width="1.7"/><circle cx="8.6" cy="9.2" r="1.5" stroke="currentColor" stroke-width="1.5"/><path d="m5 16.8 4.6-4.2 2.9 2.6 2.9-2.5 3.6 4.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
         <button class="toolbar-button" type="button" data-command="removeFormat" title="Clear formatting" aria-label="Clear formatting" disabled>
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 17 8.8-11.2M9.4 5.8h6.8M4 5.8h7.2M14.5 13l5 6M19.5 13l-5 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><g transform="translate(0.192 -1.256) scale(0.5105)"><path d="M8.567,11.605c-0.337,-0.336 -0.794,-0.526 -1.27,-0.526c-0.477,0 -0.933,0.19 -1.27,0.526c0,0.001 0,0.001 0,0.001c-0.337,0.336 -0.526,0.793 -0.526,1.27c0,0.476 0.189,0.933 0.526,1.269c3.438,3.439 12.67,12.671 12.67,12.671c0,0 -1.855,4.326 -3.292,7.676c-0.365,0.852 -0.278,1.83 0.232,2.604c0.51,0.774 1.375,1.24 2.302,1.24c0,0 0,0 0,0c1.103,0 2.1,-0.657 2.534,-1.671c0.927,-2.16 2.424,-5.649 2.424,-5.649c0,0 7.093,7.093 10.05,10.05c0.337,0.336 0.793,0.526 1.27,0.526c0.476,0 0.933,-0.19 1.27,-0.526c0,0 0,0 0,-0.001c0.337,-0.336 0.526,-0.793 0.526,-1.269c0,-0.477 -0.189,-0.934 -0.526,-1.27c-4.838,-4.838 -22.083,-22.083 -26.92,-26.921Zm9.83,4.731l-5.64,-5.64c0,0 0,0 0,0c0,-0.199 0.161,-0.36 0.36,-0.36c2.554,0 18.022,0 24.64,0c1.657,0 3,1.343 3,3c0,0.795 -0.316,1.558 -0.879,2.121c-0.562,0.562 -1.326,0.879 -2.121,0.879c-3.431,0 -8.58,0 -8.58,0l-3.22,7.56l-4.2,-4.2l1.44,-3.36l-4.8,0Z" fill="currentColor" fill-rule="evenodd"/></g></svg>
         </button>
       </div>
     </div>
@@ -84,16 +84,6 @@
       <button class="save-status" type="button" id="saveStatus" title="Save failed. Click to retry." aria-label="Save failed. Click to retry." aria-live="polite" hidden disabled>
         <span class="save-dot" aria-hidden="true"></span>
         <span>Save failed</span>
-      </button>
-
-      <button class="icon-button theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme">
-        <svg class="icon icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <circle cx="12" cy="12" r="3.5" stroke="currentColor" stroke-width="1.7"/>
-          <path d="M12 2.8v2M12 19.2v2M21.2 12h-2M4.8 12h-2M18.5 5.5l-1.4 1.4M6.9 17.1l-1.4 1.4M18.5 18.5l-1.4-1.4M6.9 6.9 5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-        </svg>
-        <svg class="icon icon-moon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path d="M20 14.4A8.2 8.2 0 0 1 9.6 4a8.2 8.2 0 1 0 10.4 10.4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
-        </svg>
       </button>
 
       <div class="menu-wrap">
@@ -105,19 +95,34 @@
           </svg>
         </button>
         <div class="popover-menu document-menu" id="documentMenu" role="menu" hidden>
-          <p class="popover-label">Document</p>
+          <p class="popover-label">Download</p>
           <button class="menu-item" type="button" role="menuitem" data-doc-action="export-html">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v12M7.5 10.5 12 15l4.5-4.5M5 16.5V20h14v-3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            Download as HTML
+            HTML
           </button>
           <button class="menu-item" type="button" role="menuitem" data-doc-action="export-markdown">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3.5 17.5v-11L8 13l4.5-6.5v11" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M18.4 6.5v10.8m0 0-2.4-2.4m2.4 2.4 2.4-2.4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            Download as Markdown
+            Markdown
           </button>
           <button class="menu-item" type="button" role="menuitem" data-doc-action="export-text">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 4h8l4 4v12H6V4Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 4v4h4M9 12h6M9 16h4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-            Download as plain text
+            Plain Text
           </button>
+          <div class="menu-rule" role="separator"></div>
+          <p class="popover-label" id="themeLabel">Theme</p>
+          <div class="theme-choice" role="group" aria-labelledby="themeLabel">
+            <button class="theme-choice-button" type="button" role="menuitemradio" aria-checked="true" data-theme-choice="light" aria-label="Light">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <circle cx="12" cy="12" r="3.5" stroke="currentColor" stroke-width="1.7"/>
+                <path d="M12 2.8v2M12 19.2v2M21.2 12h-2M4.8 12h-2M18.5 5.5l-1.4 1.4M6.9 17.1l-1.4 1.4M18.5 18.5l-1.4-1.4M6.9 6.9 5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <button class="theme-choice-button" type="button" role="menuitemradio" aria-checked="false" data-theme-choice="dark" aria-label="Dark">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M20 14.4A8.2 8.2 0 0 1 9.6 4a8.2 8.2 0 1 0 10.4 10.4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
           <div class="menu-rule" role="separator"></div>
           <button class="menu-item menu-item-danger" type="button" role="menuitem" data-doc-action="delete">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 7h14M9 7V4.8h6V7M7 7l.8 12.2h8.4L17 7M10 11v4.5M14 11v4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -135,7 +140,13 @@
           <input class="document-title" id="documentTitle" type="text" placeholder="Untitled document" maxlength="200" autocomplete="off" spellcheck="false" aria-label="Document title" disabled>
         </header>
 
-        <div class="prose" id="editor" contenteditable="false" role="textbox" aria-multiline="true" aria-label="Document content" spellcheck="true" data-placeholder="Start writing…" data-empty="true"></div>
+        <div class="prose" id="editor" role="textbox" aria-multiline="true" aria-label="Document content" data-placeholder="Start writing…" data-empty="true">
+          <div class="doc-content"></div>
+          <div class="doc-overlay" aria-hidden="true">
+            <div class="doc-caret"></div>
+          </div>
+          <textarea class="doc-input" id="docInput" aria-hidden="true" tabindex="-1" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+        </div>
 
         <div class="load-error" id="loadError" hidden>
           <span class="load-error-mark" aria-hidden="true">404</span>
@@ -154,6 +165,7 @@
     <button class="menu-item" type="button" role="menuitemradio" data-image-align="block" aria-checked="true">Block</button>
     <button class="menu-item" type="button" role="menuitemradio" data-image-align="left" aria-checked="false">Wrap left</button>
     <button class="menu-item" type="button" role="menuitemradio" data-image-align="right" aria-checked="false">Wrap right</button>
+    <button class="menu-item" type="button" role="menuitem" data-image-action="original" hidden>Original size</button>
     <div class="menu-rule" role="separator"></div>
     <button class="menu-item menu-item-danger" type="button" role="menuitem" data-image-action="remove">Remove image</button>
   </div>

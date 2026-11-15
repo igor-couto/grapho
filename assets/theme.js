@@ -27,6 +27,13 @@
     var next = theme === "dark" ? "light" : "dark";
     var label = "Switch to " + next + " theme";
 
+    document.querySelectorAll("[data-theme-choice]").forEach(function (button) {
+      button.setAttribute(
+        "aria-checked",
+        button.getAttribute("data-theme-choice") === theme ? "true" : "false",
+      );
+    });
+
     document.querySelectorAll("[data-theme-toggle]").forEach(function (button) {
       button.setAttribute("aria-label", label);
       button.setAttribute("title", label);
@@ -53,6 +60,12 @@
 
   document.addEventListener("DOMContentLoaded", function () {
     syncControls();
+
+    document.querySelectorAll("[data-theme-choice]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        applyTheme(button.getAttribute("data-theme-choice"), true);
+      });
+    });
 
     document.querySelectorAll("[data-theme-toggle]").forEach(function (button) {
       button.addEventListener("click", function () {

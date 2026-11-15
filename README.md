@@ -5,8 +5,9 @@ no database, account system, or frontend build step. Documents are plain JSON
 files on disk.
 
 The home screen lists and searches documents. The editor has the formatting I use
-most, holds images, saves as you type, and can export to HTML, Markdown, or plain
-text. Light and dark themes are included.
+most, holds images that can be dragged into the text so the words flow around
+them and resized from their corners, saves as you type, and can export to HTML,
+Markdown, or plain text. Light and dark themes are included.
 
 ## Running
 
@@ -97,7 +98,10 @@ cargo fmt --all -- --check
 ```
 
 No frontend build is required; the HTML, CSS, and JavaScript are embedded into
-the binary. See [AGENTS.md](AGENTS.md) for the architecture, security details,
+the binary. The editor lays out its own lines with a vendored copy of
+[pretext](https://github.com/chenglou/pretext) (MIT, `assets/pretext/`), so text
+can flow around images instead of relying on CSS floats. See
+[AGENTS.md](AGENTS.md) for the architecture, security details,
 and working notes.
 
 ## Current limits

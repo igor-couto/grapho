@@ -1,0 +1,576 @@
+// The document model: blocks of inline runs, plus HTML conversion.
+//
+// Blocks are immutable-by-convention. Editing helpers return new block objects
+// only for the blocks they touch, so unchanged blocks keep their identity and
+// stay in the layout cache.
+
+const INLINE_TAGS = new Set(["a", "b", "code", "del", "em", "i", "s", "span", "strike", "strong", "u"]);
+const BLOCK_TAGS = new Set(["blockquote", "div", "h1", "h2", "h3", "h4", "p", "pre", "ul", "ol"]);
+const HEADING_LEVELS = { h1: 1, h2: 2, h3: 3, h4: 4 };
+const LIST_DEPTH_LIMIT = 6;
+
+export const MARK_KEYS = ["b", "i", "u", "s", "code"];
+
+let nextBlockId = 1;
+
+export function createBlockId() {
+  return "b" + nextBlockId++;
+}
+
+export function createBlock(type, runs) {
+  return { id: createBlockId(), type: type || "p", runs: normalizeRuns(runs || []) };
+}
+
+export function emptyParagraph() {
+  return createBlock("p", []);
+}
+
+export function isListBlock(block) {
+  return block.type === "list";
+}
+
+export function blockLength(block) {
+  if (block.type === "image") {
+    return 0;
+  }
+  let length = 0;
+  for (const run of block.runs) {
+    length += run.text.length;
+  }
+  return length;
+}
+
+export function blockText(block) {
+  if (block.type === "image") {
+    return "";
+  }
+  return block.runs.map((run) => run.text).join("");
+}
+
+export function runsEqual(a, b) {
+  return (
+    Boolean(a.b) === Boolean(b.b) &&
+    Boolean(a.i) === Boolean(b.i) &&
+    Boolean(a.u) === Boolean(b.u) &&
+    Boolean(a.s) === Boolean(b.s) &&
+    Boolean(a.code) === Boolean(b.code) &&
+    (a.href || "") === (b.href || "")
+  );
+}
+
+export function normalizeRuns(runs) {
+  const merged = [];
+  for (const run of runs) {
+    if (!run || !run.text) {
+      continue;
+    }
+    const text = String(run.text);
+    if (!text) {
+      continue;
+    }
+    const previous = merged[merged.length - 1];
+    if (previous && runsEqual(previous, run)) {
+      merged[merged.length - 1] = { ...previous, text: previous.text + text };
+    } else {
+      merged.push({ ...run, text });
+    }
+  }
+  return merged;
+}
+
+// Split a block's runs at a flat offset, returning both halves' runs.
+export function splitRuns(runs, offset) {
+  const left = [];
+  const right = [];
+  let index = 0;
+
+  for (const run of runs) {
+    const end = index + run.text.length;
+    if (offset <= index) {
+      right.push(run);
+    } else if (offset >= end) {
+      left.push(run);
+    } else {
+      const cut = offset - index;
+      left.push({ ...run, text: run.text.slice(0, cut) });
+      right.push({ ...run, text: run.text.slice(cut) });
+    }
+    index = end;
+  }
+
+  return { left: normalizeRuns(left), right: normalizeRuns(right) };
+}
+
+export function runsInRange(block, start, end) {
+  if (block.type === "image") {
+    return [];
+  }
+  const runs = [];
+  let index = 0;
+  for (const run of block.runs) {
+    const runEnd = index + run.text.length;
+    const from = Math.max(start, index);
+    const to = Math.min(end, runEnd);
+    if (to > from) {
+      runs.push({ ...run, text: run.text.slice(from - index, to - index) });
+    }
+    index = runEnd;
+  }
+  return normalizeRuns(runs);
+}
+
+export function marksAt(block, offset) {
+  if (!block || block.type === "image" || !block.runs.length) {
+    return {};
+  }
+  let index = 0;
+  for (const run of block.runs) {
+    const end = index + run.text.length;
+    if (offset < end || (offset === end && end === blockLength(block))) {
+      return markSet(run);
+    }
+    index = end;
+  }
+  return markSet(block.runs[block.runs.length - 1]);
+}
+
+export function markSet(run) {
+  return {
+    b: Boolean(run.b),
+    i: Boolean(run.i),
+    u: Boolean(run.u),
+    s: Boolean(run.s),
+    code: Boolean(run.code),
+    href: run.href || "",
+  };
+}
+
+export function insertTextIntoRuns(runs, offset, text, marks) {
+  const { left, right } = splitRuns(runs, offset);
+  const inserted = normalizeRuns([{ text, ...marks }]);
+  return normalizeRuns([...left, ...inserted, ...right]);
+}
+
+export function removeRangeFromRuns(runs, start, end) {
+  const { left } = splitRuns(runs, start);
+  const { right } = splitRuns(runs, end);
+  return normalizeRuns([...left, ...right]);
+}
+
+export function setMarkOnRuns(runs, start, end, key, value) {
+  const { left: head, right: rest } = splitRuns(runs, start);
+  const { left: middle, right: tail } = splitRuns(rest, end - start);
+  const updated = middle.map((run) => {
+    const next = { ...run };
+    if (value) {
+      next[key] = true;
+    } else {
+      delete next[key];
+    }
+    return next;
+  });
+  return normalizeRuns([...head, ...updated, ...tail]);
+}
+
+export function setHrefOnRuns(runs, start, end, href) {
+  const { left: head, right: rest } = splitRuns(runs, start);
+  const { left: middle, right: tail } = splitRuns(rest, end - start);
+  const updated = middle.map((run) => {
+    const next = { ...run };
+    if (href) {
+      next.href = href;
+    } else {
+      delete next.href;
+    }
+    return next;
+  });
+  return normalizeRuns([...head, ...updated, ...tail]);
+}
+
+export function splitBlock(block, offset) {
+  if (block.type === "image") {
+    return [block, emptyParagraph()];
+  }
+  const { left, right } = splitRuns(block.runs, offset);
+  const first = { ...block, id: createBlockId(), runs: left };
+  const second = { ...block, id: createBlockId(), runs: right };
+  return [first, second];
+}
+
+export function mergeBlocks(first, second) {
+  if (first.type === "image" || second.type === "image") {
+    return first;
+  }
+  const runs = normalizeRuns([...first.runs, ...second.runs]);
+  return { ...first, id: createBlockId(), runs };
+}
+
+/* --------------------------------------------------------------------------
+   HTML in and out
+   -------------------------------------------------------------------------- */
+
+export function parseDocument(html) {
+  const source = String(html || "").trim();
+  if (!source) {
+    return [emptyParagraph()];
+  }
+
+  const doc = new DOMParser().parseFromString(
+    "<!doctype html><html><body>" + source + "</body></html>",
+    "text/html",
+  );
+  const blocks = [];
+  parseChildren(doc.body, blocks, "p", {});
+  if (!blocks.length) {
+    blocks.push(emptyParagraph());
+  }
+  return blocks;
+}
+
+function parseChildren(parent, out, fallbackType, marks) {
+  let pending = [];
+  const flush = () => {
+    if (pending.length) {
+      out.push(createBlock(fallbackType, pending));
+      pending = [];
+    }
+  };
+
+  for (const node of Array.from(parent.childNodes)) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = cleanText(node.nodeValue);
+      if (text) {
+        pending.push({ text, ...marks });
+      }
+      continue;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      continue;
+    }
+
+    const tag = node.tagName.toLowerCase();
+    if (tag === "img") {
+      flush();
+      out.push(imageBlockFrom(node));
+      continue;
+    }
+    if (tag === "br") {
+      pending.push({ text: "\n", ...marks });
+      continue;
+    }
+    if (INLINE_TAGS.has(tag)) {
+      pending = pending.concat(inlineRuns(node, marks));
+      continue;
+    }
+    if (tag === "hr") {
+      continue;
+    }
+    if (!BLOCK_TAGS.has(tag)) {
+      pending = pending.concat(inlineRuns(node, marks));
+      continue;
+    }
+
+    flush();
+    parseBlockElement(node, tag, out, marks);
+  }
+
+  flush();
+}
+
+function parseBlockElement(node, tag, out, marks) {
+  if (HEADING_LEVELS[tag]) {
+    parseChildren(node, out, "h" + HEADING_LEVELS[tag], marks);
+    return;
+  }
+  if (tag === "p" || tag === "div") {
+    parseChildren(node, out, "p", marks);
+    return;
+  }
+  if (tag === "pre") {
+    out.push({ id: createBlockId(), type: "code", runs: [{ text: node.textContent.replace(/\r\n/g, "\n") }] });
+    return;
+  }
+  if (tag === "blockquote") {
+    const inner = [];
+    parseChildren(node, inner, "p", marks);
+    const runs = [];
+    inner.forEach((block, index) => {
+      if (index > 0) {
+        runs.push({ text: "\n" });
+      }
+      if (block.runs) {
+        runs.push(...block.runs);
+      }
+    });
+    out.push({ id: createBlockId(), type: "quote", runs: normalizeRuns(runs) });
+    return;
+  }
+  if (tag === "ul" || tag === "ol") {
+    parseList(node, tag === "ol", 0, out, marks);
+  }
+}
+
+function parseList(list, ordered, depth, out, marks) {
+  for (const item of Array.from(list.children)) {
+    if (item.tagName.toLowerCase() !== "li") {
+      continue;
+    }
+    const runs = [];
+    const nested = [];
+    for (const child of Array.from(item.childNodes)) {
+      if (child.nodeType === Node.ELEMENT_NODE) {
+        const tag = child.tagName.toLowerCase();
+        if (tag === "ul" || tag === "ol") {
+          nested.push({ node: child, ordered: tag === "ol" });
+          continue;
+        }
+        if (tag === "p" || tag === "div") {
+          runs.push(...runsFromContainer(child, marks));
+          continue;
+        }
+      }
+      runs.push(...runsFromNode(child, marks));
+    }
+    out.push({
+      id: createBlockId(),
+      type: "list",
+      ordered,
+      depth: Math.min(depth, LIST_DEPTH_LIMIT),
+      runs: normalizeRuns(runs),
+    });
+    for (const child of nested) {
+      parseList(child.node, child.ordered, depth + 1, out, marks);
+    }
+  }
+}
+
+function runsFromContainer(node, marks) {
+  const runs = [];
+  for (const child of Array.from(node.childNodes)) {
+    runs.push(...runsFromNode(child, marks));
+  }
+  return runs;
+}
+
+function runsFromNode(node, marks) {
+  if (node.nodeType === Node.TEXT_NODE) {
+    const text = cleanText(node.nodeValue);
+    return text ? [{ text, ...marks }] : [];
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) {
+    return [];
+  }
+  const tag = node.tagName.toLowerCase();
+  if (tag === "br") {
+    return [{ text: "\n", ...marks }];
+  }
+  if (tag === "img") {
+    return [];
+  }
+  if (INLINE_TAGS.has(tag) || tag === "p" || tag === "div") {
+    return inlineRuns(node, marks);
+  }
+  return [];
+}
+
+function inlineRuns(node, marks) {
+  const tag = node.tagName.toLowerCase();
+  const next = { ...marks };
+  if (tag === "b" || tag === "strong") {
+    next.b = true;
+  } else if (tag === "i" || tag === "em") {
+    next.i = true;
+  } else if (tag === "u") {
+    next.u = true;
+  } else if (tag === "s" || tag === "strike" || tag === "del") {
+    next.s = true;
+  } else if (tag === "code") {
+    next.code = true;
+  } else if (tag === "a") {
+    const href = node.getAttribute("href");
+    if (href) {
+      next.href = href;
+    }
+  }
+
+  const runs = [];
+  for (const child of Array.from(node.childNodes)) {
+    runs.push(...runsFromNode(child, next));
+  }
+  return runs;
+}
+
+function imageBlockFrom(node) {
+  const className = node.getAttribute("class") || "";
+  const hasPosition = node.hasAttribute("data-x") || node.hasAttribute("data-y");
+  const mode = /\bfree\b/.test(className) || hasPosition
+    ? "free"
+    : /wrap-left/.test(className)
+      ? "left"
+      : /wrap-right/.test(className)
+        ? "right"
+        : "block";
+  return {
+    id: createBlockId(),
+    type: "image",
+    mode,
+    x: signedNumberOr(node.getAttribute("data-x"), null),
+    y: signedNumberOr(node.getAttribute("data-y"), null),
+    src: node.getAttribute("src") || "",
+    alt: node.getAttribute("alt") || "",
+    width: numberOr(node.getAttribute("width"), 0),
+    height: numberOr(node.getAttribute("height"), 0),
+    displayWidth: numberOr(node.getAttribute("data-width"), null),
+  };
+}
+
+function numberOr(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function signedNumberOr(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function cleanText(value) {
+  return String(value || "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+}
+
+export function serializeDocument(blocks) {
+  let html = "";
+  let index = 0;
+
+  while (index < blocks.length) {
+    const block = blocks[index];
+    if (block.type === "list") {
+      const ordered = Boolean(block.ordered);
+      const items = [];
+      while (index < blocks.length && blocks[index].type === "list" && Boolean(blocks[index].ordered) === ordered) {
+        items.push(blocks[index]);
+        index += 1;
+      }
+      html += serializeList(items, 0, 0, ordered).html;
+      continue;
+    }
+    html += serializeBlock(block);
+    index += 1;
+  }
+
+  return html;
+}
+
+function serializeList(items, startIndex, depth, ordered) {
+  const tag = ordered ? "ol" : "ul";
+  let html = "<" + tag + ">";
+  let index = startIndex;
+
+  while (index < items.length) {
+    const item = items[index];
+    if (item.depth !== depth) {
+      break;
+    }
+    index += 1;
+    html += "<li>" + serializeRuns(item.runs, { allowBreaks: true });
+    while (index < items.length && items[index].depth > depth) {
+      const nested = serializeList(items, index, depth + 1, ordered);
+      html += nested.html;
+      index = nested.next;
+    }
+    html += "</li>";
+  }
+
+  html += "</" + tag + ">";
+  return { html, next: index };
+}
+
+function serializeBlock(block) {
+  if (block.type === "image") {
+    const classes =
+      block.mode === "left"
+        ? ' class="wrap-left"'
+        : block.mode === "right"
+          ? ' class="wrap-right"'
+          : block.mode === "free"
+            ? ' class="free"'
+            : "";
+    const alt = block.alt ? ' alt="' + escapeAttribute(block.alt) + '"' : "";
+    const width = block.width ? ' width="' + Math.round(block.width) + '"' : "";
+    const height = block.height ? ' height="' + Math.round(block.height) + '"' : "";
+    const x = block.mode === "free" && Number.isFinite(block.x) ? ' data-x="' + Math.round(block.x) + '"' : "";
+    const y = block.mode === "free" && Number.isFinite(block.y) ? ' data-y="' + Math.round(block.y) + '"' : "";
+    const displayWidth = Number.isFinite(block.displayWidth) ? ' data-width="' + Math.round(block.displayWidth) + '"' : "";
+    return (
+      "<img" +
+      classes +
+      alt +
+      width +
+      height +
+      displayWidth +
+      x +
+      y +
+      ' src="' +
+      escapeAttribute(block.src) +
+      '">'
+    );
+  }
+  if (block.type === "code") {
+    return "<pre>" + escapeText(blockText(block)) + "</pre>";
+  }
+
+  const inner = serializeRuns(block.runs, { allowBreaks: true });
+  if (block.type === "quote") {
+    return "<blockquote><p>" + inner + "</p></blockquote>";
+  }
+  if (block.type === "h1" || block.type === "h2" || block.type === "h3" || block.type === "h4") {
+    return "<" + block.type + ">" + inner + "</" + block.type + ">";
+  }
+  if (block.type === "list") {
+    const tag = block.ordered ? "ol" : "ul";
+    return "<" + tag + "><li>" + inner + "</li></" + tag + ">";
+  }
+  return "<p>" + inner + "</p>";
+}
+
+export function serializeRuns(runs, options) {
+  const allowBreaks = options && options.allowBreaks;
+  let html = "";
+
+  for (const run of runs) {
+    const text = allowBreaks ? run.text.replace(/\n/g, "<br>") : run.text;
+    let inner = escapeText(text);
+    if (run.code) {
+      inner = "<code>" + inner + "</code>";
+    }
+    if (run.s) {
+      inner = "<s>" + inner + "</s>";
+    }
+    if (run.u) {
+      inner = "<u>" + inner + "</u>";
+    }
+    if (run.i) {
+      inner = "<i>" + inner + "</i>";
+    }
+    if (run.b) {
+      inner = "<b>" + inner + "</b>";
+    }
+    if (run.href) {
+      inner = '<a href="' + escapeAttribute(run.href) + '">' + inner + "</a>";
+    }
+    html += inner;
+  }
+
+  return html;
+}
+
+export function escapeText(value) {
+  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function escapeAttribute(value) {
+  return escapeText(value).replace(/"/g, "&quot;");
+}

@@ -34,7 +34,7 @@ starting point for every feature the app could have.
 ### Clean UI
 
 - Start from the existing visual system in `assets/app.css`: warm paper, dark ink,
-  one rust accent, Literata for writing, Inter for controls. Extend it; do not add
+  one blue accent, Literata for writing, Inter for controls. Extend it; do not add
   a second design language.
 - No feature bloat. The home screen and editor should stay focused. Avoid adding
   dashboards, template galleries, onboarding tours, settings pages, extra side
@@ -65,13 +65,15 @@ starting point for every feature the app could have.
 ## Code map
 
 ```text
-src/main.rs     configuration, startup, graceful shutdown
-src/api.rs      routes, static assets, security headers, same-origin check
-src/store.rs    document model, JSON persistence, HTML sanitization
-src/assets.rs   embedded HTML/CSS/JS/font lookup
-assets/         browser UI; no build step
-assets/fonts/   bundled Inter/Literata files and their licenses
-Cross.toml      cross-rs target images
+src/main.rs       configuration, startup, graceful shutdown
+src/api.rs        routes, static assets, security headers, same-origin check
+src/store.rs      document model, JSON persistence, HTML sanitization
+src/assets.rs     embedded HTML/CSS/JS/font lookup
+assets/           browser UI; no build step
+assets/doc/       the editor: model, layout, view, and input
+assets/pretext/   vendored text layout engine (MIT); do not edit
+assets/fonts/     bundled Inter/Literata files and their licenses
+Cross.toml        cross-rs target images
 ```
 
 Data flow is deliberately simple:
@@ -83,6 +85,43 @@ Data flow is deliberately simple:
 4. Documents use a simple versioned JSON format. Add `#[serde(default)]` when
    extending it, and preserve existing files.
 
+## Editor architecture
+
+The editor does not use `contenteditable`. `assets/doc/input.js` owns the block
+model and the selection, `layout.js` turns blocks into positioned lines with
+pretext, and `view.js` paints those lines plus the caret and selection.
+`model.js` converts the block model to and from the stored HTML, which is
+unchanged.
+
+- Every line comes from `prepare`/`layoutNextLineRange` or
+  `prepareRichInline`/`layoutNextRichInlineLineRange`. Do not reintroduce browser
+  text wrapping inside the document.
+- Typography lives twice: the font, size, and line-height constants in
+  `layout.js` are what pretext measures, and the matching `.doc-line` classes in
+  `app.css` paint them. Change both together, or carets and selections drift.
+- Images are blocks. `mode: "left" | "right"` floats one over the following lines
+  by narrowing them; `mode: "block"` centres it with its own vertical space;
+  `mode: "free"` places it at `x` (from the column's left) and `y` (from the top
+  of the document's content), stored as `class="free" data-x data-y`. Lines that
+  meet an image narrow to its emptier side, clear it when neither side is usable,
+  and clear all images that meet a line at once. Code blocks wrap their lines the
+  same way. If several wrapped images keep moving each other's anchors, the last
+  pass pins them in place, so no line can end up beneath an image.
+- Dragging writes the new absolute position directly; arrow keys move a selected
+  image by 4 px (24 with Shift). A selected image shows four corner handles;
+  dragging one keeps the opposite corner fixed, preserves the aspect ratio, and
+  stores the rendered width as `data-width` (the natural `width`/`height` stay).
+  Holding Alt scales around the image's centre instead. Resizing turns the image
+  free, so the text reflows beside it.
+- Edits go through `DocEditor.commit()`, which snapshots undo state, re-lays out,
+  and repaints. Do not mutate `blocks` in place.
+- The hidden `<textarea>` only captures keystrokes, IME, and clipboard events; its
+  value is cleared after every event.
+- Known gaps: no native spellcheck, screen readers get the painted text but not a
+  text-editing surface, printing the editor prints the painted page, image
+  resizing needs a pointer, and HTML or Markdown exports put free-positioned
+  images back into the text flow.
+
 ## Invariants
 
 These should not be casually changed:
@@ -92,9 +131,11 @@ These should not be casually changed:
 - Images are embedded in that HTML as base64 data URLs. The sanitizer accepts only
   PNG, JPEG, WebP, and GIF data URLs on `img src`, never remote URLs: opening a
   document must not touch the network.
-- Formatting must produce semantic tags (`<b>`, `<i>`, `<u>`, headings, lists),
-  never inline styles. The Content-Security-Policy forbids inline styles; do not
-  turn on `styleWithCSS`.
+- Formatting is stored as semantic tags (`<b>`, `<i>`, `<u>`, headings, lists),
+  never inline styles. The Content-Security-Policy forbids inline styles.
+- The stored HTML is the interchange format between the editor and older
+  documents. `parseDocument`/`serializeDocument` must round-trip it; test with
+  documents written by earlier versions.
 - Rich HTML paste is reduced to plain text on purpose. Image files are the one
   exception; keep it that way unless the user asks for sanitized paste support.
 - The CSP, frame denial, no-referrer policy, and same-origin mutation check are

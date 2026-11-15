@@ -304,6 +304,11 @@ pub fn sanitize_content(html: &str) -> String {
     image_attributes.insert("src");
     image_attributes.insert("alt");
     image_attributes.insert("class");
+    image_attributes.insert("width");
+    image_attributes.insert("height");
+    image_attributes.insert("data-x");
+    image_attributes.insert("data-y");
+    image_attributes.insert("data-width");
 
     let tag_attributes = HashMap::from([("a", link_attributes), ("img", image_attributes)]);
 
@@ -322,7 +327,7 @@ pub fn sanitize_content(html: &str) -> String {
             ("img", "class") => {
                 let kept: Vec<&str> = value
                     .split_whitespace()
-                    .filter(|name| matches!(*name, "wrap-left" | "wrap-right"))
+                    .filter(|name| matches!(*name, "wrap-left" | "wrap-right" | "free"))
                     .collect();
                 if kept.is_empty() {
                     None
@@ -331,6 +336,27 @@ pub fn sanitize_content(html: &str) -> String {
                 }
             }
             ("a", "href") if value.to_ascii_lowercase().starts_with("data:") => None,
+            ("img", "width") | ("img", "height") => {
+                let numeric = !value.is_empty()
+                    && value.len() <= 5
+                    && value.chars().all(|digit| digit.is_ascii_digit())
+                    && value != "0";
+                numeric.then_some(Cow::Borrowed(value))
+            }
+            ("img", "data-x") | ("img", "data-y") => {
+                let digits = value.strip_prefix('-').unwrap_or(value);
+                let numeric = !digits.is_empty()
+                    && digits.len() <= 5
+                    && digits.chars().all(|digit| digit.is_ascii_digit());
+                numeric.then_some(Cow::Borrowed(value))
+            }
+            ("img", "data-width") => {
+                let numeric = !value.is_empty()
+                    && value.len() <= 5
+                    && value.chars().all(|digit| digit.is_ascii_digit())
+                    && value != "0";
+                numeric.then_some(Cow::Borrowed(value))
+            }
             _ => Some(Cow::Borrowed(value)),
         })
         .clean(html)
@@ -527,23 +553,35 @@ mod tests {
         let dirty = format!(
             concat!(
                 "<p>Before</p>",
-                "<p><img src=\"{}\" alt=\"A pixel\"></p>",
+                "<p><img src=\"{}\" alt=\"A pixel\" width=\"640\" height=\"480\"></p>",
                 "<p><img src=\"data:image/svg+xml;base64,PHN2Zz4=\" alt=\"svg\"></p>",
                 "<p><img src=\"data:text/html;base64,PHNjcmlwdD4=\" alt=\"html\"></p>",
                 "<p><img src=\"https://example.com/tracker.png\" alt=\"remote\"></p>",
-                "<p><img src=\"{}\" onerror=\"steal()\"></p>"
+                "<p><img src=\"{}\" width=\"../../../etc\" onerror=\"steal()\"></p>",
+                "<p><img src=\"{}\" class=\"free wrap-left\" data-x=\"120\" data-y=\"-40\" data-width=\"420\"></p>",
+                "<p><img src=\"{}\" class=\"free\" data-x=\"nope\" data-y=\"12;script\" data-width=\"0\"></p>"
             ),
-            pixel, pixel
+            pixel, pixel, pixel, pixel
         );
         let clean = sanitize_content(&dirty);
 
         assert!(clean.contains("Before"));
         assert!(clean.contains(pixel));
         assert!(clean.contains("alt=\"A pixel\""));
+        assert!(clean.contains("width=\"640\""));
+        assert!(clean.contains("height=\"480\""));
+        assert!(clean.contains("data-x=\"120\""));
+        assert!(clean.contains("data-y=\"-40\""));
+        assert!(clean.contains("data-width=\"420\""));
+        assert!(clean.contains("class=\"free wrap-left\""));
+        assert!(!clean.contains("data-x=\"nope\""));
+        assert!(!clean.contains("data-width=\"0\""));
+        assert!(!clean.contains("script"));
         assert!(!clean.contains("data:image/svg+xml"));
         assert!(!clean.contains("data:text/html"));
         assert!(!clean.contains("example.com"));
         assert!(!clean.contains("onerror"));
+        assert!(!clean.contains("../../../etc"));
     }
 
     #[test]

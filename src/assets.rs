@@ -25,8 +25,12 @@ pub fn find(path: &str) -> Option<Asset> {
             bytes: include_bytes!("../assets/editor.js"),
             content_type: "text/javascript; charset=utf-8",
         },
+        "doc/input.js" => script(include_bytes!("../assets/doc/input.js")),
+        "doc/layout.js" => script(include_bytes!("../assets/doc/layout.js")),
+        "doc/model.js" => script(include_bytes!("../assets/doc/model.js")),
+        "doc/view.js" => script(include_bytes!("../assets/doc/view.js")),
         "favicon.svg" => Asset {
-            bytes: include_bytes!("../assets/favicon.svg"),
+            bytes: include_bytes!("../assets/favicon.ico"),
             content_type: "image/svg+xml",
         },
         "fonts/inter-latin.woff2" => Asset {
@@ -41,8 +45,36 @@ pub fn find(path: &str) -> Option<Asset> {
             bytes: include_bytes!("../assets/fonts/literata-italic-latin.woff2"),
             content_type: "font/woff2",
         },
+        // Pretext, the text measurement and line layout engine. Vendored from
+        // @chenglou/pretext 1.0.0 (MIT); see assets/pretext/LICENSE.txt.
+        "pretext/analysis.js" => script(include_bytes!("../assets/pretext/analysis.js")),
+        "pretext/gecko-line-breaks.js" => {
+            script(include_bytes!("../assets/pretext/gecko-line-breaks.js"))
+        }
+        "pretext/graphemes.js" => script(include_bytes!("../assets/pretext/graphemes.js")),
+        "pretext/han-kerning.js" => script(include_bytes!("../assets/pretext/han-kerning.js")),
+        "pretext/layout.js" => script(include_bytes!("../assets/pretext/layout.js")),
+        "pretext/line-break.js" => script(include_bytes!("../assets/pretext/line-break.js")),
+        "pretext/line-breaks.js" => script(include_bytes!("../assets/pretext/line-breaks.js")),
+        "pretext/line-text.js" => script(include_bytes!("../assets/pretext/line-text.js")),
+        "pretext/measurement.js" => script(include_bytes!("../assets/pretext/measurement.js")),
+        "pretext/prepare.js" => script(include_bytes!("../assets/pretext/prepare.js")),
+        "pretext/rich-inline.js" => script(include_bytes!("../assets/pretext/rich-inline.js")),
+        "pretext/generated/engine-break-data.js" => script(include_bytes!(
+            "../assets/pretext/generated/engine-break-data.js"
+        )),
+        "pretext/generated/webkit-generic-families.js" => script(include_bytes!(
+            "../assets/pretext/generated/webkit-generic-families.js"
+        )),
         _ => return None,
     };
 
     Some(asset)
+}
+
+fn script(bytes: &'static [u8]) -> Asset {
+    Asset {
+        bytes,
+        content_type: "text/javascript; charset=utf-8",
+    }
 }
