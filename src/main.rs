@@ -14,6 +14,10 @@ use crate::store::Store;
 
 type BoxError = Box<dyn Error + Send + Sync>;
 
+// The port spells "BLANK" on a phone keypad and is unassigned, so it is
+// unlikely to collide with a local development server.
+const DEFAULT_ADDR: &str = "127.0.0.1:25265";
+
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
@@ -50,7 +54,7 @@ struct Config {
 
 impl Config {
     fn from_env() -> Result<Self, BoxError> {
-        let raw_address = env::var("GRAPHO_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
+        let raw_address = env::var("GRAPHO_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_owned());
         let address = raw_address.parse::<SocketAddr>().map_err(|error| {
             format!("GRAPHO_ADDR is not a valid socket address ({raw_address:?}): {error}")
         })?;
@@ -112,12 +116,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_address_is_valid() {
+        assert!(DEFAULT_ADDR.parse::<SocketAddr>().is_ok());
+    }
+
+    #[test]
     fn local_url_is_readable_for_wildcard_binds() {
         assert_eq!(
-            local_url("0.0.0.0:3000".parse().unwrap()),
-            "http://127.0.0.1:3000"
+            local_url("0.0.0.0:25265".parse().unwrap()),
+            "http://127.0.0.1:25265"
         );
-        assert_eq!(local_url("[::]:3000".parse().unwrap()), "http://[::1]:3000");
+        assert_eq!(
+            local_url("[::]:25265".parse().unwrap()),
+            "http://[::1]:25265"
+        );
         assert_eq!(
             local_url("127.0.0.1:4000".parse().unwrap()),
             "http://127.0.0.1:4000"

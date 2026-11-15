@@ -19,7 +19,7 @@ cd grapho
 cargo run --release
 ```
 
-Open http://127.0.0.1:3000. The first run creates a `data/` directory in the
+Open http://127.0.0.1:25265. The first run creates a `data/` directory in the
 project root. The compiled binary is `target/release/grapho` (`grapho.exe` on
 Windows); it can be copied elsewhere and run on its own.
 
@@ -30,16 +30,19 @@ Useful shortcuts: `Ctrl+S` saves now, `Ctrl+K` adds a link, `Ctrl+B` / `Ctrl+I` 
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `GRAPHO_ADDR` | `127.0.0.1:3000` | Address and port to listen on. |
+| `GRAPHO_ADDR` | `127.0.0.1:25265` | Address and port to listen on. |
 | `GRAPHO_DATA_DIR` | `data` | Directory for document JSON files. |
+
+The default port is 25265 (it spells `BLANK` on a phone keypad), chosen so it is
+unlikely to collide with another local server.
 
 For example, to use Grapho from other devices on your network:
 
 ```bash
-GRAPHO_ADDR=0.0.0.0:3000 cargo run --release
+GRAPHO_ADDR=0.0.0.0:25265 cargo run --release
 ```
 
-On PowerShell, run `$env:GRAPHO_ADDR = "0.0.0.0:3000"` first.
+On PowerShell, run `$env:GRAPHO_ADDR = "0.0.0.0:25265"` first.
 
 There is no built-in login or TLS. Keep it on a trusted network, or put a VPN or
 an authenticating reverse proxy in front of it. If you use a proxy, preserve the

@@ -349,7 +349,7 @@ mod tests {
         let mut builder = Request::builder()
             .method("POST")
             .uri("/api/documents")
-            .header(header::HOST, "127.0.0.1:3000");
+            .header(header::HOST, "127.0.0.1:25265");
         if let Some(origin) = origin {
             builder = builder.header(header::ORIGIN, origin);
         }
@@ -360,7 +360,7 @@ mod tests {
     fn same_origin_mutations_are_allowed() {
         assert!(is_same_origin(&mutation_with_origin(None)));
         assert!(is_same_origin(&mutation_with_origin(Some(
-            "http://127.0.0.1:3000"
+            "http://127.0.0.1:25265"
         ))));
     }
 

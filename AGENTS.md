@@ -151,8 +151,9 @@ On a Windows GNU toolchain, make sure MinGW's `bin` directory (with `dlltool.exe
 and `ld.exe`) is on `PATH`. With the MSVC toolchain, install the Visual Studio C++
 build tools.
 
-The default server address is `127.0.0.1:3000`. Do not start a second server on
-that port while one is running.
+The default server address is `127.0.0.1:25265`. The port spells `BLANK` on a
+phone keypad and is unassigned, so it should not collide with common dev servers.
+Do not start a second server on that port while one is running.
 
 ## Housekeeping
 
