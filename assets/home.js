@@ -40,7 +40,6 @@
 
   function init() {
     els.documentsGrid = document.getElementById("documentsGrid");
-    els.documentCount = document.getElementById("documentCount");
     els.searchDocuments = document.getElementById("searchDocuments");
     els.libraryMessage = document.getElementById("libraryMessage");
     els.libraryMessageText = document.getElementById("libraryMessageText");
@@ -186,7 +185,6 @@
     els.documentsGrid.replaceChildren();
     els.documentsGrid.hidden = true;
     els.emptyState.hidden = true;
-    els.documentCount.textContent = "";
     els.libraryMessage.hidden = false;
     els.libraryMessageText.textContent =
       error && error.userMessage
@@ -207,8 +205,6 @@
         document.excerpt.toLocaleLowerCase().includes(query)
       );
     });
-
-    updateCount(visible.length);
 
     if (state.documents.length === 0) {
       els.documentsGrid.replaceChildren();
@@ -232,29 +228,6 @@
       fragment.appendChild(createDocumentCard(document));
     });
     els.documentsGrid.replaceChildren(fragment);
-  }
-
-  function updateCount(visibleCount) {
-    if (state.documents.length === 0) {
-      els.documentCount.textContent = "";
-      return;
-    }
-
-    if (state.query) {
-      els.documentCount.textContent = visibleCount + " of " + state.documents.length;
-      els.documentCount.setAttribute(
-        "aria-label",
-        visibleCount + " of " + state.documents.length + " documents shown",
-      );
-    } else {
-      els.documentCount.textContent = String(state.documents.length);
-      els.documentCount.setAttribute(
-        "aria-label",
-        state.documents.length === 1
-          ? "1 document"
-          : state.documents.length + " documents",
-      );
-    }
   }
 
   function showEmptyState(isSearchEmpty) {

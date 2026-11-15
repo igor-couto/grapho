@@ -22,84 +22,41 @@
   </div>
 
   <header class="site-header">
-    <div class="shell site-header-inner">
-      <a class="brand" href="/" aria-label="Grapho home">
-        <span class="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 32 32" fill="none">
-            <rect width="32" height="32" rx="9" fill="var(--brand-tile)"/>
-            <path d="M10 8.5h8.8L23 12.7v10.8H10V8.5Z" fill="var(--brand-page)"/>
-            <path d="M18.8 8.5v4.2H23" stroke="var(--brand-tile)" stroke-width="1.6" stroke-linejoin="round"/>
-            <path d="M13.4 17.4h6.2M13.4 20.5h4.2" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"/>
-          </svg>
-        </span>
-        <span class="brand-word">grapho<span class="brand-dot">.</span></span>
-      </a>
+    <div class="shell site-header-inner home-header-row">
+      <span class="home-header-spacer" aria-hidden="true"></span>
 
-      <div class="header-actions">
-        <span class="local-badge" title="Everything is stored on this machine.">
-          <span class="status-dot" aria-hidden="true"></span>
-          Local-first
-        </span>
-        <button class="icon-button theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme">
-          <svg class="icon icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <circle cx="12" cy="12" r="3.5" stroke="currentColor" stroke-width="1.7"/>
-            <path d="M12 2.8v2M12 19.2v2M21.2 12h-2M4.8 12h-2M18.5 5.5l-1.4 1.4M6.9 17.1l-1.4 1.4M18.5 18.5l-1.4-1.4M6.9 6.9 5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-          </svg>
-          <svg class="icon icon-moon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path d="M20 14.4A8.2 8.2 0 0 1 9.6 4a8.2 8.2 0 1 0 10.4 10.4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
-          </svg>
-        </button>
-      </div>
+      <label class="search-box">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle cx="10.8" cy="10.8" r="6.3" stroke="currentColor" stroke-width="1.7"/>
+          <path d="m15.5 15.5 4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        </svg>
+        <input id="searchDocuments" type="search" placeholder="Search documents" autocomplete="off" spellcheck="false" aria-label="Search documents">
+        <kbd aria-hidden="true">/</kbd>
+      </label>
+
+      <button class="icon-button theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme">
+        <svg class="icon icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle cx="12" cy="12" r="3.5" stroke="currentColor" stroke-width="1.7"/>
+          <path d="M12 2.8v2M12 19.2v2M21.2 12h-2M4.8 12h-2M18.5 5.5l-1.4 1.4M6.9 17.1l-1.4 1.4M18.5 18.5l-1.4-1.4M6.9 6.9 5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        </svg>
+        <svg class="icon icon-moon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M20 14.4A8.2 8.2 0 0 1 9.6 4a8.2 8.2 0 1 0 10.4 10.4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+        </svg>
+      </button>
     </div>
   </header>
 
-  <main>
-    <section class="hero shell" aria-labelledby="hero-title">
-      <div class="hero-copy">
-        <p class="eyebrow"><span class="eyebrow-line" aria-hidden="true"></span>A quieter place to write</p>
-        <h1 id="hero-title">The page,<br><em>minus the noise.</em></h1>
-        <p class="hero-lede">A clear, local-first home for your drafts, notes, and loose thoughts. It does a few things — and tries to do them well.</p>
-      </div>
-
-      <button class="new-document-card" type="button" id="newDocument">
-        <span class="new-document-texture" aria-hidden="true"></span>
-        <span class="new-document-top">
-          <span class="new-document-plus" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none">
-              <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-            </svg>
-          </span>
-          <span class="new-document-arrow" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none">
-              <path d="M7 17 17 7M9 7h8v8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </span>
-        </span>
-        <span class="new-document-copy">
-          <span class="new-document-title">New document</span>
-          <span class="new-document-subtitle">Blank page. Zero distractions.</span>
-        </span>
+  <main class="home-main">
+    <div class="new-document-wrap shell">
+      <button class="new-document-button" type="button" id="newDocument">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        <span>New Document</span>
       </button>
-    </section>
+    </div>
 
-    <section class="library shell" id="library" aria-labelledby="library-title">
-      <div class="library-heading">
-        <div>
-          <p class="section-kicker">Your collection</p>
-          <h2 id="library-title">Library<span class="library-count" id="documentCount"></span></h2>
-        </div>
-
-        <div class="library-tools">
-          <label class="search-box">
-            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <circle cx="10.8" cy="10.8" r="6.3" stroke="currentColor" stroke-width="1.7"/>
-              <path d="m15.5 15.5 4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-            </svg>
-            <input id="searchDocuments" type="search" placeholder="Search documents" autocomplete="off" spellcheck="false" aria-label="Search documents">
-            <kbd aria-hidden="true">/</kbd>
-          </label>
-        </div>
-      </div>
+    <section class="library shell" id="library" aria-label="Documents">
 
       <div class="library-message" id="libraryMessage" role="status" aria-live="polite" hidden>
         <span id="libraryMessageText"></span>
@@ -149,11 +106,6 @@
       </div>
     </section>
   </main>
-
-  <footer class="site-footer shell">
-    <span>Grapho <span class="footer-dot" aria-hidden="true">·</span> built for one writer at a time</span>
-    <span>Your words stay on your machine.</span>
-  </footer>
 
   <template id="documentCardTemplate">
     <article class="document-card">
