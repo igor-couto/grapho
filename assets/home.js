@@ -4,11 +4,23 @@
   var state = {
     documents: [],
     query: "",
+    view: "list",
+    sort: "modified",
     creating: false,
     busy: false,
     pending: null,
     returnFocus: null,
     toastTimer: null,
+  };
+
+  var VIEW_KEY = "grapho-library-view";
+  var SORT_KEY = "grapho-library-sort";
+  var VIEWS = ["list", "grid"];
+  var SORTS = ["modified", "created", "title"];
+  var SORT_LABELS = {
+    modified: "last modified",
+    created: "date created",
+    title: "title",
   };
 
   var dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
@@ -35,15 +47,24 @@
     '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m4 20 4.2-1L19 8.2 15.8 5 5 15.8 4 20Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="m13.8 7 3.2 3.2" stroke="currentColor" stroke-width="1.6"/></svg>';
   var ICON_DELETE =
     '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 7h14M9 7V4.8h6V7M7 7l.8 12.2h8.4L17 7M10 11v4.5M14 11v4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  var ICON_GRID =
+    '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3.6" y="3.6" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6"/><rect x="13.4" y="3.6" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6"/><rect x="3.6" y="13.4" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6"/><rect x="13.4" y="13.4" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6"/></svg>';
+  var ICON_LIST =
+    '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="4.8" cy="6.5" r="1.2" fill="currentColor"/><circle cx="4.8" cy="12" r="1.2" fill="currentColor"/><circle cx="4.8" cy="17.5" r="1.2" fill="currentColor"/><path d="M9 6.5h11M9 12h11M9 17.5h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
 
   document.addEventListener("DOMContentLoaded", init);
 
   function init() {
-    els.documentsGrid = document.getElementById("documentsGrid");
+    els.documents = document.getElementById("documents");
     els.searchDocuments = document.getElementById("searchDocuments");
     els.libraryMessage = document.getElementById("libraryMessage");
     els.libraryMessageText = document.getElementById("libraryMessageText");
     els.retryLoad = document.getElementById("retryLoad");
+    els.libraryToolbar = document.getElementById("libraryToolbar");
+    els.sortColumnLabel = document.getElementById("sortColumnLabel");
+    els.viewToggle = document.getElementById("viewToggle");
+    els.sortButton = document.getElementById("sortButton");
+    els.sortMenu = document.getElementById("sortMenu");
     els.emptyState = document.getElementById("emptyState");
     els.emptyTitle = document.getElementById("emptyTitle");
     els.emptyText = document.getElementById("emptyText");
@@ -62,8 +83,29 @@
     els.actionConfirm = document.getElementById("actionConfirm");
     els.toast = document.getElementById("toast");
 
+    state.view = storedChoice(VIEW_KEY, VIEWS, "list");
+    state.sort = storedChoice(SORT_KEY, SORTS, "modified");
+    applyView();
+    syncSortMenu();
     bindStaticEvents();
     loadDocuments();
+  }
+
+  function storedChoice(key, allowed, fallback) {
+    try {
+      var value = window.localStorage.getItem(key);
+      return allowed.indexOf(value) === -1 ? fallback : value;
+    } catch (error) {
+      return fallback;
+    }
+  }
+
+  function rememberChoice(key, value) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch (error) {
+      // A blocked storage area should never break the library controls.
+    }
   }
 
   function bindStaticEvents() {
@@ -86,6 +128,23 @@
     els.emptyClearSearch.addEventListener("click", clearSearch);
     els.retryLoad.addEventListener("click", function () {
       loadDocuments();
+    });
+
+    els.viewToggle.addEventListener("click", toggleView);
+
+    els.sortButton.addEventListener("click", function () {
+      if (els.sortMenu.hidden) {
+        openSortMenu();
+      } else {
+        closeSortMenu();
+      }
+    });
+
+    els.sortMenu.addEventListener("click", function (event) {
+      var option = event.target.closest("[data-sort]");
+      if (option) {
+        chooseSort(option.getAttribute("data-sort"));
+      }
     });
 
     els.actionCancel.addEventListener("click", closeActionDialog);
@@ -115,6 +174,9 @@
       if (!event.target.closest(".card-menu-wrap")) {
         closeCardMenus();
       }
+      if (!event.target.closest(".menu-wrap")) {
+        closeSortMenu();
+      }
     });
 
     document.addEventListener("keydown", function (event) {
@@ -127,6 +189,12 @@
           if (trigger) {
             trigger.focus();
           }
+          return;
+        }
+
+        if (!els.sortMenu.hidden) {
+          closeSortMenu();
+          els.sortButton.focus();
         }
         return;
       }
@@ -161,7 +229,7 @@
     }
 
     state.busy = true;
-    els.documentsGrid.setAttribute("aria-busy", "true");
+    els.documents.setAttribute("aria-busy", "true");
     els.libraryMessage.hidden = true;
     els.retryLoad.hidden = true;
     els.retryLoad.disabled = true;
@@ -170,19 +238,21 @@
     try {
       var payload = await request("/api/documents");
       state.documents = Array.isArray(payload.documents) ? payload.documents : [];
+      applySort();
       renderDocuments();
     } catch (error) {
       showLoadError(error);
     } finally {
       state.busy = false;
-      els.documentsGrid.setAttribute("aria-busy", "false");
+      els.documents.setAttribute("aria-busy", "false");
       els.searchDocuments.disabled = false;
     }
   }
 
   function showLoadError(error) {
-    els.documentsGrid.replaceChildren();
-    els.documentsGrid.hidden = true;
+    els.documents.replaceChildren();
+    els.documents.hidden = true;
+    els.libraryToolbar.hidden = true;
     els.emptyState.hidden = true;
     els.libraryMessage.hidden = false;
     els.libraryMessageText.textContent =
@@ -205,28 +275,30 @@
       );
     });
 
+    els.libraryToolbar.hidden = state.documents.length === 0;
+
     if (state.documents.length === 0) {
-      els.documentsGrid.replaceChildren();
-      els.documentsGrid.hidden = true;
+      els.documents.replaceChildren();
+      els.documents.hidden = true;
       showEmptyState(false);
       return;
     }
 
     if (visible.length === 0) {
-      els.documentsGrid.replaceChildren();
-      els.documentsGrid.hidden = true;
+      els.documents.replaceChildren();
+      els.documents.hidden = true;
       showEmptyState(true);
       return;
     }
 
     els.emptyState.hidden = true;
-    els.documentsGrid.hidden = false;
+    els.documents.hidden = false;
 
     var fragment = document.createDocumentFragment();
     visible.forEach(function (document) {
       fragment.appendChild(createDocumentCard(document));
     });
-    els.documentsGrid.replaceChildren(fragment);
+    els.documents.replaceChildren(fragment);
   }
 
   function showEmptyState(isSearchEmpty) {
@@ -273,11 +345,15 @@
       excerpt.classList.add("is-empty");
     }
 
-    var fullDate = dateTimeFormatter.format(new Date(document.updated_at));
-    edited.textContent = "Edited " + relativeTime(document.updated_at);
-    edited.title = fullDate;
+    var updated = new Date(document.updated_at);
+    var fullDate = dateTimeFormatter.format(updated);
+    edited.textContent =
+      state.view === "grid"
+        ? "Edited " + relativeTime(document.updated_at)
+        : dateFormatter.format(updated);
+    edited.title = "Edited " + fullDate;
     words.textContent = formatWords(document.word_count);
-    words.title = fullDate;
+    words.title = "Edited " + fullDate;
 
     openItem.href = link.href;
 
@@ -464,7 +540,7 @@
             updated_at: updated.updated_at,
           };
         });
-        state.documents.sort(compareDocuments);
+        applySort();
         renderDocuments();
         state.returnFocus = null;
         closeActionDialog();
@@ -498,7 +574,7 @@
 
   function focusCard(id) {
     window.requestAnimationFrame(function () {
-      var card = els.documentsGrid.querySelector(
+      var card = els.documents.querySelector(
         '[data-document-id="' + id + '"]',
       );
       var link = card && card.querySelector(".document-card-link");
@@ -509,14 +585,93 @@
   }
 
   function cardMenuButton(id) {
-    var card = els.documentsGrid.querySelector(
+    var card = els.documents.querySelector(
       '[data-document-id="' + id + '"]',
     );
     return card ? card.querySelector(".card-menu-button") : null;
   }
 
+  function applySort() {
+    state.documents.sort(compareDocuments);
+  }
+
   function compareDocuments(left, right) {
-    return right.updated_at - left.updated_at || left.title.localeCompare(right.title);
+    if (state.sort === "title") {
+      return (
+        left.title.localeCompare(right.title) ||
+        right.updated_at - left.updated_at
+      );
+    }
+
+    if (state.sort === "created") {
+      return (
+        right.created_at - left.created_at ||
+        left.title.localeCompare(right.title)
+      );
+    }
+
+    return (
+      right.updated_at - left.updated_at || left.title.localeCompare(right.title)
+    );
+  }
+
+  function toggleView() {
+    state.view = state.view === "grid" ? "list" : "grid";
+    rememberChoice(VIEW_KEY, state.view);
+    applyView();
+    renderDocuments();
+  }
+
+  function applyView() {
+    var isGrid = state.view === "grid";
+    els.documents.classList.toggle("is-grid", isGrid);
+    els.documents.classList.toggle("is-list", !isGrid);
+    els.sortColumnLabel.hidden = isGrid;
+
+    var label = isGrid ? "Switch to list view" : "Switch to grid view";
+    els.viewToggle.innerHTML = isGrid ? ICON_LIST : ICON_GRID;
+    els.viewToggle.setAttribute("aria-label", label);
+    els.viewToggle.setAttribute("title", label);
+  }
+
+  function openSortMenu() {
+    closeCardMenus();
+    els.sortMenu.hidden = false;
+    els.sortButton.setAttribute("aria-expanded", "true");
+  }
+
+  function closeSortMenu() {
+    if (els.sortMenu.hidden) {
+      return;
+    }
+    els.sortMenu.hidden = true;
+    els.sortButton.setAttribute("aria-expanded", "false");
+  }
+
+  function chooseSort(sort) {
+    closeSortMenu();
+    els.sortButton.focus();
+    if (state.sort === sort) {
+      return;
+    }
+    state.sort = sort;
+    rememberChoice(SORT_KEY, sort);
+    syncSortMenu();
+    applySort();
+    renderDocuments();
+  }
+
+  function syncSortMenu() {
+    els.sortMenu.querySelectorAll("[data-sort]").forEach(function (option) {
+      option.setAttribute(
+        "aria-checked",
+        option.getAttribute("data-sort") === state.sort ? "true" : "false",
+      );
+    });
+
+    var label = "Sort by " + SORT_LABELS[state.sort];
+    els.sortButton.setAttribute("aria-label", label);
+    els.sortButton.setAttribute("title", label);
   }
 
   function clearSearch() {

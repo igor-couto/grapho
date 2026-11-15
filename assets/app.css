@@ -550,7 +550,42 @@ html[data-theme="dark"] .button-primary:hover {
   font-size: 13px;
 }
 
-.document-grid {
+.library-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-bottom: 2px;
+}
+
+.library-column-label {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: 0.005em;
+}
+
+.library-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.library-toolbar .icon-button {
+  width: 34px;
+  height: 34px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.library-toolbar .icon-button:hover,
+.library-toolbar .icon-button[aria-expanded="true"] {
+  border-color: transparent;
+  background: var(--bg-deep);
+  color: var(--ink);
+}
+
+.documents.is-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 17px;
@@ -789,6 +824,17 @@ html[data-theme="dark"] .button-primary:hover {
   text-transform: uppercase;
 }
 
+.library-sort-menu {
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 190px;
+}
+
+.library-sort-menu .menu-item[aria-checked="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 .document-card-skeleton {
   display: flex;
   min-height: 222px;
@@ -832,6 +878,153 @@ html[data-theme="dark"] .button-primary:hover {
   width: 39%;
   height: 9px;
   margin-top: auto;
+}
+
+/* List view: a file listing, one row per document. The same card markup as the
+   grid, laid out flat. */
+
+.documents.is-list .document-card {
+  position: relative;
+  min-height: 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.documents.is-list .document-card::before {
+  position: absolute;
+  inset: 3px -12px;
+  border-radius: 10px;
+  background: var(--surface);
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms ease;
+}
+
+.documents.is-list .document-card:hover,
+.documents.is-list .document-card:focus-within {
+  z-index: 2;
+  border-color: var(--line);
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
+.documents.is-list .document-card:hover::before,
+.documents.is-list .document-card:focus-within::before {
+  opacity: 1;
+}
+
+/* A row stays above its neighbours while its menu is open. */
+.documents.is-list .document-card:has(.card-menu-button[aria-expanded="true"]) {
+  z-index: 2;
+}
+
+.documents.is-list .document-card-link {
+  position: relative;
+  z-index: 1;
+  min-height: 0;
+  flex-direction: row;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 40px 11px 10px;
+  border-radius: 10px;
+}
+
+.documents.is-list .document-glyph {
+  width: 30px;
+  height: 30px;
+  margin-bottom: 0;
+  border: 0;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--accent);
+}
+
+.documents.is-list .document-glyph svg {
+  width: 18px;
+  height: 18px;
+}
+
+.documents.is-list .document-copy {
+  flex-direction: row;
+  align-items: center;
+  gap: 18px;
+}
+
+.documents.is-list .document-card-title {
+  display: block;
+  flex: 1;
+  overflow: hidden;
+  padding-right: 0;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.documents.is-list .document-excerpt {
+  display: none;
+}
+
+.documents.is-list .document-meta {
+  width: 128px;
+  flex: 0 0 128px;
+  justify-content: flex-start;
+  margin: 0;
+  padding: 0;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.documents.is-list .document-meta-dot,
+.documents.is-list .document-words {
+  display: none;
+}
+
+.documents.is-list .card-menu-wrap {
+  top: 50%;
+  right: 2px;
+  transform: translateY(-50%);
+}
+
+.documents.is-list .document-card-skeleton {
+  min-height: 0;
+  flex-direction: row;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 40px 11px 10px;
+  overflow: hidden;
+}
+
+.documents.is-list .skeleton-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+}
+
+.documents.is-list .skeleton-title {
+  width: min(16rem, 45%);
+  height: 12px;
+  margin-top: 0;
+}
+
+.documents.is-list .skeleton-line {
+  display: none;
+}
+
+.documents.is-list .skeleton-meta {
+  width: 128px;
+  height: 10px;
+  margin-top: 0;
+  margin-left: auto;
 }
 
 .empty-state {
@@ -1642,7 +1835,7 @@ html[data-theme="dark"] .toast.is-error {
    -------------------------------------------------------------------------- */
 
 @media (max-width: 1080px) {
-  .document-grid {
+  .documents.is-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -1719,26 +1912,33 @@ html[data-theme="dark"] .toast.is-error {
     height: 43px;
   }
 
-  .document-grid {
+  .documents.is-grid {
     grid-template-columns: 1fr;
     gap: 12px;
   }
 
-  .document-card,
-  .document-card-link {
+  .documents.is-grid .document-card,
+  .documents.is-grid .document-card-link {
     min-height: 193px;
   }
 
-  .document-card-link {
+  .documents.is-grid .document-card-link {
     padding: 19px;
   }
 
-  .document-glyph {
+  .documents.is-grid .document-glyph {
     margin-bottom: 15px;
   }
 
-  .document-card {
-    min-height: 193px;
+  .documents.is-list .document-card-link {
+    gap: 12px;
+    padding: 10px 38px 10px 6px;
+  }
+
+  .library-column-label,
+  .documents.is-list .document-meta,
+  .documents.is-list .skeleton-meta {
+    display: none;
   }
 
   .card-menu-button {

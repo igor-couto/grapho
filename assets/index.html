@@ -58,7 +58,36 @@
         <button class="text-button" type="button" id="retryLoad" hidden>Try again</button>
       </div>
 
-      <div class="document-grid" id="documentsGrid" aria-busy="true">
+      <div class="library-toolbar" id="libraryToolbar">
+        <span class="library-column-label" id="sortColumnLabel">Last modified</span>
+        <div class="library-toolbar-actions">
+          <button class="icon-button" type="button" id="viewToggle" aria-label="Switch to grid view" title="Switch to grid view">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <rect x="3.6" y="3.6" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6"/>
+              <rect x="13.4" y="3.6" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6"/>
+              <rect x="3.6" y="13.4" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6"/>
+              <rect x="13.4" y="13.4" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6"/>
+            </svg>
+          </button>
+          <div class="menu-wrap">
+            <button class="icon-button" type="button" id="sortButton" aria-label="Sort by last modified" title="Sort by last modified" aria-haspopup="menu" aria-expanded="false">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M2.6 16.5 5.6 7.5l3 9M3.7 13.6h3.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M11 8v7m0 0 1.9-2M11 15l-1.9-2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M15.6 8h4.2l-4.2 8.5h4.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+            <div class="popover-menu library-sort-menu" id="sortMenu" role="menu" aria-label="Sort by" hidden>
+              <p class="popover-label">Sort by</p>
+              <button class="menu-item" type="button" role="menuitemradio" aria-checked="true" data-sort="modified">Last modified</button>
+              <button class="menu-item" type="button" role="menuitemradio" aria-checked="false" data-sort="created">Date created</button>
+              <button class="menu-item" type="button" role="menuitemradio" aria-checked="false" data-sort="title">Title</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="documents is-list" id="documents" aria-busy="true">
         <div class="document-card document-card-skeleton" aria-hidden="true">
           <span class="skeleton skeleton-icon"></span>
           <span class="skeleton skeleton-title"></span>
