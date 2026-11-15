@@ -50,7 +50,7 @@
   var ICON_GRID =
     '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3.6" y="3.6" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6"/><rect x="13.4" y="3.6" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6"/><rect x="3.6" y="13.4" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6"/><rect x="13.4" y="13.4" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6"/></svg>';
   var ICON_LIST =
-    '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="4.8" cy="6.5" r="1.2" fill="currentColor"/><circle cx="4.8" cy="12" r="1.2" fill="currentColor"/><circle cx="4.8" cy="17.5" r="1.2" fill="currentColor"/><path d="M9 6.5h11M9 12h11M9 17.5h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+    '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 18L20 18L20 15.325L9 15.325ZM4 8.675L7 8.675L7 6L4 6ZM4 13.35L7 13.35L7 10.675L4 10.675ZM4 18L7 18L7 15.325L4 15.325ZM9 13.35L20 13.35L20 10.675L9 10.675ZM9 8.675L20 8.675L20 6L9 6ZM4 20Q3.175 20 2.588 19.413A1.93 1.93 0 0 1 2 18L2 6Q2 5.175 2.588 4.588A1.93 1.93 0 0 1 4 4L20 4Q20.824 4 21.413 4.588Q22 5.175 22 6L22 18Q22 18.824 21.413 19.413A1.93 1.93 0 0 1 20 20Z" fill="currentColor"/></svg>';
 
   document.addEventListener("DOMContentLoaded", init);
 
