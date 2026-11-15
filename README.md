@@ -68,8 +68,21 @@ git tag -a v0.1.0 -m "Grapho 0.1.0"
 git push origin v0.1.0
 ```
 
-The binaries and packages are unsigned; macOS and Windows may warn on first
-launch.
+The macOS and Windows builds are not signed with a platform certificate, so
+they may warn on first launch.
+
+## Verifying releases
+
+`release-signing-key.asc` is the public key. Every archive, package, and
+`SHA256SUMS.txt` has a detached `.asc` signature.
+
+```bash
+gpg --import release-signing-key.asc
+gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt
+sha256sum --check SHA256SUMS.txt
+```
+
+Check the key fingerprint out of band before trusting it.
 
 ## Development
 

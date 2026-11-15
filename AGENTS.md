@@ -103,6 +103,22 @@ These should not be casually changed:
 - Writes go through the temporary-file-and-replace path in `store.rs`. Do not
   introduce a database or write directly to a live document file.
 
+## Releases
+
+A pushed `v<version>` tag runs `.github/workflows/release.yml`. The tag must
+match `Cargo.toml`. The workflow builds Linux, macOS, and Windows binaries,
+adds `.deb`/`.rpm` packages, and writes `SHA256SUMS.txt`.
+
+Signing uses repository secrets:
+
+- `GPG_PRIVATE_KEY`: ASCII-armored private signing key.
+- `GPG_PASSPHRASE`: its passphrase, if it has one.
+
+The workflow signs every archive, package, and `SHA256SUMS.txt` with armored
+detached `.asc` signatures and uploads `release-signing-key.asc`. It fails
+before publishing when `GPG_PRIVATE_KEY` is missing. Keep the private key out of
+the repository and logs.
+
 ## Checks
 
 Run these before calling a change done:
