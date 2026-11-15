@@ -56,6 +56,20 @@ file, so a crash is unlikely to leave a half-written document.
 Copy the whole directory to back it up. Stop Grapho first if you want a
 consistent snapshot.
 
+## Releases
+
+A pushed tag such as `v0.1.0` runs the release workflow and publishes Linux
+(x86_64 and aarch64, static), macOS universal, and Windows (x64 and arm64)
+archives. The tag must match `version` in `Cargo.toml`.
+
+```bash
+git tag -a v0.1.0 -m "Grapho 0.1.0"
+git push origin v0.1.0
+```
+
+The binaries are not signed with a platform certificate, so macOS and Windows
+may warn on first launch.
+
 ## Development
 
 ```bash
