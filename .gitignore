@@ -1,0 +1,10 @@
+/target
+/data
+*.log
+.env
+
+# Local editor/IDE files
+.idea/
+.vscode/
+*.swp
+.DS_Store

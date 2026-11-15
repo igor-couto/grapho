@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Page not found — Grapho</title>
+  <meta name="theme-color" content="#f3efe6">
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preload" href="/assets/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/assets/fonts/literata-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <script src="/assets/theme.js"></script>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="error-page">
+  <header class="site-header">
+    <div class="shell site-header-inner">
+      <a class="brand" href="/" aria-label="Grapho home">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" fill="none">
+            <rect width="32" height="32" rx="9" fill="var(--brand-tile)"/>
+            <path d="M10 8.5h8.8L23 12.7v10.8H10V8.5Z" fill="var(--brand-page)"/>
+            <path d="M18.8 8.5v4.2H23" stroke="var(--brand-tile)" stroke-width="1.6" stroke-linejoin="round"/>
+            <path d="M13.4 17.4h6.2M13.4 20.5h4.2" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </span>
+        <span class="brand-word">grapho<span class="brand-dot">.</span></span>
+      </a>
+      <button class="icon-button theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme">
+        <svg class="icon icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle cx="12" cy="12" r="3.5" stroke="currentColor" stroke-width="1.7"/>
+          <path d="M12 2.8v2M12 19.2v2M21.2 12h-2M4.8 12h-2M18.5 5.5l-1.4 1.4M6.9 17.1l-1.4 1.4M18.5 18.5l-1.4-1.4M6.9 6.9 5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        </svg>
+        <svg class="icon icon-moon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M20 14.4A8.2 8.2 0 0 1 9.6 4a8.2 8.2 0 1 0 10.4 10.4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="error-main shell">
+    <span class="error-code">404</span>
+    <h1>This page<br><em>isn't here.</em></h1>
+    <p>The address may be mistyped, or the page has packed up and gone.</p>
+    <a class="button button-primary" href="/">Back to your library</a>
+  </main>
+</body>
+</html>
