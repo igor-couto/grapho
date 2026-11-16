@@ -217,6 +217,30 @@ is private.
   `Formula/grapho.rb` in `igor-couto/homebrew-grapho` and replace the three
   `sha256` placeholders with the `grapho` lines from that tag's
   `SHA256SUMS.txt`.
+- `packaging/scoop/bucket/grapho.json` is the Scoop manifest. Copy it to
+  `bucket/grapho.json` in `igor-couto/scoop-grapho` and update the two `hash`
+  values and `extract_dir` names. `extract_dir` must match the top-level folder
+  inside the Windows zip, which is `grapho-<version>-windows-<arch>`.
+- `packaging/winget/manifests/i/IgorCouto/Grapho/<version>/` holds the three
+  manifests submitted to `microsoft/winget-pkgs`; the directory path must match
+  the package identifier. `winget validate --manifest <dir>` checks them
+  locally. Installer hashes are uppercase hex, and each architecture needs its
+  own `NestedInstallerFiles` path because the zip folder name contains the
+  version.
+- `packaging/chocolatey/` holds the nuspec and `tools/chocolateyinstall.ps1`;
+  `choco pack grapho.nuspec` builds `grapho.<version>.nupkg`. Nothing is bundled:
+  the script downloads the release zip, verifies its SHA256, and shims the
+  binary inside the zip's top-level folder. Pushing to community.chocolatey.org
+  needs a verified account and an API key, and the package goes through human
+  moderation.
+
+The Windows release links the MSVC runtime dynamically: the binary imports
+`VCRUNTIME140.dll` and `api-ms-win-crt-*`. So the VC++ 2015-2022 redistributable
+has to be installed; the Chocolatey package declares a `vcredist140`
+dependency for that reason, and Scoop and winget rely on the user's machine
+already having it. Building the Windows targets with
+`-C target-feature=+crt-static` removes the dependency entirely, which is the
+better fix and would let every channel drop its redistributable handling.
 
 ## Checks
 

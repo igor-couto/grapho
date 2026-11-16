@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Built with `choco pack` and pushed to community.chocolatey.org. The
+     install script downloads the release zip at install time, so no binaries
+     are bundled here. -->
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>grapho</id>
+    <version>0.1.1</version>
+    <title>Grapho</title>
+    <authors>Igor Couto</authors>
+    <owners>igor.couto</owners>
+    <summary>A quiet, local-first document editor that runs in your browser.</summary>
+    <description>Grapho is a single-user document editor that runs in the browser. It is one Rust binary with no database, account service, or frontend build step, and documents are plain JSON files on disk.
+
+This package installs the prebuilt Windows binary and adds a `grapho` shim. Run `grapho`, then open http://127.0.0.1:25265.
+
+Documents are stored in %LOCALAPPDATA%\Grapho unless GRAPHO_DATA_DIR is set. An optional password is configured with GRAPHO_PASSWORD_HASH; run `grapho hash-password` to create the hash.</description>
+    <projectUrl>https://github.com/igor-couto/grapho</projectUrl>
+    <packageSourceUrl>https://github.com/igor-couto/grapho/tree/main/packaging/chocolatey</packageSourceUrl>
+    <projectSourceUrl>https://github.com/igor-couto/grapho</projectSourceUrl>
+    <docsUrl>https://github.com/igor-couto/grapho#readme</docsUrl>
+    <bugTrackerUrl>https://github.com/igor-couto/grapho/issues</bugTrackerUrl>
+    <iconUrl>https://raw.githubusercontent.com/igor-couto/grapho/main/assets/favicon.ico</iconUrl>
+    <licenseUrl>https://github.com/igor-couto/grapho/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <copyright>Copyright (C) Igor Couto</copyright>
+    <tags>grapho document editor writing notes markdown local-first</tags>
+    <releaseNotes>https://github.com/igor-couto/grapho/releases/tag/v0.1.1</releaseNotes>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

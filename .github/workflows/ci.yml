@@ -12,6 +12,11 @@ jobs:
   build:
     name: Build and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The release links the Windows C runtime statically so the binary needs no
+    # redistributable. Build it that way here too, so a broken static link fails
+    # on a pull request instead of on the release tag.
+    env:
+      RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C target-feature=+crt-static' || '' }}
     strategy:
       fail-fast: false
       matrix:

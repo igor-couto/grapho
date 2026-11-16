@@ -3,6 +3,10 @@
 *.log
 .env
 
+# Built Chocolatey packages
+*.nupkg
+*.snupkg
+
 # Local editor/IDE files
 .idea/
 .vscode/

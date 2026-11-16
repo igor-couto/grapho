@@ -119,6 +119,10 @@ jobs:
       - name: Build (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        # Static CRT: the binary must not import VCRUNTIME140.dll, which Windows
+        # does not ship. CI builds with the same flag.
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
         run: cargo build --locked --release --target ${{ matrix.target }} --bin grapho
 
       - name: Build the macOS universal binary
