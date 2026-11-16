@@ -15,18 +15,18 @@ class Grapho < Formula
   on_macos do
     # The release builds one universal binary with both slices.
     url "https://github.com/igor-couto/grapho/releases/download/v0.1.1/grapho-0.1.1-macos-universal.tar.gz"
-    sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+    sha256 "12303329eed306e9f70362e80023a75dda32d50dcaefeef1abc0c20af67fa1c5"
   end
 
   on_linux do
     on_intel do
       url "https://github.com/igor-couto/grapho/releases/download/v0.1.1/grapho-0.1.1-linux-x86_64.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      sha256 "ca66428cb30fc2f2e27285b1f2b1b489d5c3291159ff9591d40e21f385c24339"
     end
 
     on_arm do
       url "https://github.com/igor-couto/grapho/releases/download/v0.1.1/grapho-0.1.1-linux-aarch64.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      sha256 "322bb0df156e2c782257e23b39b4d4f7ed610ef87e4e815bdb952fa1737ccc62"
     end
   end
 

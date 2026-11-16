@@ -9,11 +9,11 @@ $isArm64 = $env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW64
 
 if ($isArm64) {
     $url = "$baseUrl/grapho-$version-windows-aarch64.zip"
-    $checksum = '0000000000000000000000000000000000000000000000000000000000000000'
+    $checksum = '2F1F58F164D213D657288AA641A192091111CFD1B2D018A3B0310C828D06640F'
     $folder = "grapho-$version-windows-aarch64"
 } else {
     $url = "$baseUrl/grapho-$version-windows-x86_64.zip"
-    $checksum = '0000000000000000000000000000000000000000000000000000000000000000'
+    $checksum = 'B7F37895C1F5D07621742229E2E98C34B21CB57EDFAFDCA1FB514C0E5994024A'
     $folder = "grapho-$version-windows-x86_64"
 }
 

@@ -234,13 +234,13 @@ is private.
   needs a verified account and an API key, and the package goes through human
   moderation.
 
-The Windows release links the MSVC runtime dynamically: the binary imports
-`VCRUNTIME140.dll` and `api-ms-win-crt-*`. So the VC++ 2015-2022 redistributable
-has to be installed; the Chocolatey package declares a `vcredist140`
-dependency for that reason, and Scoop and winget rely on the user's machine
-already having it. Building the Windows targets with
-`-C target-feature=+crt-static` removes the dependency entirely, which is the
-better fix and would let every channel drop its redistributable handling.
+The Windows builds link the C runtime statically (`RUSTFLAGS:
+-C target-feature=+crt-static` in `release.yml`), so the binary imports only
+DLLs that Windows itself ships and no VC++ redistributable is needed. CI
+compiles Windows with the same flag, so a broken static link fails on a pull
+request instead of on a release tag. To check a release, list the binary's
+imports: `VCRUNTIME140.dll` must not appear. The 0.1.0 Windows binaries predate
+this and did need the redistributable.
 
 ## Checks
 
