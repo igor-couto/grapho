@@ -46,6 +46,11 @@ const TOKEN_BYTES: usize = 32;
 const MIN_PASSWORD_CHARS: usize = 12;
 const MAX_HASH_BYTES: usize = 512;
 
+/// Argon2id's default output length, and therefore what `grapho hash-password`
+/// writes. A hash of any other length cannot verify anything this program made,
+/// so it is refused at startup instead of silently failing every login.
+const DIGEST_BYTES: usize = 32;
+
 /// Argon2 parameters are read from the configured hash, so a typo in the memory
 /// cost should not turn the first login into an out-of-memory crash.
 const MAX_MEMORY_KIB: u32 = 1024 * 1024;
@@ -334,10 +339,23 @@ fn validate_hash(hash: &str) -> Result<(), String> {
         .to_owned());
     }
 
-    if parsed.salt.is_none() || parsed.hash.is_none() {
+    if parsed.salt.is_none() {
         return Err(
             "GRAPHO_PASSWORD_HASH is incomplete. Run `grapho hash-password` to make one.".into(),
         );
+    }
+    let Some(digest) = parsed.hash.as_ref() else {
+        return Err(
+            "GRAPHO_PASSWORD_HASH is incomplete. Run `grapho hash-password` to make one.".into(),
+        );
+    };
+    if digest.len() != DIGEST_BYTES {
+        return Err(format!(
+            "GRAPHO_PASSWORD_HASH has a {}-byte digest, but Grapho writes {DIGEST_BYTES}-byte \
+             hashes, so it was probably cut short when it was copied.\n  Run `grapho \
+             hash-password` to make one.",
+            digest.len()
+        ));
     }
 
     let params = Params::try_from(&parsed)
