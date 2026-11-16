@@ -135,10 +135,10 @@ consistent snapshot.
 ## Releases
 
 A pushed tag such as `v0.1.0` runs the release workflow and publishes Linux
-(x86_64, aarch64, armv7, and riscv64), FreeBSD x86_64, macOS universal, and
+(x86_64, aarch64, and armv7), FreeBSD x86_64, macOS universal, and
 Windows (x64 and arm64) builds. Linux x86_64 and aarch64 also get `.deb` and
-`.rpm` packages. The tag must match `version` in `Cargo.toml`. The armv7,
-riscv64, and FreeBSD builds are cross-compiled and not run in CI.
+`.rpm` packages. The tag must match `version` in `Cargo.toml`. The armv7 and
+FreeBSD builds are cross-compiled and not run in CI.
 
 ```bash
 git tag -a v0.1.0 -m "Grapho 0.1.0"
