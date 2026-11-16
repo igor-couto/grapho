@@ -38,17 +38,24 @@
 
       <span class="toolbar-rule" aria-hidden="true"></span>
 
-      <label class="style-select-wrap">
-        <span class="sr-only">Paragraph style</span>
-        <select id="blockStyle" aria-label="Paragraph style" disabled>
-          <option value="p">Paragraph</option>
-          <option value="h1">Heading 1</option>
-          <option value="h2">Heading 2</option>
-          <option value="blockquote">Quote</option>
-          <option value="pre">Code block</option>
-        </select>
+      <button class="style-button" type="button" id="styleButton" aria-haspopup="menu" aria-controls="styleMenu" aria-expanded="false" aria-label="Paragraph style: Normal text" disabled>
+        <span class="style-button-label" id="styleButtonLabel">Normal text</span>
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m7 9.5 5 5 5-5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      </label>
+      </button>
+
+      <span class="toolbar-rule" aria-hidden="true"></span>
+
+      <div class="toolbar-group">
+        <button class="toolbar-button align-button" type="button" id="alignButton" title="Align &amp; indent" aria-label="Align &amp; indent" aria-haspopup="menu" aria-controls="alignMenu" aria-expanded="false" data-current-align="left" disabled>
+          <span class="align-icon" aria-hidden="true">
+            <svg data-align-icon="left" viewBox="0 0 24 24" fill="none"><path d="M3 4.5h18M3 8.25h12M3 12h15M3 15.75h10M3 19.5h14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+            <svg data-align-icon="center" viewBox="0 0 24 24" fill="none"><path d="M6 4.5h12M3 8.25h18M4.5 12h15M3 15.75h18M7 19.5h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+            <svg data-align-icon="right" viewBox="0 0 24 24" fill="none"><path d="M3 4.5h18M9 8.25h12M6 12h15M11 15.75h10M7 19.5h14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+            <svg data-align-icon="justify" viewBox="0 0 24 24" fill="none"><path d="M3 4.5h18M3 8.25h18M3 12h18M3 15.75h18M3 19.5h18" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+          </span>
+          <svg class="align-caret" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m7 9.5 5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
 
       <span class="toolbar-rule" aria-hidden="true"></span>
 
@@ -133,9 +140,46 @@
     </div>
   </header>
 
+  <div class="popover-menu align-menu" id="alignMenu" role="menu" aria-label="Align &amp; indent" hidden>
+    <div class="align-choice" role="group" aria-label="Alignment">
+      <button class="align-choice-button" type="button" role="menuitemradio" aria-checked="true" data-align-value="left" title="Align left" aria-label="Align left">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 4.5h18M3 8.25h12M3 12h15M3 15.75h10M3 19.5h14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+      </button>
+      <button class="align-choice-button" type="button" role="menuitemradio" aria-checked="false" data-align-value="center" title="Align center" aria-label="Align center">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 4.5h12M3 8.25h18M4.5 12h15M3 15.75h18M7 19.5h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+      </button>
+      <button class="align-choice-button" type="button" role="menuitemradio" aria-checked="false" data-align-value="right" title="Align right" aria-label="Align right">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 4.5h18M9 8.25h12M6 12h15M11 15.75h10M7 19.5h14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+      </button>
+      <button class="align-choice-button" type="button" role="menuitemradio" aria-checked="false" data-align-value="justify" title="Justify" aria-label="Justify">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 4.5h18M3 8.25h18M3 12h18M3 15.75h18M3 19.5h18" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="menu-rule" role="separator"></div>
+    <button class="menu-item" type="button" role="menuitem" data-indent-action="-1">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M10 5h11M10 9.7h11M10 14.4h11M10 19.1h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M7 12H2m0 0 3-3m-3 3 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Decrease indent
+    </button>
+    <button class="menu-item" type="button" role="menuitem" data-indent-action="1">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 5h11M3 9.7h11M3 14.4h11M3 19.1h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M2 12h5m0 0L4 9m3 3-3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Increase indent
+    </button>
+  </div>
+
+  <div class="popover-menu style-menu" id="styleMenu" role="menu" aria-label="Paragraph style" hidden>
+    <button class="menu-item" type="button" role="menuitemradio" data-block-style="p" aria-checked="true">Normal text</button>
+    <button class="menu-item" type="button" role="menuitemradio" data-block-style="h1" aria-checked="false">Heading 1</button>
+    <button class="menu-item" type="button" role="menuitemradio" data-block-style="h2" aria-checked="false">Heading 2</button>
+    <button class="menu-item" type="button" role="menuitemradio" data-block-style="quote" aria-checked="false">Quote</button>
+    <button class="menu-item" type="button" role="menuitemradio" data-block-style="code" aria-checked="false">Code block</button>
+  </div>
+
   <main class="editor-workspace">
     <div class="editor-column">
       <article class="paper" id="paper" aria-busy="true">
+        <span class="paper-grip" data-paper-grip="left" aria-hidden="true"></span>
+        <span class="paper-grip" data-paper-grip="right" aria-hidden="true"></span>
+
         <header class="paper-head">
           <input class="document-title" id="documentTitle" type="text" placeholder="Untitled document" maxlength="200" autocomplete="off" spellcheck="false" aria-label="Document title" disabled>
         </header>

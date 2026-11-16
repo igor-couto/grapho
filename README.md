@@ -167,11 +167,11 @@ bind-mounted host directory must be writable by that user.
 ## Data
 
 Documents are stored in `GRAPHO_DATA_DIR/<document-id>.json`, which defaults to
-the per-user directory above. Each file contains the title, sanitized HTML, and
-timestamps. Images are embedded as base64 data URLs, so a document stays one
-self-contained file; photos are shrunk in the browser first. A save replaces the
-file through a temporary file, so a crash is unlikely to leave a half-written
-document.
+the per-user directory above. Each file contains the title, sanitized HTML,
+timestamps, and the paper width once you have resized it. Images are embedded as
+base64 data URLs, so a document stays one self-contained file; photos are shrunk
+in the browser first. A save replaces the file through a temporary file, so a
+crash is unlikely to leave a half-written document.
 
 Copy the whole directory to back it up. Stop Grapho first if you want a
 consistent snapshot.

@@ -1,5 +1,5 @@
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -9,6 +9,7 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use html_escape::encode_text;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -31,6 +32,26 @@ const CSP: &str = concat!(
     "form-action 'self'; ",
     "frame-ancestors 'none'"
 );
+
+/// The version page asks GitHub for the latest release, so its policy allows
+/// exactly that one origin. Every other response keeps `connect-src 'self'`.
+fn content_security_policy(allows_updates: bool) -> HeaderValue {
+    if !allows_updates {
+        return HeaderValue::from_static(CSP);
+    }
+
+    static WITH_UPDATES: OnceLock<HeaderValue> = OnceLock::new();
+
+    WITH_UPDATES
+        .get_or_init(|| {
+            HeaderValue::from_str(&CSP.replace(
+                "connect-src 'self';",
+                "connect-src 'self' https://api.github.com;",
+            ))
+            .expect("the update policy is a valid header value")
+        })
+        .clone()
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -65,6 +86,9 @@ pub fn router(store: SharedStore, auth: Option<Arc<Auth>>) -> Router {
                 .layer(DefaultBodyLimit::max(LOGIN_BODY_LIMIT_BYTES)),
         )
         .route("/api/health", get(health))
+        // Build metadata only, and reads no documents, so it can stay public:
+        // it answers "which build is this?" without a login.
+        .route("/version", get(version_page))
         .route("/assets/{*path}", get(asset))
         .fallback(not_found);
 
@@ -207,6 +231,7 @@ struct DocumentView {
     id: Uuid,
     title: String,
     content: String,
+    paper_width: Option<u32>,
     created_at: u64,
     updated_at: u64,
 }
@@ -217,6 +242,7 @@ impl From<Document> for DocumentView {
             id: document.id,
             title: document.title,
             content: document.content,
+            paper_width: document.paper_width,
             created_at: document.created_at,
             updated_at: document.updated_at,
         }
@@ -243,6 +269,8 @@ struct UpdateDocumentRequest {
     title: Option<String>,
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    paper_width: Option<u32>,
 }
 
 async fn update_document(
@@ -253,7 +281,7 @@ async fn update_document(
     let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
     let document = state
         .store
-        .update(id, patch.title, patch.content)
+        .update(id, patch.title, patch.content, patch.paper_width)
         .await?
         .ok_or_else(ApiError::not_found)?;
     Ok(Json(DocumentView::from(document)))
@@ -397,6 +425,36 @@ async fn health() -> Json<Health> {
     })
 }
 
+/// The commit fields come from `build.rs` and are absent when the binary was
+/// built without a `.git` directory, which the page reports plainly.
+async fn version_page() -> Response {
+    let page = assets::VERSION_HTML
+        .replace(
+            "{{version}}",
+            &build_fact(Some(env!("CARGO_PKG_VERSION")), "unknown"),
+        )
+        .replace(
+            "{{tag}}",
+            &build_fact(option_env!("GRAPHO_TAG"), "not a tagged build"),
+        )
+        .replace(
+            "{{commit}}",
+            &build_fact(option_env!("GRAPHO_COMMIT"), "unknown"),
+        )
+        .replace(
+            "{{commit_date}}",
+            &build_fact(option_env!("GRAPHO_COMMIT_DATE"), "unknown"),
+        );
+
+    with_page_cache(Html(page).into_response())
+}
+
+/// Git values reach the page from the build, so they are escaped like any other
+/// untrusted text.
+fn build_fact(value: Option<&str>, fallback: &str) -> String {
+    encode_text(value.unwrap_or(fallback)).into_owned()
+}
+
 fn parse_document_id(raw_id: &str) -> Option<Uuid> {
     Uuid::parse_str(raw_id).ok()
 }
@@ -422,6 +480,7 @@ fn with_page_cache(mut response: Response) -> Response {
 
 async fn security_headers(request: Request, next: Next) -> Response {
     let is_api = request.uri().path().starts_with("/api/");
+    let allows_updates = request.uri().path() == "/version";
     let is_mutation = !matches!(request.method().as_str(), "GET" | "HEAD" | "OPTIONS");
     let blocked_cross_origin = is_api && is_mutation && !is_same_origin(&request);
 
@@ -434,7 +493,7 @@ async fn security_headers(request: Request, next: Next) -> Response {
 
     headers.insert(
         HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static(CSP),
+        content_security_policy(allows_updates),
     );
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
@@ -711,6 +770,55 @@ mod tests {
         let response = app.oneshot(get("/api/documents")).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(json_body(response).await["auth_required"], false);
+
+        let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+
+    #[tokio::test]
+    async fn the_version_page_is_public_and_reports_the_build() {
+        let (app, directory) = test_app(Some("a password long enough")).await;
+
+        let response = app.oneshot(get("/version")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-cache"
+        );
+
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("response body");
+        let body = String::from_utf8(bytes.to_vec()).expect("utf-8 page");
+        assert!(body.contains(env!("CARGO_PKG_VERSION")));
+        assert!(!body.contains("{{"), "every placeholder is replaced");
+
+        let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+
+    #[tokio::test]
+    async fn only_the_version_page_may_reach_github() {
+        let (app, directory) = test_app(None).await;
+
+        let response = app.clone().oneshot(get("/version")).await.unwrap();
+        let policy = response
+            .headers()
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(policy.contains("connect-src 'self' https://api.github.com;"));
+
+        let response = app.oneshot(get("/assets/app.css")).await.unwrap();
+        let policy = response
+            .headers()
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(policy.contains("connect-src 'self';"));
+        assert!(!policy.contains("api.github.com"));
 
         let _ = tokio::fs::remove_dir_all(directory).await;
     }

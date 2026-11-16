@@ -3,11 +3,15 @@
 // through commit(), which keeps undo, layout, and painting in step.
 
 import {
+  ALIGNMENTS,
+  blockAlignment,
+  blockIndent,
   blockLength,
   blockText,
   createBlock,
   createBlockId,
   emptyParagraph,
+  INDENT_LIMIT,
   marksAt,
   mergeBlocks,
   normalizeRuns,
@@ -34,9 +38,20 @@ import { EditorView } from "./view.js";
 const LIST_DEPTH_LIMIT = 5;
 const TYPING_COALESCE_MS = 700;
 const UNDO_LIMIT = 120;
+const ALIGNMENT_VALUES = new Set(ALIGNMENTS);
 
 export class DocEditor {
-  constructor({ root, textarea, onChange, onSelection, onImageSelect, onSave, onLink, onPasteImages }) {
+  constructor({
+    root,
+    textarea,
+    onChange,
+    onSelection,
+    onImageSelect,
+    onImageDragStart,
+    onSave,
+    onLink,
+    onPasteImages,
+  }) {
     this.root = root;
     this.textarea = textarea;
     this.view = new EditorView(root);
@@ -54,7 +69,15 @@ export class DocEditor {
     this.imageDrag = null;
     this.imageResize = null;
     this.focused = false;
-    this.callbacks = { onChange, onSelection, onImageSelect, onSave, onLink, onPasteImages };
+    this.callbacks = {
+      onChange,
+      onSelection,
+      onImageSelect,
+      onImageDragStart,
+      onSave,
+      onLink,
+      onPasteImages,
+    };
     this.bound = false;
   }
 
@@ -244,6 +267,16 @@ export class DocEditor {
     return block.type;
   }
 
+  activeAlignment() {
+    const block = this.blocks[this.focus.block];
+    return blockAlignment(block);
+  }
+
+  activeIndent() {
+    const block = this.blocks[this.focus.block];
+    return blockIndent(block);
+  }
+
   /* ---------------------------------------------------------------------
      Layout and painting
      --------------------------------------------------------------------- */
@@ -275,6 +308,8 @@ export class DocEditor {
         collapsed,
         marks: this.activeMarks(),
         blockType: this.activeBlockType(),
+        alignment: this.activeAlignment(),
+        indent: this.activeIndent(),
         canUndo: this.undoStack.length > 0,
         canRedo: this.redoStack.length > 0,
         image: collapsed && entry && entry.block.type === "image" ? entry : null,
@@ -804,6 +839,100 @@ export class DocEditor {
     }
   }
 
+  setAlignment(align) {
+    if (!ALIGNMENT_VALUES.has(align)) {
+      return;
+    }
+    const { from, to } = this.normalized();
+    let blocks = this.blocks;
+    let changed = false;
+
+    for (let index = from.block; index <= to.block; index += 1) {
+      const block = blocks[index];
+      if (!block || block.type === "image" || block.type === "code") {
+        continue;
+      }
+      if (blockAlignment(block) === align) {
+        continue;
+      }
+      const next = { ...block, id: createBlockId() };
+      if (align === "left") {
+        delete next.align;
+      } else {
+        next.align = align;
+      }
+      blocks = blocks.slice();
+      blocks[index] = next;
+      changed = true;
+    }
+
+    if (changed) {
+      this.commit(blocks, this.anchor, this.focus);
+    }
+  }
+
+  changeIndent(direction) {
+    const step = direction < 0 ? -1 : 1;
+    const { from, to } = this.normalized();
+    let blocks = this.blocks;
+    let changed = false;
+
+    for (let index = from.block; index <= to.block; index += 1) {
+      const block = blocks[index];
+      if (!block || block.type === "image" || block.type === "code") {
+        continue;
+      }
+      const current = blockIndent(block);
+      const indent = Math.max(0, Math.min(INDENT_LIMIT, current + step));
+      if (indent === current) {
+        continue;
+      }
+      const next = { ...block, id: createBlockId() };
+      if (indent === 0) {
+        delete next.indent;
+      } else {
+        next.indent = indent;
+      }
+      blocks = blocks.slice();
+      blocks[index] = next;
+      changed = true;
+    }
+
+    if (changed) {
+      this.commit(blocks, this.anchor, this.focus);
+    }
+  }
+
+  indentForTab(direction) {
+    const { from, to } = this.normalized();
+    let eligible = 0;
+    let allLists = true;
+    let indented = false;
+
+    for (let index = from.block; index <= to.block; index += 1) {
+      const block = this.blocks[index];
+      if (!block || block.type === "image" || block.type === "code") {
+        continue;
+      }
+      eligible += 1;
+      if (block.type !== "list") {
+        allLists = false;
+      }
+      if (blockIndent(block) > 0) {
+        indented = true;
+      }
+    }
+
+    if (!eligible) {
+      return;
+    }
+    if (allLists && !(direction < 0 && indented)) {
+      this.indentList(direction);
+    } else {
+      this.changeIndent(direction);
+    }
+  }
+
   setLink(href) {
     const { from, to } = this.normalized();
     if (from.block === to.block && from.offset === to.offset) {
@@ -1021,7 +1150,7 @@ export class DocEditor {
         return;
       case "Tab":
         event.preventDefault();
-        this.indentList(shift ? -1 : 1);
+        this.indentForTab(shift ? -1 : 1);
         return;
       case "Escape":
         if (!this.isCollapsed()) {
@@ -1390,6 +1519,9 @@ export class DocEditor {
     if (!drag.moved) {
       drag.moved = true;
       this.root.classList.add("is-dragging-image");
+      if (this.callbacks.onImageDragStart) {
+        this.callbacks.onImageDragStart();
+      }
     }
 
     const columnWidth = this.width || this.root.clientWidth || 640;

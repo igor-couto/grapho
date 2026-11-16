@@ -9,7 +9,10 @@ const BLOCK_TAGS = new Set(["blockquote", "div", "h1", "h2", "h3", "h4", "p", "p
 const HEADING_LEVELS = { h1: 1, h2: 2, h3: 3, h4: 4 };
 const LIST_DEPTH_LIMIT = 6;
 
+export const ALIGNMENTS = ["left", "center", "right", "justify"];
+export const INDENT_LIMIT = 6;
 export const MARK_KEYS = ["b", "i", "u", "s", "code"];
+const ALIGNMENT_SET = new Set(ALIGNMENTS);
 
 let nextBlockId = 1;
 
@@ -17,8 +20,17 @@ export function createBlockId() {
   return "b" + nextBlockId++;
 }
 
-export function createBlock(type, runs) {
-  return { id: createBlockId(), type: type || "p", runs: normalizeRuns(runs || []) };
+export function createBlock(type, runs, format) {
+  const block = { id: createBlockId(), type: type || "p", runs: normalizeRuns(runs || []) };
+  return applyBlockFormat(block, format);
+}
+
+export function blockAlignment(block) {
+  return block && ALIGNMENT_SET.has(block.align) ? block.align : "left";
+}
+
+export function blockIndent(block) {
+  return block ? normalizeIndent(block.indent) : 0;
 }
 
 export function emptyParagraph() {
@@ -205,6 +217,55 @@ export function mergeBlocks(first, second) {
   return { ...first, id: createBlockId(), runs };
 }
 
+function normalizeIndent(value) {
+  const indent = Math.floor(Number(value));
+  if (!Number.isFinite(indent) || indent <= 0) {
+    return 0;
+  }
+  return Math.min(indent, INDENT_LIMIT);
+}
+
+function applyBlockFormat(block, format) {
+  if (!format) {
+    return block;
+  }
+  if (format.align && format.align !== "left" && ALIGNMENT_SET.has(format.align)) {
+    block.align = format.align;
+  }
+  const indent = normalizeIndent(format.indent);
+  if (indent > 0) {
+    block.indent = indent;
+  }
+  return block;
+}
+
+function blockFormat(block) {
+  const format = {};
+  if (block.align) {
+    format.align = block.align;
+  }
+  if (block.indent) {
+    format.indent = block.indent;
+  }
+  return format;
+}
+
+function formatFromNode(node, inherited) {
+  const format = inherited ? { ...inherited } : {};
+  const align = node.getAttribute("data-align");
+  if (ALIGNMENT_SET.has(align)) {
+    format.align = align;
+  }
+  const rawIndent = node.getAttribute("data-indent");
+  if (rawIndent !== null && /^[0-9]+$/.test(rawIndent.trim())) {
+    const indent = normalizeIndent(rawIndent.trim());
+    if (indent > 0) {
+      format.indent = indent;
+    }
+  }
+  return format;
+}
+
 /* --------------------------------------------------------------------------
    HTML in and out
    -------------------------------------------------------------------------- */
@@ -220,18 +281,18 @@ export function parseDocument(html) {
     "text/html",
   );
   const blocks = [];
-  parseChildren(doc.body, blocks, "p", {});
+  parseChildren(doc.body, blocks, "p", {}, null);
   if (!blocks.length) {
     blocks.push(emptyParagraph());
   }
   return blocks;
 }
 
-function parseChildren(parent, out, fallbackType, marks) {
+function parseChildren(parent, out, fallbackType, marks, format) {
   let pending = [];
   const flush = () => {
     if (pending.length) {
-      out.push(createBlock(fallbackType, pending));
+      out.push(createBlock(fallbackType, pending, format));
       pending = [];
     }
   };
@@ -271,19 +332,21 @@ function parseChildren(parent, out, fallbackType, marks) {
     }
 
     flush();
-    parseBlockElement(node, tag, out, marks);
+    parseBlockElement(node, tag, out, marks, format);
   }
 
   flush();
 }
 
-function parseBlockElement(node, tag, out, marks) {
+function parseBlockElement(node, tag, out, marks, format) {
+  const ownFormat = formatFromNode(node, format);
+
   if (HEADING_LEVELS[tag]) {
-    parseChildren(node, out, "h" + HEADING_LEVELS[tag], marks);
+    parseChildren(node, out, "h" + HEADING_LEVELS[tag], marks, ownFormat);
     return;
   }
   if (tag === "p" || tag === "div") {
-    parseChildren(node, out, "p", marks);
+    parseChildren(node, out, "p", marks, ownFormat);
     return;
   }
   if (tag === "pre") {
@@ -292,7 +355,7 @@ function parseBlockElement(node, tag, out, marks) {
   }
   if (tag === "blockquote") {
     const inner = [];
-    parseChildren(node, inner, "p", marks);
+    parseChildren(node, inner, "p", marks, ownFormat);
     const runs = [];
     inner.forEach((block, index) => {
       if (index > 0) {
@@ -302,15 +365,18 @@ function parseBlockElement(node, tag, out, marks) {
         runs.push(...block.runs);
       }
     });
-    out.push({ id: createBlockId(), type: "quote", runs: normalizeRuns(runs) });
+    const quote = { id: createBlockId(), type: "quote", runs: normalizeRuns(runs) };
+    const innerFormat = inner.length ? blockFormat(inner[0]) : ownFormat;
+    out.push(applyBlockFormat(quote, innerFormat));
     return;
   }
   if (tag === "ul" || tag === "ol") {
-    parseList(node, tag === "ol", 0, out, marks);
+    parseList(node, tag === "ol", 0, out, marks, ownFormat);
   }
 }
 
-function parseList(list, ordered, depth, out, marks) {
+function parseList(list, ordered, depth, out, marks, format) {
+  const listFormat = formatFromNode(list, format);
   for (const item of Array.from(list.children)) {
     if (item.tagName.toLowerCase() !== "li") {
       continue;
@@ -331,15 +397,17 @@ function parseList(list, ordered, depth, out, marks) {
       }
       runs.push(...runsFromNode(child, marks));
     }
-    out.push({
+    const itemFormat = formatFromNode(item, listFormat);
+    const block = {
       id: createBlockId(),
       type: "list",
       ordered,
       depth: Math.min(depth, LIST_DEPTH_LIMIT),
       runs: normalizeRuns(runs),
-    });
+    };
+    out.push(applyBlockFormat(block, itemFormat));
     for (const child of nested) {
-      parseList(child.node, child.ordered, depth + 1, out, marks);
+      parseList(child.node, child.ordered, depth + 1, out, marks, listFormat);
     }
   }
 }
@@ -475,7 +543,7 @@ function serializeList(items, startIndex, depth, ordered) {
       break;
     }
     index += 1;
-    html += "<li>" + serializeRuns(item.runs, { allowBreaks: true });
+    html += "<li" + blockAttributes(item) + ">" + serializeRuns(item.runs, { allowBreaks: true });
     while (index < items.length && items[index].depth > depth) {
       const nested = serializeList(items, index, depth + 1, ordered);
       html += nested.html;
@@ -523,17 +591,31 @@ function serializeBlock(block) {
   }
 
   const inner = serializeRuns(block.runs, { allowBreaks: true });
+  const attributes = blockAttributes(block);
   if (block.type === "quote") {
-    return "<blockquote><p>" + inner + "</p></blockquote>";
+    return "<blockquote" + attributes + "><p>" + inner + "</p></blockquote>";
   }
   if (block.type === "h1" || block.type === "h2" || block.type === "h3" || block.type === "h4") {
-    return "<" + block.type + ">" + inner + "</" + block.type + ">";
+    return "<" + block.type + attributes + ">" + inner + "</" + block.type + ">";
   }
   if (block.type === "list") {
     const tag = block.ordered ? "ol" : "ul";
-    return "<" + tag + "><li>" + inner + "</li></" + tag + ">";
+    return "<" + tag + "><li" + attributes + ">" + inner + "</li></" + tag + ">";
   }
-  return "<p>" + inner + "</p>";
+  return "<p" + attributes + ">" + inner + "</p>";
+}
+
+function blockAttributes(block) {
+  const align = blockAlignment(block);
+  const indent = blockIndent(block);
+  let html = "";
+  if (align !== "left") {
+    html += ' data-align="' + align + '"';
+  }
+  if (indent > 0) {
+    html += ' data-indent="' + indent + '"';
+  }
+  return html;
 }
 
 export function serializeRuns(runs, options) {

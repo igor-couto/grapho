@@ -17,6 +17,8 @@ const state = {
   saveErrorNotified: false,
   imageEntry: null,
   toastTimer: null,
+  paperWidth: null,
+  paperDrag: null,
 };
 
 const els = {};
@@ -25,6 +27,10 @@ let editor = null;
 const IMAGE_MAX_EDGE = 1600;
 const IMAGE_MAX_DATA_URL = 1500000;
 const IMAGE_PASSTHROUGH_BYTES = 600 * 1024;
+const PAPER_MIN_WIDTH = 360;
+const PAPER_DEFAULT_WIDTH = 900; // Keep in sync with .editor-column in app.css.
+const PAPER_EDGE_GAP = 18;
+const PAPER_SNAP_DISTANCE = 16;
 
 document.addEventListener("DOMContentLoaded", init);
 
@@ -34,12 +40,17 @@ async function init() {
   els.documentMenuButton = document.getElementById("documentMenuButton");
   els.documentMenu = document.getElementById("documentMenu");
   els.formatToolbar = document.getElementById("formatToolbar");
-  els.blockStyle = document.getElementById("blockStyle");
+  els.styleButton = document.getElementById("styleButton");
+  els.styleButtonLabel = document.getElementById("styleButtonLabel");
+  els.styleMenu = document.getElementById("styleMenu");
+  els.alignButton = document.getElementById("alignButton");
+  els.alignMenu = document.getElementById("alignMenu");
   els.linkButton = document.getElementById("linkButton");
   els.imageButton = document.getElementById("imageButton");
   els.imageInput = document.getElementById("imageInput");
   els.imageMenu = document.getElementById("imageMenu");
   els.paper = document.getElementById("paper");
+  els.editorColumn = document.querySelector(".editor-column");
   els.documentTitle = document.getElementById("documentTitle");
   els.editor = document.getElementById("editor");
   els.docInput = document.getElementById("docInput");
@@ -67,6 +78,7 @@ async function init() {
     onChange: handleEditorChange,
     onSelection: handleSelectionChange,
     onImageSelect: openImageMenu,
+    onImageDragStart: closeImageMenu,
     onSave: () => saveNow(),
     onLink: openLinkDialog,
     onPasteImages: (files) => addImages(files),
@@ -108,6 +120,7 @@ async function applyDocument(document) {
   els.documentTitle.value = document.title || "Untitled document";
   els.documentTitle.disabled = false;
   els.paper.setAttribute("aria-busy", "false");
+  applyPaperWidth(paperWidthFrom(document.paper_width));
 
   loadMissingImages(blocks, () => {
     editor.relayout();
@@ -138,6 +151,9 @@ function showLoadFailure(error) {
   const markNode = els.loadError.querySelector(".load-error-mark");
 
   els.paper.setAttribute("aria-busy", "false");
+  els.paper.querySelectorAll(".paper-grip").forEach((grip) => {
+    grip.hidden = true;
+  });
   els.paper.querySelector(".paper-head").hidden = true;
   els.editor.hidden = true;
   els.loadError.hidden = false;
@@ -169,7 +185,7 @@ function documentIdFromPath() {
 }
 
 function setToolbarEnabled(enabled) {
-  els.formatToolbar.querySelectorAll("button, select").forEach((control) => {
+  els.formatToolbar.querySelectorAll("button").forEach((control) => {
     control.disabled = !enabled;
   });
   els.imageButton.disabled = !enabled;
@@ -234,10 +250,14 @@ function updateEditorPlaceholder() {
 function buildPayload() {
   const blocks = editor ? editor.getDocument() : [];
   const hasContent = blocks.some((block) => block.type === "image" || blockText(block).trim().length > 0);
-  return {
+  const payload = {
     title: normalizeTitle(els.documentTitle.value),
     content: hasContent ? serializeDocument(blocks) : "",
+    // Zero tells the server to drop a stored width, so a document snapped back
+    // to the default follows the stylesheet again.
+    paper_width: state.paperWidth || 0,
   };
+  return payload;
 }
 
 function scheduleSave(delay) {
@@ -426,22 +446,19 @@ function bindEvents() {
     runCommand(button.dataset.command);
   });
 
-  els.blockStyle.addEventListener("change", () => {
-    if (!state.loaded) {
-      return;
-    }
-    const type = els.blockStyle.value;
-    if (type === "blockquote") {
-      editor.setBlockType("quote");
-    } else {
-      editor.setBlockType(type);
-    }
-    editor.focusEditor();
-  });
+  els.styleButton.addEventListener("click", toggleStyleMenu);
+  els.styleMenu.addEventListener("click", handleStyleMenuClick);
+  els.styleMenu.addEventListener("keydown", handleStyleMenuKeydown);
+  els.formatToolbar.addEventListener("scroll", closeStyleMenu, { passive: true });
 
   els.linkButton.addEventListener("click", openLinkDialog);
   els.imageButton.addEventListener("click", openImagePicker);
   els.imageInput.addEventListener("change", handleImagePicked);
+
+  els.alignButton.addEventListener("click", toggleAlignMenu);
+  els.alignMenu.addEventListener("click", handleAlignMenuClick);
+  els.alignMenu.addEventListener("keydown", handleAlignMenuKeydown);
+  els.formatToolbar.addEventListener("scroll", closeAlignMenu, { passive: true });
 
   els.imageMenu.addEventListener("click", handleImageMenuClick);
   els.imageMenu.addEventListener("keydown", (event) => {
@@ -469,9 +486,16 @@ function bindEvents() {
     editor.deleteBlockAt(index);
     editor.focusEditor();
   });
-  document.addEventListener("mousedown", handleDocumentPointer);
+  // The editor cancels pointerdown, which suppresses the mouse events that
+  // follow, so menu dismissal has to listen for the pointer event itself.
+  document.addEventListener("pointerdown", handleDocumentPointer);
+  bindPaperResize();
   window.addEventListener("scroll", closeImageMenu, { passive: true });
+  window.addEventListener("scroll", closeAlignMenu, { passive: true });
+  window.addEventListener("scroll", closeStyleMenu, { passive: true });
   window.addEventListener("resize", closeImageMenu);
+  window.addEventListener("resize", closeAlignMenu);
+  window.addEventListener("resize", closeStyleMenu);
 
   els.editor.addEventListener("dragover", (event) => {
     event.preventDefault();
@@ -508,6 +532,113 @@ function bindEvents() {
 
   document.addEventListener("keydown", handleGlobalKeydown);
   window.addEventListener("beforeunload", persistBeforeLeaving);
+}
+
+/* --------------------------------------------------------------------------
+   Paper width
+   -------------------------------------------------------------------------- */
+
+function paperWidthFrom(value) {
+  const width = Number(value);
+  return Number.isFinite(width) && width > 0 ? Math.round(width) : null;
+}
+
+function applyPaperWidth(width) {
+  state.paperWidth = width;
+  if (width) {
+    els.editorColumn.style.width = width + "px";
+  } else {
+    els.editorColumn.style.removeProperty("width");
+  }
+}
+
+// The page grows in both directions from the centre, so the widest it can get
+// is the workspace minus a small gap at each edge of the screen. The default
+// width is always reachable, even when the window is narrower than it.
+function paperWidthBounds() {
+  const workspace = els.editorColumn.parentElement;
+  const styles = window.getComputedStyle(workspace);
+  const padding = (parseFloat(styles.paddingLeft) || 0) + (parseFloat(styles.paddingRight) || 0);
+  const available = Math.max(0, workspace.clientWidth - padding);
+  const min = Math.min(PAPER_MIN_WIDTH, available);
+  const defaultWidth = Math.min(PAPER_DEFAULT_WIDTH, available);
+  const max = Math.max(min, available - PAPER_EDGE_GAP * 2, defaultWidth);
+  return { min, max, defaultWidth };
+}
+
+function bindPaperResize() {
+  for (const grip of els.paper.querySelectorAll("[data-paper-grip]")) {
+    grip.addEventListener("pointerdown", (event) => beginPaperResize(event, grip));
+    grip.addEventListener("pointermove", movePaperResize);
+    grip.addEventListener("pointerup", endPaperResize);
+    grip.addEventListener("pointercancel", endPaperResize);
+    grip.addEventListener("lostpointercapture", endPaperResize);
+  }
+}
+
+function beginPaperResize(event, grip) {
+  if (!state.loaded || state.paperDrag || event.button !== 0 || event.isPrimary === false) {
+    return;
+  }
+
+  const bounds = paperWidthBounds();
+  if (bounds.max <= 0) {
+    return;
+  }
+
+  const startWidth = els.paper.getBoundingClientRect().width;
+  event.preventDefault();
+  state.paperDrag = {
+    pointerId: event.pointerId,
+    side: grip.dataset.paperGrip,
+    grip,
+    startX: event.clientX,
+    startWidth,
+    min: Math.min(bounds.min, startWidth),
+    // A paper already wider than the gap allows (a narrow window) should not
+    // shrink when the first movement tries to widen it.
+    max: Math.max(bounds.max, startWidth),
+    defaultWidth: bounds.defaultWidth,
+    moved: false,
+  };
+  grip.setPointerCapture(event.pointerId);
+  grip.classList.add("is-active");
+  document.body.classList.add("is-resizing-paper");
+}
+
+function movePaperResize(event) {
+  const drag = state.paperDrag;
+  if (!drag || event.pointerId !== drag.pointerId) {
+    return;
+  }
+
+  event.preventDefault();
+  const distance = drag.side === "left" ? drag.startX - event.clientX : event.clientX - drag.startX;
+  // Both edges move, so one pixel of pointer travel adds two pixels of paper.
+  const clamped = Math.min(Math.max(drag.startWidth + distance * 2, drag.min), drag.max);
+  const width =
+    Math.abs(clamped - drag.defaultWidth) <= PAPER_SNAP_DISTANCE ? null : Math.round(clamped);
+  if (width !== state.paperWidth) {
+    applyPaperWidth(width);
+    drag.moved = true;
+  }
+}
+
+function endPaperResize(event) {
+  const drag = state.paperDrag;
+  if (!drag || (event && event.pointerId !== drag.pointerId)) {
+    return;
+  }
+
+  state.paperDrag = null;
+  drag.grip.classList.remove("is-active");
+  if (drag.grip.hasPointerCapture(drag.pointerId)) {
+    drag.grip.releasePointerCapture(drag.pointerId);
+  }
+  document.body.classList.remove("is-resizing-paper");
+  if (drag.moved) {
+    markDirty();
+  }
 }
 
 function runCommand(command) {
@@ -573,8 +704,8 @@ function handleSelectionChange(info) {
   }
 
   const type = info.blockType || "p";
-  const options = Array.from(els.blockStyle.options).map((option) => option.value);
-  els.blockStyle.value = options.includes(type) ? type : "p";
+  updateStyleState(type);
+  updateAlignState(info.alignment || "left");
 
   if (info.image) {
     state.imageEntry = info.image;
@@ -589,6 +720,212 @@ function setPressed(command, pressed) {
 }
 
 /* --------------------------------------------------------------------------
+   Paragraph style
+   -------------------------------------------------------------------------- */
+
+const STYLE_LABELS = {
+  p: "Normal text",
+  h1: "Heading 1",
+  h2: "Heading 2",
+  quote: "Quote",
+  code: "Code block",
+};
+
+function updateStyleState(type) {
+  const value = STYLE_LABELS[type] ? type : "p";
+  els.styleButtonLabel.textContent = STYLE_LABELS[value];
+  els.styleButton.setAttribute("aria-label", "Paragraph style: " + STYLE_LABELS[value]);
+  els.styleMenu.querySelectorAll("[data-block-style]").forEach((item) => {
+    item.setAttribute("aria-checked", item.dataset.blockStyle === value ? "true" : "false");
+  });
+}
+
+function toggleStyleMenu() {
+  if (els.styleButton.disabled) {
+    return;
+  }
+  if (!els.styleMenu.hidden) {
+    closeStyleMenu(true);
+    return;
+  }
+
+  closeAlignMenu();
+  closeDocumentMenu();
+  closeImageMenu();
+  els.styleMenu.hidden = false;
+  els.styleButton.setAttribute("aria-expanded", "true");
+  positionStyleMenu();
+
+  const current = els.styleMenu.querySelector('[aria-checked="true"]') || els.styleMenu.querySelector("button");
+  if (current) {
+    current.focus({ preventScroll: true });
+  }
+}
+
+function closeStyleMenu(restoreFocus) {
+  if (els.styleMenu.hidden) {
+    return;
+  }
+  els.styleMenu.hidden = true;
+  els.styleButton.setAttribute("aria-expanded", "false");
+  if (restoreFocus) {
+    els.styleButton.focus();
+  }
+}
+
+function positionStyleMenu() {
+  const buttonRect = els.styleButton.getBoundingClientRect();
+  const menuRect = els.styleMenu.getBoundingClientRect();
+  const margin = 12;
+  const gap = 8;
+
+  let left = buttonRect.left;
+  if (left + menuRect.width > window.innerWidth - margin) {
+    left = window.innerWidth - menuRect.width - margin;
+  }
+  left = Math.max(margin, left);
+
+  let top = buttonRect.bottom + gap;
+  if (top + menuRect.height > window.innerHeight - margin) {
+    top = buttonRect.top - menuRect.height - gap;
+  }
+  top = Math.max(margin, top);
+
+  els.styleMenu.style.left = Math.round(left) + "px";
+  els.styleMenu.style.top = Math.round(top) + "px";
+}
+
+function handleStyleMenuClick(event) {
+  const choice = event.target.closest("[data-block-style]");
+  if (!choice) {
+    return;
+  }
+  closeStyleMenu();
+  editor.setBlockType(choice.dataset.blockStyle);
+  editor.focusEditor();
+}
+
+function handleStyleMenuKeydown(event) {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+    return;
+  }
+  const items = Array.from(els.styleMenu.querySelectorAll("[data-block-style]"));
+  const index = items.indexOf(document.activeElement);
+  if (index === -1) {
+    return;
+  }
+  event.preventDefault();
+  const offset = event.key === "ArrowDown" ? 1 : -1;
+  items[(index + offset + items.length) % items.length].focus();
+}
+
+/* --------------------------------------------------------------------------
+   Alignment and indent
+   -------------------------------------------------------------------------- */
+
+const ALIGNMENT_LABELS = {
+  left: "left",
+  center: "centered",
+  right: "right",
+  justify: "justified",
+};
+
+function updateAlignState(alignment) {
+  const value = ALIGNMENT_LABELS[alignment] ? alignment : "left";
+  els.alignButton.dataset.currentAlign = value;
+  els.alignButton.setAttribute("aria-label", "Align & indent: " + ALIGNMENT_LABELS[value]);
+  els.alignMenu.querySelectorAll("[data-align-value]").forEach((button) => {
+    button.setAttribute("aria-checked", button.dataset.alignValue === value ? "true" : "false");
+  });
+}
+
+function toggleAlignMenu() {
+  if (els.alignButton.disabled) {
+    return;
+  }
+  if (!els.alignMenu.hidden) {
+    closeAlignMenu(true);
+    return;
+  }
+
+  closeDocumentMenu();
+  closeImageMenu();
+  closeStyleMenu();
+  els.alignMenu.hidden = false;
+  els.alignButton.setAttribute("aria-expanded", "true");
+  positionAlignMenu();
+
+  const current = els.alignMenu.querySelector('[aria-checked="true"]') || els.alignMenu.querySelector("button");
+  if (current) {
+    current.focus({ preventScroll: true });
+  }
+}
+
+function closeAlignMenu(restoreFocus) {
+  if (els.alignMenu.hidden) {
+    return;
+  }
+  els.alignMenu.hidden = true;
+  els.alignButton.setAttribute("aria-expanded", "false");
+  if (restoreFocus) {
+    els.alignButton.focus();
+  }
+}
+
+function positionAlignMenu() {
+  const buttonRect = els.alignButton.getBoundingClientRect();
+  const menuRect = els.alignMenu.getBoundingClientRect();
+  const margin = 12;
+  const gap = 8;
+
+  let left = buttonRect.left;
+  if (left + menuRect.width > window.innerWidth - margin) {
+    left = window.innerWidth - menuRect.width - margin;
+  }
+  left = Math.max(margin, left);
+
+  let top = buttonRect.bottom + gap;
+  if (top + menuRect.height > window.innerHeight - margin) {
+    top = buttonRect.top - menuRect.height - gap;
+  }
+  top = Math.max(margin, top);
+
+  els.alignMenu.style.left = Math.round(left) + "px";
+  els.alignMenu.style.top = Math.round(top) + "px";
+}
+
+function handleAlignMenuClick(event) {
+  const alignChoice = event.target.closest("[data-align-value]");
+  if (alignChoice) {
+    editor.setAlignment(alignChoice.dataset.alignValue);
+    closeAlignMenu();
+    editor.focusEditor();
+    return;
+  }
+
+  const indentChoice = event.target.closest("[data-indent-action]");
+  if (indentChoice) {
+    editor.changeIndent(Number(indentChoice.dataset.indentAction));
+    closeAlignMenu();
+    editor.focusEditor();
+  }
+}
+
+function handleAlignMenuKeydown(event) {
+  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+    return;
+  }
+  const items = Array.from(els.alignMenu.querySelectorAll("button:not(:disabled)"));
+  const index = items.indexOf(document.activeElement);
+  if (index === -1) {
+    return;
+  }
+  event.preventDefault();
+  const offset = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : -1;
+  items[(index + offset + items.length) % items.length].focus();
+}
+
+/* --------------------------------------------------------------------------
    Links
    -------------------------------------------------------------------------- */
 
@@ -598,6 +935,8 @@ function openLinkDialog() {
   }
   closeDocumentMenu();
   closeImageMenu();
+  closeAlignMenu();
+  closeStyleMenu();
 
   const selection = editor.getSelection();
   const existing = editor.linkAtCaret();
@@ -848,6 +1187,8 @@ function openImageMenu(entry) {
   if (!entry || !entry.image) {
     return;
   }
+  closeAlignMenu();
+  closeStyleMenu();
   state.imageEntry = entry;
   updateImageMenuChecks(entry);
   els.imageMenu.hidden = false;
@@ -946,6 +1287,12 @@ function handleDocumentPointer(event) {
   if (!els.documentMenu.hidden && !els.documentMenu.contains(event.target) && !event.target.closest("#documentMenuButton")) {
     closeDocumentMenu();
   }
+  if (!els.alignMenu.hidden && !els.alignMenu.contains(event.target) && !event.target.closest("#alignButton")) {
+    closeAlignMenu();
+  }
+  if (!els.styleMenu.hidden && !els.styleMenu.contains(event.target) && !event.target.closest("#styleButton")) {
+    closeStyleMenu();
+  }
 }
 
 /* --------------------------------------------------------------------------
@@ -963,6 +1310,9 @@ function toggleDocumentMenu() {
   }
   els.documentMenu.hidden = false;
   els.documentMenuButton.setAttribute("aria-expanded", "true");
+  closeAlignMenu();
+  closeImageMenu();
+  closeStyleMenu();
 }
 
 function closeDocumentMenu(restoreFocus) {
@@ -1033,6 +1383,15 @@ function exportHtml() {
     "img.wrap-left{float:left;max-width:42%;margin:.35em 1.35em 0 0;}",
     "img.wrap-right{float:right;max-width:42%;margin:.35em 0 0 1.35em;}",
     "h2,h3,h4,blockquote,pre{clear:both;}",
+    '[data-align="center"]{text-align:center;}',
+    '[data-align="right"]{text-align:right;}',
+    '[data-align="justify"]{text-align:justify;}',
+    '[data-indent="1"]{margin-left:24px;}',
+    '[data-indent="2"]{margin-left:48px;}',
+    '[data-indent="3"]{margin-left:72px;}',
+    '[data-indent="4"]{margin-left:96px;}',
+    '[data-indent="5"]{margin-left:120px;}',
+    '[data-indent="6"]{margin-left:144px;}',
     "a{color:#185abc;}footer{margin-top:3em;padding-top:1em;border-top:1px solid #ddd6c8;",
     "color:#8c8b7e;font:12px system-ui,sans-serif;}",
     "</style>",
@@ -1289,6 +1648,16 @@ async function deleteDocument() {
 
 function handleGlobalKeydown(event) {
   if (event.key === "Escape") {
+    if (!els.styleMenu.hidden) {
+      event.preventDefault();
+      closeStyleMenu(true);
+      return;
+    }
+    if (!els.alignMenu.hidden) {
+      event.preventDefault();
+      closeAlignMenu(true);
+      return;
+    }
     if (!els.imageMenu.hidden) {
       event.preventDefault();
       closeImageMenu();

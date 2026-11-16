@@ -77,6 +77,7 @@ assets/           browser UI; no build step (login.html is the password gate)
 assets/doc/       the editor: model, layout, view, and input
 assets/pretext/   vendored text layout engine (MIT); do not edit
 assets/fonts/     bundled Inter/Literata files and their licenses
+build.rs          git tag, commit, and commit date for /version
 Dockerfile        static musl binary on a scratch runtime image
 compose.yaml      local container: loopback port and grapho-data volume
 Cross.toml        cross-rs target images
@@ -101,6 +102,17 @@ default would scatter documents. A `./data` folder that already holds `.json`
 files wins, which keeps checkouts and copied folders portable, and
 `GRAPHO_DATA_DIR` overrides everything. The container image sets that variable
 to `/data` explicitly.
+
+`build.rs` records `GRAPHO_TAG`, `GRAPHO_COMMIT`, and `GRAPHO_COMMIT_DATE` when
+the build has a `.git` directory. `/version` renders them into
+`assets/version.html`; a build without git, such as the container image from a
+copied source tree, reports "unknown" and "not a tagged build" instead.
+
+The version page also asks GitHub for the latest release, so it is the one
+response whose CSP allows `connect-src https://api.github.com`; every other
+response keeps `connect-src 'self'`. The request happens once, when the page is
+opened, and never in the background: if it fails, is rate limited, or the
+browser has no network, the page says so and nothing else changes.
 
 ## Editor architecture
 
@@ -130,14 +142,27 @@ unchanged.
   stores the rendered width as `data-width` (the natural `width`/`height` stay).
   Holding Alt scales around the image's centre instead. Resizing turns the image
   free, so the text reflows beside it.
+- Paragraph alignment and indentation are block properties, stored as
+  `data-align` and `data-indent` on the block tag (or list item). Layout shifts
+  each painted line for centre/right alignment, stretches spaces on justified
+  lines except the last line of a segment, and adds 24 px per indent step. Lists
+  keep `depth` for nesting, separate from the generic indent. `Tab` indents an
+  ordinary paragraph and nests a list; the Align & indent popover exposes the
+  rest. Code blocks and images are outside paragraph alignment.
+- Paper width belongs to the document, not the HTML: `paper_width` (pixels) in
+  the document JSON, applied before the first layout. Dragging either border
+  resizes both edges around the centre; the workspace bounds the drag and leaves
+  a small gap at the edge of the screen. Widths near the 900 px default snap back
+  to it, which drops the stored preference so the page follows the stylesheet
+  again. Touch-only screens hide the grips.
 - Edits go through `DocEditor.commit()`, which snapshots undo state, re-lays out,
   and repaints. Do not mutate `blocks` in place.
 - The hidden `<textarea>` only captures keystrokes, IME, and clipboard events; its
   value is cleared after every event.
 - Known gaps: no native spellcheck, screen readers get the painted text but not a
-  text-editing surface, printing the editor prints the painted page, image
-  resizing needs a pointer, and HTML or Markdown exports put free-positioned
-  images back into the text flow.
+  text-editing surface, printing the editor prints the painted page, image and
+  paper resizing need a pointer, and HTML or Markdown exports put
+  free-positioned images back into the text flow.
 
 ## Invariants
 
@@ -149,14 +174,18 @@ These should not be casually changed:
   PNG, JPEG, WebP, and GIF data URLs on `img src`, never remote URLs: opening a
   document must not touch the network.
 - Formatting is stored as semantic tags (`<b>`, `<i>`, `<u>`, headings, lists),
-  never inline styles. The Content-Security-Policy forbids inline styles.
+  never inline styles. Paragraph alignment and indent are the one block-level
+  exception: bounded `data-align` and `data-indent` attributes on the block tag,
+  validated by the sanitizer. The Content-Security-Policy forbids inline styles.
 - The stored HTML is the interchange format between the editor and older
   documents. `parseDocument`/`serializeDocument` must round-trip it; test with
   documents written by earlier versions.
 - Rich HTML paste is reduced to plain text on purpose. Image files are the one
   exception; keep it that way unless the user asks for sanitized paste support.
 - The CSP, frame denial, no-referrer policy, and same-origin mutation check are
-  part of the app. Do not loosen them for convenience.
+  part of the app. Do not loosen them for convenience. The version page is the
+  only response allowed `connect-src https://api.github.com`, for its update
+  check; nothing else may reach an outside origin.
 - The server binds to loopback by default and has no TLS. Password login is
   optional; keep the startup warnings honest about what is and is not protected.
 - The password exists only as an Argon2id hash from `GRAPHO_PASSWORD_HASH` or
@@ -167,7 +196,7 @@ These should not be casually changed:
   or in the document store, and never make the cookie readable from JavaScript.
 - Every route that reads or changes a document is registered on the protected
   router in `api.rs`. The public routes are `/login`, `/api/session`,
-  `/api/health`, and `/assets/*`; a new public route needs a reason.
+  `/api/health`, `/version`, and `/assets/*`; a new public route needs a reason.
 - Argon2 runs on a blocking thread behind a single permit, failed logins are
   throttled, and authenticated responses are `no-store` with `Vary: Cookie`. Keep
   all three when touching the login code. Sessions and the failure counter are

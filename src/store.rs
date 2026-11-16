@@ -16,6 +16,10 @@ use uuid::Uuid;
 const SCHEMA_VERSION: u32 = 1;
 const MAX_TITLE_CHARS: usize = 200;
 const EXCERPT_CHARS: usize = 220;
+/// A document's paper width is a display preference, kept in the document file
+/// so it survives reloads. These bounds keep a hand-edited file sane.
+const MIN_PAPER_WIDTH: u32 = 320;
+const MAX_PAPER_WIDTH: u32 = 4000;
 
 /// The on-disk representation of a document.
 ///
@@ -29,6 +33,8 @@ pub struct Document {
     pub id: Uuid,
     pub title: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paper_width: Option<u32>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -130,6 +136,7 @@ impl Store {
             // markup into the editor.
             document.content = sanitize_content(&document.content);
             document.title = normalize_title(&document.title);
+            document.paper_width = document.paper_width.map(bounded_paper_width);
 
             documents.insert(id, document);
         }
@@ -164,6 +171,7 @@ impl Store {
             id: Uuid::new_v4(),
             title: "Untitled document".to_owned(),
             content: String::new(),
+            paper_width: None,
             created_at: now,
             updated_at: now,
         };
@@ -180,6 +188,7 @@ impl Store {
         id: Uuid,
         title: Option<String>,
         content: Option<String>,
+        paper_width: Option<u32>,
     ) -> Result<Option<Document>, StoreError> {
         let mut documents = self.documents.write().await;
         let Some(existing) = documents.get(&id).cloned() else {
@@ -192,8 +201,19 @@ impl Store {
         let next_content = content
             .map(|value| sanitize_content(&value))
             .unwrap_or_else(|| existing.content.clone());
+        let next_paper_width = match paper_width {
+            // The browser sends zero when the width snaps back to the default,
+            // which removes the stored preference instead of pinning a pixel
+            // value that should follow the stylesheet.
+            Some(0) => None,
+            Some(width) => Some(bounded_paper_width(width)),
+            None => existing.paper_width,
+        };
 
-        if next_title == existing.title && next_content == existing.content {
+        if next_title == existing.title
+            && next_content == existing.content
+            && next_paper_width == existing.paper_width
+        {
             return Ok(Some(existing));
         }
 
@@ -203,6 +223,7 @@ impl Store {
             id,
             title: next_title,
             content: next_content,
+            paper_width: next_paper_width,
             created_at: existing.created_at,
             updated_at,
         };
@@ -232,6 +253,10 @@ impl Store {
 
 fn schema_version() -> u32 {
     SCHEMA_VERSION
+}
+
+fn bounded_paper_width(width: u32) -> u32 {
+    width.clamp(MIN_PAPER_WIDTH, MAX_PAPER_WIDTH)
 }
 
 fn now_millis() -> u64 {
@@ -310,7 +335,22 @@ pub fn sanitize_content(html: &str) -> String {
     image_attributes.insert("data-y");
     image_attributes.insert("data-width");
 
-    let tag_attributes = HashMap::from([("a", link_attributes), ("img", image_attributes)]);
+    let mut block_attributes = HashSet::new();
+    block_attributes.insert("data-align");
+    block_attributes.insert("data-indent");
+
+    let tag_attributes = HashMap::from([
+        ("a", link_attributes),
+        ("img", image_attributes),
+        ("p", block_attributes.clone()),
+        ("div", block_attributes.clone()),
+        ("blockquote", block_attributes.clone()),
+        ("h1", block_attributes.clone()),
+        ("h2", block_attributes.clone()),
+        ("h3", block_attributes.clone()),
+        ("h4", block_attributes.clone()),
+        ("li", block_attributes),
+    ]);
 
     // `data:` carries embedded image bytes. The attribute filter below keeps it
     // on images and removes it from links, so a stored document can never turn
@@ -336,6 +376,17 @@ pub fn sanitize_content(html: &str) -> String {
                 }
             }
             ("a", "href") if value.to_ascii_lowercase().starts_with("data:") => None,
+            ("p" | "div" | "blockquote" | "h1" | "h2" | "h3" | "h4" | "li", "data-align") => {
+                match value {
+                    "center" | "right" | "justify" => Some(Cow::Borrowed(value)),
+                    _ => None,
+                }
+            }
+            ("p" | "div" | "blockquote" | "h1" | "h2" | "h3" | "h4" | "li", "data-indent") => {
+                let level = value.as_bytes().first().copied().unwrap_or_default();
+                let numeric = value.len() == 1 && (b'1'..=b'6').contains(&level);
+                numeric.then_some(Cow::Borrowed(value))
+            }
             ("img", "width") | ("img", "height") => {
                 let numeric = !value.is_empty()
                     && value.len() <= 5
@@ -603,6 +654,28 @@ mod tests {
     }
 
     #[test]
+    fn paragraph_alignment_and_indent_are_bounded() {
+        let dirty = concat!(
+            "<p data-align=\"center\" data-indent=\"2\">Centered</p>",
+            "<h2 data-align=\"right\" data-indent=\"9\">Too far</h2>",
+            "<p data-align=\"left\" data-indent=\"0\">Plain</p>",
+            "<ul><li data-align=\"justify\" data-indent=\"1\">Item</li></ul>",
+            "<p data-align=\"diagonal\" data-indent=\"two\">Nope</p>",
+        );
+        let clean = sanitize_content(dirty);
+
+        assert!(clean.contains("data-align=\"center\""));
+        assert!(clean.contains("data-indent=\"2\""));
+        assert!(clean.contains("data-align=\"right\""));
+        assert!(!clean.contains("data-indent=\"9\""));
+        assert!(!clean.contains("data-align=\"left\""));
+        assert!(!clean.contains("data-indent=\"0\""));
+        assert!(clean.contains("data-align=\"justify\""));
+        assert!(!clean.contains("diagonal"));
+        assert!(!clean.contains("data-indent=\"two\""));
+    }
+
+    #[test]
     fn data_urls_never_become_links() {
         let clean =
             sanitize_content("<a href=\"data:text/html;base64,PHNjcmlwdD4=\">click</a><p>text</p>");
@@ -633,6 +706,7 @@ mod tests {
                 document.id,
                 Some("  A field note  ".to_owned()),
                 Some("<p>Hello <strong>there</strong></p><script>x()</script>".to_owned()),
+                Some(1180),
             )
             .await
             .expect("update succeeds")
@@ -641,6 +715,7 @@ mod tests {
         assert_eq!(updated.title, "A field note");
         assert!(updated.content.contains("<strong>there</strong>"));
         assert!(!updated.content.contains("script"));
+        assert_eq!(updated.paper_width, Some(1180));
 
         let summary = store.list().await.remove(0);
         assert_eq!(summary.word_count, 2);
@@ -648,14 +723,16 @@ mod tests {
 
         drop(store);
         let reloaded = Store::load(directory.clone()).await.expect("store reloads");
-        assert_eq!(
-            reloaded
-                .get(document.id)
-                .await
-                .expect("document persists")
-                .title,
-            "A field note"
-        );
+        let restored = reloaded.get(document.id).await.expect("document persists");
+        assert_eq!(restored.title, "A field note");
+        assert_eq!(restored.paper_width, Some(1180));
+
+        let cleared = reloaded
+            .update(document.id, None, None, Some(0))
+            .await
+            .expect("update succeeds")
+            .expect("document exists");
+        assert_eq!(cleared.paper_width, None);
 
         assert!(reloaded.delete(document.id).await.expect("delete succeeds"));
         assert!(reloaded.get(document.id).await.is_none());

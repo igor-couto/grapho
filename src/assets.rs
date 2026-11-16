@@ -7,6 +7,7 @@ pub const INDEX_HTML: &str = include_str!("../assets/index.html");
 pub const EDITOR_HTML: &str = include_str!("../assets/editor.html");
 pub const LOGIN_HTML: &str = include_str!("../assets/login.html");
 pub const NOT_FOUND_HTML: &str = include_str!("../assets/not-found.html");
+pub const VERSION_HTML: &str = include_str!("../assets/version.html");
 
 pub fn find(path: &str) -> Option<Asset> {
     let asset = match path {
@@ -30,6 +31,7 @@ pub fn find(path: &str) -> Option<Asset> {
             bytes: include_bytes!("../assets/login.js"),
             content_type: "text/javascript; charset=utf-8",
         },
+        "version.js" => script(include_bytes!("../assets/version.js")),
         "doc/input.js" => script(include_bytes!("../assets/doc/input.js")),
         "doc/layout.js" => script(include_bytes!("../assets/doc/layout.js")),
         "doc/model.js" => script(include_bytes!("../assets/doc/model.js")),

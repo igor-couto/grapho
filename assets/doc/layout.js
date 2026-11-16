@@ -11,12 +11,13 @@ import {
   layoutNextLineRange,
   materializeLineRange,
 } from "../pretext/layout.js";
-import { blockText } from "./model.js";
+import { blockAlignment, blockIndent, blockText } from "./model.js";
 
 const READER = "Literata";
 const MONO = '"Cascadia Code", Consolas, "Liberation Mono", monospace';
 const IMAGE_GAP = 24;
 const DOC_TOP = 29;
+const INDENT_STEP = 24;
 
 export function contentTop() {
   return DOC_TOP;
@@ -235,13 +236,13 @@ function preparedCode(block) {
    -------------------------------------------------------------------------- */
 
 function indentFor(block) {
+  let indent = blockIndent(block) * INDENT_STEP;
   if (block.type === "quote") {
-    return STYLES.quote.indent;
+    indent += STYLES.quote.indent;
+  } else if (block.type === "list") {
+    indent += 28 + Math.min(block.depth, 4) * 21;
   }
-  if (block.type === "list") {
-    return 28 + Math.min(block.depth, 4) * 21;
-  }
-  return 0;
+  return indent;
 }
 
 export function imageWidthFor(block, columnWidth) {
@@ -335,9 +336,84 @@ function pushFragment(line, fragment, items, x) {
     font: item.font,
     gap: fragment.gapBefore,
     gapRunIndex: fragment.gapItemIndex >= 0 ? items[fragment.gapItemIndex].runIndex : -1,
+    spaceExtra: 0,
   };
   line.fragments.push(entry);
   return x + fragment.gapBefore + fragment.occupiedWidth;
+}
+
+function countSpaces(text) {
+  let count = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === " ") {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+export function fragmentTextWidth(fragment, text) {
+  const extra = (fragment.spaceExtra || 0) * countSpaces(text);
+  if (text === fragment.text) {
+    return fragment.width + extra;
+  }
+  return textWidth(text, fragment.font) + extra;
+}
+
+function justifyLine(line) {
+  const extra = line.width - line.contentWidth;
+  if (extra <= 0.01) {
+    return;
+  }
+
+  let slots = 0;
+  for (const fragment of line.fragments) {
+    slots += fragment.gap > 0 ? 1 : 0;
+    slots += countSpaces(fragment.text);
+  }
+  if (!slots) {
+    return;
+  }
+
+  const spaceExtra = extra / slots;
+  let shift = 0;
+  for (const fragment of line.fragments) {
+    if (fragment.gap > 0) {
+      fragment.gap += spaceExtra;
+      shift += spaceExtra;
+    }
+    fragment.x += shift;
+    fragment.spaceExtra = spaceExtra;
+    shift += countSpaces(fragment.text) * spaceExtra;
+  }
+  line.contentWidth = line.width;
+  line.spaceExtra = spaceExtra;
+}
+
+function alignLine(line, align) {
+  if (!line.fragments.length) {
+    if (align === "center") {
+      line.x += line.width / 2;
+    } else if (align === "right") {
+      line.x += line.width;
+    }
+    return;
+  }
+
+  if (align === "center" || align === "right") {
+    const shift = Math.max(0, line.width - line.contentWidth) * (align === "center" ? 0.5 : 1);
+    if (shift > 0) {
+      line.x += shift;
+      for (const fragment of line.fragments) {
+        fragment.x += shift;
+      }
+    }
+    return;
+  }
+
+  if (align === "justify" && !line.lastOfSegment) {
+    justifyLine(line);
+  }
 }
 
 function layoutRichBlock(block, columnWidth, top, obstacles, style) {
@@ -352,6 +428,7 @@ function layoutRichBlock(block, columnWidth, top, obstacles, style) {
     const prepared = preparedAll[index];
     const items = rawSegments[index].items;
     const isLast = index === preparedAll.length - 1;
+    const segmentStart = lines.length;
 
     // A hard break at the very end of a block opens a new segment that holds
     // nothing; HTML draws one line for it, not two.
@@ -360,7 +437,15 @@ function layoutRichBlock(block, columnWidth, top, obstacles, style) {
     }
 
     if (!prepared) {
-      lines.push({ y, x: indent, width: 0, height: lineHeight, fragments: [] });
+      lines.push({
+        y,
+        x: indent,
+        width: Math.max(48, columnWidth - indent),
+        height: lineHeight,
+        fragments: [],
+        contentWidth: 0,
+      });
+      lines[lines.length - 1].lastOfSegment = true;
       y += lineHeight;
       continue;
     }
@@ -390,17 +475,26 @@ function layoutRichBlock(block, columnWidth, top, obstacles, style) {
         break;
       }
       const materialized = materializeRichInlineLineRange(prepared, range);
-      const line = { y, x, width: available, height: lineHeight, fragments: [] };
+      const line = { y, x, width: available, height: lineHeight, fragments: [], contentWidth: 0 };
       let cursorX = x;
       for (const fragment of materialized.fragments) {
         cursorX = pushFragment(line, fragment, items, cursorX);
       }
+      line.contentWidth = cursorX - x;
       lines.push(line);
       y += lineHeight;
       cursor = range.end;
     }
+
+    if (lines.length > segmentStart) {
+      lines[lines.length - 1].lastOfSegment = true;
+    }
   }
 
+  const align = blockAlignment(block);
+  for (const line of lines) {
+    alignLine(line, align);
+  }
   return lines;
 }
 
@@ -580,7 +674,9 @@ function layoutPass(blocks, columnWidth, obstacles, pinned) {
       lines,
       quote: block.type === "quote",
       list: block.type === "list",
-      marker: block.type === "list" ? { x: indentFor(block) - 14, y: lines.length ? lines[0].y : y } : null,
+      marker: block.type === "list"
+        ? { x: (lines.length ? lines[0].x : indentFor(block)) - 14, y: lines.length ? lines[0].y : y }
+        : null,
     });
     y += height;
     previousAfter = style.after;
@@ -674,7 +770,7 @@ function offsetAtX(fragment, x) {
   if (x <= fragment.x) {
     return fragment.start;
   }
-  if (x >= fragment.x + fragment.width) {
+  if (x >= fragment.x + fragmentTextWidth(fragment, fragment.text)) {
     return fragment.end;
   }
   const boundaries = graphemeBoundaries(fragment.text);
@@ -682,7 +778,7 @@ function offsetAtX(fragment, x) {
   let high = boundaries.length - 1;
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
-    const width = textWidth(fragment.text.slice(0, boundaries[middle]), fragment.font);
+    const width = fragmentTextWidth(fragment, fragment.text.slice(0, boundaries[middle]));
     if (fragment.x + width <= x) {
       low = middle;
     } else {
@@ -694,7 +790,7 @@ function offsetAtX(fragment, x) {
 
 function xForOffset(fragment, offset) {
   const cut = Math.max(0, Math.min(fragment.text.length, offset - fragment.start));
-  return fragment.x + textWidth(fragment.text.slice(0, cut), fragment.font);
+  return fragment.x + fragmentTextWidth(fragment, fragment.text.slice(0, cut));
 }
 
 export function caretPoint(entry, offset) {
@@ -719,7 +815,7 @@ export function caretPoint(entry, offset) {
       continue;
     }
     if (offset > last.end) {
-      fallback = { x: last.x + last.width, y: line.y, height: line.height, line };
+      fallback = { x: last.x + fragmentTextWidth(last, last.text), y: line.y, height: line.height, line };
       continue;
     }
 
@@ -775,7 +871,7 @@ function xClamp(line, offset) {
     }
   }
   const last = line.fragments[line.fragments.length - 1];
-  return last.x + last.width;
+  return last.x + fragmentTextWidth(last, last.text);
 }
 
 let segmenter = null;

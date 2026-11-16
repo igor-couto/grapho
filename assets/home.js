@@ -83,6 +83,7 @@
     els.actionCancel = document.getElementById("actionCancel");
     els.actionConfirm = document.getElementById("actionConfirm");
     els.signOut = document.getElementById("signOut");
+    els.signOutRule = document.getElementById("signOutRule");
     els.toast = document.getElementById("toast");
 
     state.view = storedChoice(VIEW_KEY, VIEWS, "list");
@@ -260,6 +261,7 @@
       var payload = await request("/api/documents");
       state.documents = Array.isArray(payload.documents) ? payload.documents : [];
       els.signOut.hidden = !payload.auth_required;
+      els.signOutRule.hidden = !payload.auth_required;
       applySort();
       renderDocuments();
     } catch (error) {

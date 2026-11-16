@@ -2,7 +2,7 @@
 // sync. Only blocks whose geometry or text changed are rebuilt.
 
 import { blockLength } from "./model.js";
-import { textWidth } from "./layout.js";
+import { fragmentTextWidth, textWidth } from "./layout.js";
 
 const HANDLE_CORNERS = [
   ["nw", 0, 0],
@@ -81,6 +81,7 @@ export class EditorView {
           fragment.runIndex,
           fragment.start,
           fragment.gap,
+          fragment.spaceExtra,
           fragment.marks.b ? 1 : 0,
           fragment.marks.i ? 1 : 0,
           fragment.marks.u ? 1 : 0,
@@ -150,6 +151,9 @@ export class EditorView {
           const span = document.createElement("span");
           span.className = fragmentClass(fragment);
           span.textContent = fragment.text;
+          if (fragment.spaceExtra > 0) {
+            span.style.wordSpacing = fragment.spaceExtra + "px";
+          }
           if (fragment.marks && fragment.marks.href) {
             span.dataset.href = fragment.marks.href;
           }
@@ -381,9 +385,9 @@ function xAt(line, offset) {
         return fragment.x;
       }
       const cut = Math.max(0, Math.min(fragment.text.length, offset - fragment.start));
-      return fragment.x + textWidth(fragment.text.slice(0, cut), fragment.font);
+      return fragment.x + fragmentTextWidth(fragment, fragment.text.slice(0, cut));
     }
   }
   const last = line.fragments[line.fragments.length - 1];
-  return last.x + last.width;
+  return last.x + fragmentTextWidth(last, last.text);
 }
