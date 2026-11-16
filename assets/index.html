@@ -18,14 +18,31 @@
 
   <header class="site-header">
     <div class="shell site-header-inner home-header-row">
-      <label class="search-box">
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <circle cx="10.8" cy="10.8" r="6.3" stroke="currentColor" stroke-width="1.7"/>
-          <path d="m15.5 15.5 4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-        </svg>
-        <input id="searchDocuments" type="search" placeholder="Search documents" autocomplete="off" spellcheck="false" aria-label="Search documents">
-        <kbd aria-hidden="true">/</kbd>
-      </label>
+      <div class="menu-wrap">
+        <button class="icon-button" type="button" id="libraryMenuButton" aria-label="Library options" title="Library options" aria-haspopup="menu" aria-expanded="false">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <circle cx="5" cy="12" r="1.5" fill="currentColor"/>
+            <circle cx="12" cy="12" r="1.5" fill="currentColor"/>
+            <circle cx="19" cy="12" r="1.5" fill="currentColor"/>
+          </svg>
+        </button>
+        <div class="popover-menu library-menu" id="libraryMenu" role="menu" aria-label="Library options" hidden>
+          <p class="popover-label" id="themeLabel">Theme</p>
+          <div class="theme-choice" role="group" aria-labelledby="themeLabel">
+            <button class="theme-choice-button" type="button" role="menuitemradio" aria-checked="true" data-theme-choice="light" aria-label="Light">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <circle cx="12" cy="12" r="3.5" stroke="currentColor" stroke-width="1.7"/>
+                <path d="M12 2.8v2M12 19.2v2M21.2 12h-2M4.8 12h-2M18.5 5.5l-1.4 1.4M6.9 17.1l-1.4 1.4M18.5 18.5l-1.4-1.4M6.9 6.9 5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <button class="theme-choice-button" type="button" role="menuitemradio" aria-checked="false" data-theme-choice="dark" aria-label="Dark">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M20 14.4A8.2 8.2 0 0 1 9.6 4a8.2 8.2 0 1 0 10.4 10.4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   </header>
 
@@ -37,6 +54,17 @@
         </svg>
         <span>New Document</span>
       </button>
+    </div>
+
+    <div class="library-search shell">
+      <label class="search-box">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle cx="10.8" cy="10.8" r="6.3" stroke="currentColor" stroke-width="1.7"/>
+          <path d="m15.5 15.5 4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        </svg>
+        <input id="searchDocuments" type="search" placeholder="Search documents" autocomplete="off" spellcheck="false" aria-label="Search documents">
+        <kbd aria-hidden="true">/</kbd>
+      </label>
     </div>
 
     <section class="library shell" id="library" aria-label="Documents">
@@ -70,21 +98,6 @@
               <button class="menu-item" type="button" role="menuitemradio" aria-checked="true" data-sort="modified">Last modified</button>
               <button class="menu-item" type="button" role="menuitemradio" aria-checked="false" data-sort="created">Date created</button>
               <button class="menu-item" type="button" role="menuitemradio" aria-checked="false" data-sort="title">Title</button>
-              <div class="menu-rule" role="separator"></div>
-              <p class="popover-label" id="themeLabel">Theme</p>
-              <div class="theme-choice" role="group" aria-labelledby="themeLabel">
-                <button class="theme-choice-button" type="button" role="menuitemradio" aria-checked="true" data-theme-choice="light" aria-label="Light">
-                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                    <circle cx="12" cy="12" r="3.5" stroke="currentColor" stroke-width="1.7"/>
-                    <path d="M12 2.8v2M12 19.2v2M21.2 12h-2M4.8 12h-2M18.5 5.5l-1.4 1.4M6.9 17.1l-1.4 1.4M18.5 18.5l-1.4-1.4M6.9 6.9 5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-                  </svg>
-                </button>
-                <button class="theme-choice-button" type="button" role="menuitemradio" aria-checked="false" data-theme-choice="dark" aria-label="Dark">
-                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                    <path d="M20 14.4A8.2 8.2 0 0 1 9.6 4a8.2 8.2 0 1 0 10.4 10.4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
-                  </svg>
-                </button>
-              </div>
             </div>
           </div>
         </div>
@@ -148,8 +161,6 @@
           <span class="document-excerpt"></span>
           <span class="document-meta">
             <span class="document-edited"></span>
-            <span class="document-meta-dot" aria-hidden="true">·</span>
-            <span class="document-words"></span>
           </span>
         </span>
       </a>

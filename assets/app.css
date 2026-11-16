@@ -129,6 +129,9 @@ html[data-theme="dark"] {
 html {
   min-height: 100%;
   scroll-behavior: smooth;
+  /* Keep the scrollbar's width out of the layout so a page that grows past
+     the viewport doesn't shift sideways when the bar appears. */
+  scrollbar-gutter: stable;
 }
 
 body {
@@ -294,16 +297,7 @@ img {
 }
 
 .home-header-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  align-items: center;
-  gap: 12px;
-}
-
-.home-header-row .search-box {
-  width: 100%;
-  max-width: 360px;
-  justify-self: center;
+  justify-content: flex-end;
 }
 
 .icon-button {
@@ -467,6 +461,16 @@ html[data-theme="dark"] .button-primary:hover {
   flex: 0 0 auto;
 }
 
+
+.library-search {
+  display: flex;
+  justify-content: center;
+}
+
+.library-search .search-box {
+  width: 100%;
+  max-width: 360px;
+}
 
 .library {
   padding-top: 32px;
@@ -693,10 +697,6 @@ html[data-theme="dark"] .button-primary:hover {
   letter-spacing: 0.005em;
 }
 
-.document-meta-dot {
-  color: var(--line-strong);
-}
-
 .card-menu-wrap {
   position: absolute;
   z-index: 3;
@@ -854,6 +854,12 @@ html[data-theme="dark"] .button-primary:hover {
   min-width: 190px;
 }
 
+.library-menu {
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 190px;
+}
+
 .library-sort-menu .menu-item[aria-checked="true"] {
   background: var(--accent-soft);
   color: var(--accent);
@@ -902,6 +908,16 @@ html[data-theme="dark"] .button-primary:hover {
   width: 39%;
   height: 9px;
   margin-top: auto;
+}
+
+/* The glyph is a list-row affordance; grid cards lead with the title. */
+.documents.is-grid .document-glyph,
+.documents.is-grid .skeleton-icon {
+  display: none;
+}
+
+.documents.is-grid .skeleton-title {
+  margin-top: 0;
 }
 
 /* List view: a file listing, one row per document. The same card markup as the
@@ -1006,11 +1022,6 @@ html[data-theme="dark"] .button-primary:hover {
   color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
-}
-
-.documents.is-list .document-meta-dot,
-.documents.is-list .document-words {
-  display: none;
 }
 
 .documents.is-list .card-menu-wrap {
@@ -1944,10 +1955,6 @@ html[data-theme="dark"] .toast.is-error {
 
   .documents.is-grid .document-card-link {
     padding: 19px;
-  }
-
-  .documents.is-grid .document-glyph {
-    margin-bottom: 15px;
   }
 
   .documents.is-list .document-card-link {
