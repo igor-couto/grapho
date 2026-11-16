@@ -233,6 +233,13 @@ is private.
   binary inside the zip's top-level folder. Pushing to community.chocolatey.org
   needs a verified account and an API key, and the package goes through human
   moderation.
+- `.github/workflows/apt.yml` builds the apt repository from a release's `.deb`
+  files and deploys it to GitHub Pages, which must be enabled with "GitHub
+  Actions" as the source. `release.yml` calls it after publishing, and
+  `workflow_dispatch` backfills a tag. It signs `InRelease` with the same
+  `GPG_PRIVATE_KEY` as the release, indexes with `dpkg-scanpackages` and
+  `apt-ftparchive`, and serves `packaging/apt/index.html` as the landing page.
+  The published source is `https://igor-couto.github.io/grapho stable main`.
 
 The Windows builds link the C runtime statically (`RUSTFLAGS:
 -C target-feature=+crt-static` in `release.yml`), so the binary imports only

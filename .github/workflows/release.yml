@@ -536,3 +536,15 @@ jobs:
             --generate-notes \
             "${prerelease[@]}" \
             dist/*
+
+  apt:
+    name: Publish apt repository
+    needs: publish
+    uses: ./.github/workflows/apt.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit
+    permissions:
+      contents: read
+      pages: write
+      id-token: write

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Grapho apt repository</title>
+    <style>
+      body {
+        margin: 0 auto;
+        padding: 3rem 1.5rem;
+        max-width: 42rem;
+        background: #f7f3ec;
+        color: #23201c;
+        font: 16px/1.6 -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      h1 {
+        font-size: 1.5rem;
+        margin: 0 0 0.5rem;
+      }
+      p {
+        margin: 0 0 1rem;
+      }
+      pre {
+        overflow-x: auto;
+        padding: 1rem;
+        background: #fffdf8;
+        border: 1px solid #e2d9cb;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        line-height: 1.5;
+      }
+      code {
+        font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+      }
+      a {
+        color: #2f5d8c;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Grapho apt repository</h1>
+    <p>
+      Signed Debian and Ubuntu packages for
+      <a href="https://github.com/igor-couto/grapho">Grapho</a>, a quiet,
+      local-first document editor. Supports amd64 and arm64.
+    </p>
+
+    <p>Add the signing key and the repository:</p>
+    <pre><code>curl -fsSL https://igor-couto.github.io/grapho/key.asc \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/grapho.gpg
+
+echo "deb [signed-by=/etc/apt/keyrings/grapho.gpg] \
+https://igor-couto.github.io/grapho stable main" \
+  | sudo tee /etc/apt/sources.list.d/grapho.list
+
+sudo apt update
+sudo apt install grapho</code></pre>
+
+    <p>Then run <code>grapho</code> and open http://127.0.0.1:25265.</p>
+
+    <p>
+      The key is also published with every release as
+      <code>release-signing-key.asc</code>. Verify its fingerprint out of band.
+    </p>
+  </body>
+</html>

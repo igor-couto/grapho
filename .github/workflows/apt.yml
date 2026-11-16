@@ -1,0 +1,159 @@
+name: APT repository
+
+# Turns the .deb files of a release into a signed apt repository on GitHub
+# Pages. Called by release.yml after publishing, and runnable by hand to
+# backfill a tag or to rebuild the repository.
+#
+# Requires GitHub Pages to be enabled with "GitHub Actions" as the source.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag whose .deb files are published
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag whose .deb files are published
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: apt-pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish the repository
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      # Deliberately not pinned to the input tag: the tag being backfilled may
+      # predate this workflow, so the landing page and tooling come from the
+      # branch that is running. The packages themselves come from the release.
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Install the repository tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg-dev apt-utils gnupg
+
+      - name: Import the signing key
+        shell: bash
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GPG_PRIVATE_KEY:-}" ]]; then
+            echo "::error::The GPG_PRIVATE_KEY repository secret is not set."
+            exit 1
+          fi
+
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          rm -rf "$GNUPGHOME"
+          mkdir -m 700 "$GNUPGHOME"
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+
+          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
+
+          fingerprint="$(gpg --batch --list-secret-keys --with-colons | awk -F: '$1 == "fpr" { print $10; exit }')"
+          if [[ -z "$fingerprint" ]]; then
+            echo "::error::No secret signing key was imported."
+            exit 1
+          fi
+          echo "FINGERPRINT=$fingerprint" >> "$GITHUB_ENV"
+
+      - name: Download the packages
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p debs
+          gh release download "$TAG" --pattern '*.deb' --dir debs
+          ls -l debs
+
+      - name: Build and sign the repository
+        shell: bash
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+
+          root="$PWD/public"
+          rm -rf "$root"
+          mkdir -p "$root/pool/main/g/grapho" "$root/dists/stable/main"
+
+          cp debs/*.deb "$root/pool/main/g/grapho/"
+          gpg --batch --armor --export "$FINGERPRINT" > "$root/key.asc"
+
+          # The Packages files must be written from the repository root so the
+          # Filename fields are pool-relative.
+          cd "$root"
+          for arch in amd64 arm64; do
+            dir="dists/stable/main/binary-$arch"
+            mkdir -p "$dir"
+            dpkg-scanpackages --arch "$arch" pool /dev/null > "$dir/Packages"
+            gzip -9c "$dir/Packages" > "$dir/Packages.gz"
+            if [[ ! -s "$dir/Packages" ]]; then
+              echo "::error::No packages were indexed for $arch."
+              exit 1
+            fi
+          done
+
+          cp "$GITHUB_WORKSPACE/packaging/apt/index.html" index.html
+
+          cd dists/stable
+
+          signing=(--batch --yes --local-user "$FINGERPRINT")
+          passphrase_file=""
+          if [[ -n "${GPG_PASSPHRASE:-}" ]]; then
+            passphrase_file="$RUNNER_TEMP/gpg-passphrase"
+            printf '%s' "$GPG_PASSPHRASE" > "$passphrase_file"
+            chmod 600 "$passphrase_file"
+            signing+=(--pinentry-mode loopback --passphrase-file "$passphrase_file")
+          fi
+
+          # Written outside the directory first: a zero-byte Release sitting in
+          # it would be hashed into itself.
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin="Grapho" \
+            -o APT::FTPArchive::Release::Label="Grapho" \
+            -o APT::FTPArchive::Release::Suite="stable" \
+            -o APT::FTPArchive::Release::Codename="stable" \
+            -o APT::FTPArchive::Release::Architectures="amd64 arm64" \
+            -o APT::FTPArchive::Release::Components="main" \
+            -o APT::FTPArchive::Release::Description="Grapho apt repository" \
+            release . > "$RUNNER_TEMP/Release"
+          mv "$RUNNER_TEMP/Release" Release
+
+          gpg "${signing[@]}" --clearsign -o InRelease Release
+          gpg "${signing[@]}" --detach-sign -o Release.gpg Release
+          gpg --batch --verify InRelease
+
+          if [[ -n "$passphrase_file" ]]; then
+            rm -f "$passphrase_file"
+          fi
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
