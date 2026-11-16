@@ -188,3 +188,7 @@ GPL-3.0. See [LICENSE](LICENSE).
 
 Bundled fonts are under the SIL Open Font License; their license texts are in
 `assets/fonts/`.
+
+### Author
+
+* **Igor Couto** - [igor.fcouto@gmail.com](mailto:igor.fcouto@gmail.com)
