@@ -1,0 +1,27 @@
+# Maintainer: Igor Couto <igor.fcouto@gmail.com>
+
+pkgname=grapho-bin
+pkgver=0.1.1
+pkgrel=1
+pkgdesc='A quiet, local-first document editor that runs in your browser'
+arch=('x86_64' 'aarch64')
+url='https://github.com/igor-couto/grapho'
+license=('GPL-3.0-only')
+provides=('grapho')
+conflicts=('grapho')
+# The binary is already stripped, and there is nothing to debug-build.
+options=('!strip' '!debug')
+
+source_x86_64=("$url/releases/download/v$pkgver/grapho-$pkgver-linux-x86_64.tar.gz")
+sha256sums_x86_64=('ca66428cb30fc2f2e27285b1f2b1b489d5c3291159ff9591d40e21f385c24339')
+
+source_aarch64=("$url/releases/download/v$pkgver/grapho-$pkgver-linux-aarch64.tar.gz")
+sha256sums_aarch64=('322bb0df156e2c782257e23b39b4d4f7ed610ef87e4e815bdb952fa1737ccc62')
+
+package() {
+  local dir="grapho-$pkgver-linux-$CARCH"
+
+  install -Dm755 "$srcdir/$dir/grapho" "$pkgdir/usr/bin/grapho"
+  install -Dm644 "$srcdir/$dir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "$srcdir/$dir/README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

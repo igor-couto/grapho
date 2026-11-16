@@ -1,0 +1,138 @@
+name: Container image
+
+# Publishes a multi-architecture image to GitHub Container Registry from a
+# release's Linux binaries. Called by release.yml after publishing, and runnable
+# by hand to backfill a tag.
+#
+# The binaries are already static musl, so the image is assembled with copy
+# instructions only: no Rust build and no emulation, whichever architecture is
+# being built.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag whose binaries are published
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag whose binaries are published
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: container-image
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and push the image
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Sign in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Download the Linux binaries
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$TAG" \
+            --pattern '*-linux-x86_64.tar.gz' \
+            --pattern '*-linux-aarch64.tar.gz' \
+            --pattern '*-linux-armv7.tar.gz' \
+            --dir dist
+          ls -l dist
+
+      - name: Build and push each architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${TAG#v}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+
+          for pair in "amd64:x86_64" "arm64:aarch64" "arm/v7:armv7"; do
+            arch="${pair%%:*}"
+            triple="${pair##*:}"
+            stage="$RUNNER_TEMP/grapho-$version-linux-$triple"
+            ctx="$RUNNER_TEMP/ctx-${arch//\//-}"
+
+            rm -rf "$ctx"
+            mkdir -p "$ctx/rootfs/data"
+
+            # The /data entry must exist and belong to 65534, which a COPY
+            # instruction cannot express on a scratch image.
+            tar --numeric-owner --owner=65534 --group=65534 \
+              -cf "$ctx/rootfs.tar" -C "$ctx/rootfs" .
+
+            tar --extract --gzip --file "dist/grapho-$version-linux-$triple.tar.gz" \
+              --directory "$RUNNER_TEMP"
+            install -m 0755 "$stage/grapho" "$ctx/grapho"
+
+            cp LICENSE "$ctx/LICENSE"
+            cp packaging/docker/Dockerfile "$ctx/Dockerfile"
+
+            docker buildx build \
+              --platform "linux/$arch" \
+              --push \
+              --tag "$image:$version-${arch//\//-}" \
+              "$ctx"
+          done
+
+      - name: Merge the manifests into one tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${TAG#v}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+
+          tags=(--tag "$image:$version")
+          if [[ "$TAG" != *-* ]]; then
+            tags+=(--tag "$image:latest")
+          fi
+
+          docker buildx imagetools create "${tags[@]}" \
+            "$image:$version-amd64" \
+            "$image:$version-arm64" \
+            "$image:$version-arm-v7"
+
+          docker buildx imagetools inspect "$image:$version"
+
+      - name: Summarise
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          {
+            echo "### Container image"
+            echo
+            echo '```'
+            echo "docker run -d --name grapho \\"
+            echo "  -p 127.0.0.1:25265:25265 -v grapho-data:/data \\"
+            echo "  --restart unless-stopped $image:${TAG#v}"
+            echo '```'
+            echo
+            echo "If this is the first push, the package is private: set its"
+            echo "visibility to public once in the package settings."
+          } >> "$GITHUB_STEP_SUMMARY"

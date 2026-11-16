@@ -9,7 +9,38 @@ most, holds images that can be dragged into the text so the words flow around
 them and resized from their corners, saves as you type, and can export to HTML,
 Markdown, or plain text. Light and dark themes are included.
 
-## Running
+## Installing
+
+Prebuilt binaries for Linux, macOS, and Windows are attached to each
+[release](https://github.com/igor-couto/grapho/releases). Package managers:
+
+macOS and Linux, with Homebrew:
+
+```bash
+brew install igor-couto/grapho/grapho
+```
+
+Debian and Ubuntu:
+
+```bash
+curl -fsSL https://igor-couto.github.io/grapho/key.asc \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/grapho.gpg
+echo "deb [signed-by=/etc/apt/keyrings/grapho.gpg] https://igor-couto.github.io/grapho stable main" \
+  | sudo tee /etc/apt/sources.list.d/grapho.list
+sudo apt update && sudo apt install grapho
+```
+
+Windows, with Scoop:
+
+```powershell
+scoop bucket add grapho https://github.com/igor-couto/scoop-grapho
+scoop install grapho
+```
+
+Anywhere else, unpack the tarball for your platform and put `grapho` on your
+`PATH`. Every archive is signed; see [Verifying releases](#verifying-releases).
+
+## Running from source
 
 Requires Rust 1.89 or newer. On Windows, that means the MSVC toolchain with the
 C++ build tools, or a GNU toolchain with MinGW-w64 on `PATH`.

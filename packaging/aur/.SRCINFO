@@ -1,0 +1,18 @@
+pkgbase = grapho-bin
+	pkgdesc = A quiet, local-first document editor that runs in your browser
+	pkgver = 0.1.1
+	pkgrel = 1
+	url = https://github.com/igor-couto/grapho
+	arch = x86_64
+	arch = aarch64
+	license = GPL-3.0-only
+	provides = grapho
+	conflicts = grapho
+	options = !strip
+	options = !debug
+	source_x86_64 = https://github.com/igor-couto/grapho/releases/download/v0.1.1/grapho-0.1.1-linux-x86_64.tar.gz
+	sha256sums_x86_64 = ca66428cb30fc2f2e27285b1f2b1b489d5c3291159ff9591d40e21f385c24339
+	source_aarch64 = https://github.com/igor-couto/grapho/releases/download/v0.1.1/grapho-0.1.1-linux-aarch64.tar.gz
+	sha256sums_aarch64 = 322bb0df156e2c782257e23b39b4d4f7ed610ef87e4e815bdb952fa1737ccc62
+
+pkgname = grapho-bin

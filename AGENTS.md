@@ -182,8 +182,9 @@ These should not be casually changed:
 
 A pushed `v<version>` tag runs `.github/workflows/release.yml`. The tag must
 match `Cargo.toml`. The workflow builds Linux, macOS, and Windows binaries,
-adds `.deb`/`.rpm` packages, and writes `SHA256SUMS.txt`. It does not publish a
-container image; the `Dockerfile` is built on demand.
+adds `.deb`/`.rpm` packages, and writes `SHA256SUMS.txt`. After publishing it
+also refreshes the apt repository and the container image through the reusable
+workflows in `.github/workflows/`.
 
 The `cross` job adds armv7 Linux and x86_64 FreeBSD builds using a pinned build
 of cross-rs. Those cross-compiled binaries are not executed in CI. FreeBSD uses
@@ -240,6 +241,20 @@ is private.
   `GPG_PRIVATE_KEY` as the release, indexes with `dpkg-scanpackages` and
   `apt-ftparchive`, and serves `packaging/apt/index.html` as the landing page.
   The published source is `https://igor-couto.github.io/grapho stable main`.
+- `packaging/aur/` holds the AUR recipe for the prebuilt binaries, published as
+  `grapho-bin`; pacman installs the package that `makepkg` builds from it, and
+  the AUR hosts no binaries itself. `PKGBUILD` and `.SRCINFO` must stay in step:
+  after any change, regenerate `.SRCINFO` with `makepkg --printsrcinfo`. Both
+  `sha256sums_*` entries must match that release's Linux tarballs, and the
+  `package()` paths depend on the tarball's `grapho-<version>-linux-<arch>`
+  folder name.
+- `.github/workflows/image.yml` publishes `ghcr.io/igor-couto/grapho` with
+  `linux/amd64`, `linux/arm64`, and `linux/arm/v7` manifests merged into one tag
+  per release, plus `latest` for tags without a prerelease suffix. Each image is
+  assembled from the release's static binary using
+  `packaging/docker/Dockerfile`, so there is no compilation and no emulation.
+  The GHCR package is private after the first push and has to be made public
+  once in its package settings.
 
 The Windows builds link the C runtime statically (`RUSTFLAGS:
 -C target-feature=+crt-static` in `release.yml`), so the binary imports only

@@ -548,3 +548,13 @@ jobs:
       contents: read
       pages: write
       id-token: write
+
+  image:
+    name: Publish container image
+    needs: publish
+    uses: ./.github/workflows/image.yml
+    with:
+      tag: ${{ github.ref_name }}
+    permissions:
+      contents: read
+      packages: write
