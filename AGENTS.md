@@ -12,6 +12,9 @@ Do not add accounts, sharing, collaboration, a database, or a frontend framework
 unless the user asks for them. The current features are the product, not a
 starting point for every feature the app could have.
 
+The optional password is not an account system: one shared secret, no users, no
+roles, no per-document permissions. Keep it that way.
+
 ## Ground rules
 
 ### Speed and efficiency
@@ -65,20 +68,24 @@ starting point for every feature the app could have.
 ## Code map
 
 ```text
-src/main.rs       configuration, startup, graceful shutdown
+src/main.rs       configuration, CLI, startup, graceful shutdown
 src/api.rs        routes, static assets, security headers, same-origin check
+src/auth.rs       password gate: Argon2id, sessions, throttling, cookies
 src/store.rs      document model, JSON persistence, HTML sanitization
 src/assets.rs     embedded HTML/CSS/JS/font lookup
-assets/           browser UI; no build step
+assets/           browser UI; no build step (login.html is the password gate)
 assets/doc/       the editor: model, layout, view, and input
 assets/pretext/   vendored text layout engine (MIT); do not edit
 assets/fonts/     bundled Inter/Literata files and their licenses
+Dockerfile        static musl binary on a scratch runtime image
+compose.yaml      local container: loopback port and grapho-data volume
 Cross.toml        cross-rs target images
 ```
 
 Data flow is deliberately simple:
 
-1. The browser loads static HTML/CSS/JS.
+1. The browser loads static HTML/CSS/JS. When a password is configured, every
+   page and API call also needs a session cookie.
 2. The UI uses the JSON API for document operations.
 3. The Rust store keeps documents in an in-memory map and writes each change to
    `GRAPHO_DATA_DIR/<uuid>.json`.
@@ -140,8 +147,24 @@ These should not be casually changed:
   exception; keep it that way unless the user asks for sanitized paste support.
 - The CSP, frame denial, no-referrer policy, and same-origin mutation check are
   part of the app. Do not loosen them for convenience.
-- The server binds to loopback by default and has no authentication or TLS. Keep
-  deployment warnings honest.
+- The server binds to loopback by default and has no TLS. Password login is
+  optional; keep the startup warnings honest about what is and is not protected.
+- The password exists only as an Argon2id hash from `GRAPHO_PASSWORD_HASH` or
+  `GRAPHO_PASSWORD_HASH_FILE`. Never accept, store, or log a plaintext password,
+  and never write the hash into the data directory.
+- Session tokens are 32 random bytes, live in memory, and travel only in the
+  `HttpOnly`, `SameSite=Strict` cookie. Never put one in a URL, in `localStorage`,
+  or in the document store, and never make the cookie readable from JavaScript.
+- Every route that reads or changes a document is registered on the protected
+  router in `api.rs`. The public routes are `/login`, `/api/session`,
+  `/api/health`, and `/assets/*`; a new public route needs a reason.
+- Argon2 runs on a blocking thread behind a single permit, failed logins are
+  throttled, and authenticated responses are `no-store` with `Vary: Cookie`. Keep
+  all three when touching the login code. Sessions and the failure counter are
+  in memory on purpose: a restart signs everyone out and clears a login pause.
+- Login redirects carry the destination in `next` as one encoded query value. The
+  browser only follows it when it is a path on this server (`/login.js`
+  `nextPath()`); do not turn it into an open redirect.
 - Writes go through the temporary-file-and-replace path in `store.rs`. Do not
   introduce a database or write directly to a live document file.
 
@@ -149,7 +172,8 @@ These should not be casually changed:
 
 A pushed `v<version>` tag runs `.github/workflows/release.yml`. The tag must
 match `Cargo.toml`. The workflow builds Linux, macOS, and Windows binaries,
-adds `.deb`/`.rpm` packages, and writes `SHA256SUMS.txt`.
+adds `.deb`/`.rpm` packages, and writes `SHA256SUMS.txt`. It does not publish a
+container image; the `Dockerfile` is built on demand.
 
 The `cross` job adds armv7 Linux, riscv64 Linux, and x86_64 FreeBSD builds using
 a pinned build of cross-rs. Those cross-compiled binaries are not executed in
@@ -176,9 +200,12 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-`node --check assets/home.js`, `node --check assets/editor.js`, and
-`node --check assets/theme.js` are useful syntax checks when Node is available;
-Node is not a runtime dependency.
+`docker build -t grapho .` builds the container image: a static musl binary on a
+scratch image with an empty `/data` directory.
+
+`node --check assets/home.js`, `node --check assets/editor.js`,
+`node --check assets/login.js`, and `node --check assets/theme.js` are useful
+syntax checks when Node is available; Node is not a runtime dependency.
 
 For UI changes, start the app and check the real browser flow at least once:
 
@@ -187,6 +214,8 @@ For UI changes, start the app and check the real browser flow at least once:
 3. Export HTML and check that the title and body are present.
 4. Try a narrow mobile viewport and confirm there is no horizontal overflow.
 5. Watch the console for errors or CSP violations.
+6. With `GRAPHO_PASSWORD_HASH` set, sign in, check the wrong-password message,
+   confirm the editor and library work, and sign out from the library menu.
 
 On a Windows GNU toolchain, make sure MinGW's `bin` directory (with `dlltool.exe`
 and `ld.exe`) is on `PATH`. With the MSVC toolchain, install the Visual Studio C++

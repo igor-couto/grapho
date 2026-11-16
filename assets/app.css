@@ -1270,6 +1270,77 @@ html[data-theme="dark"] .toast.is-error {
 }
 
 /* --------------------------------------------------------------------------
+   Password gate
+   -------------------------------------------------------------------------- */
+
+.auth-page {
+  display: flex;
+  min-height: 100vh;
+  flex-direction: column;
+}
+
+.auth-main {
+  display: grid;
+  flex: 1;
+  align-content: center;
+  padding: 8px 0 64px;
+  justify-items: center;
+}
+
+.auth-card {
+  width: min(400px, 100%);
+  padding: 30px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-paper);
+}
+
+.auth-icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.auth-icon svg {
+  width: 21px;
+  height: 21px;
+}
+
+.auth-card h1 {
+  margin-top: 18px;
+  font-family: var(--font-reading);
+  font-size: 27px;
+  font-weight: 560;
+  letter-spacing: -0.035em;
+  line-height: 1.2;
+}
+
+.auth-lede {
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.auth-card .field {
+  margin-top: 22px;
+}
+
+.auth-card .field-error {
+  margin-top: 10px;
+}
+
+.auth-submit {
+  width: 100%;
+  margin-top: 20px;
+}
+
+/* --------------------------------------------------------------------------
    Editor shell
    -------------------------------------------------------------------------- */
 
@@ -2064,6 +2135,14 @@ html[data-theme="dark"] .toast.is-error {
 
   .modal-panel {
     padding: 23px;
+  }
+
+  .auth-card {
+    padding: 23px;
+  }
+
+  .auth-main {
+    padding-bottom: 48px;
   }
 }
 

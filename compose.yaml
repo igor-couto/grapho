@@ -1,0 +1,14 @@
+services:
+  grapho:
+    build: .
+    image: grapho
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${GRAPHO_PORT:-25265}:25265"
+    volumes:
+      - grapho-data:/data
+    read_only: true
+
+volumes:
+  grapho-data:
+    name: grapho-data

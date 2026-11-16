@@ -5,6 +5,7 @@ pub struct Asset {
 
 pub const INDEX_HTML: &str = include_str!("../assets/index.html");
 pub const EDITOR_HTML: &str = include_str!("../assets/editor.html");
+pub const LOGIN_HTML: &str = include_str!("../assets/login.html");
 pub const NOT_FOUND_HTML: &str = include_str!("../assets/not-found.html");
 
 pub fn find(path: &str) -> Option<Asset> {
@@ -23,6 +24,10 @@ pub fn find(path: &str) -> Option<Asset> {
         },
         "editor.js" => Asset {
             bytes: include_bytes!("../assets/editor.js"),
+            content_type: "text/javascript; charset=utf-8",
+        },
+        "login.js" => Asset {
+            bytes: include_bytes!("../assets/login.js"),
             content_type: "text/javascript; charset=utf-8",
         },
         "doc/input.js" => script(include_bytes!("../assets/doc/input.js")),

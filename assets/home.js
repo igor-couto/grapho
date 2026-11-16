@@ -82,6 +82,7 @@
     els.renameInput = document.getElementById("renameInput");
     els.actionCancel = document.getElementById("actionCancel");
     els.actionConfirm = document.getElementById("actionConfirm");
+    els.signOut = document.getElementById("signOut");
     els.toast = document.getElementById("toast");
 
     state.view = storedChoice(VIEW_KEY, VIEWS, "list");
@@ -155,6 +156,8 @@
         closeLibraryMenu();
       }
     });
+
+    els.signOut.addEventListener("click", signOut);
 
     els.actionCancel.addEventListener("click", closeActionDialog);
     els.actionConfirm.addEventListener("click", confirmAction);
@@ -256,6 +259,7 @@
     try {
       var payload = await request("/api/documents");
       state.documents = Array.isArray(payload.documents) ? payload.documents : [];
+      els.signOut.hidden = !payload.auth_required;
       applySort();
       renderDocuments();
     } catch (error) {
@@ -461,6 +465,22 @@
 
   function setCreatingState(isCreating) {
     els.newDocument.disabled = isCreating;
+  }
+
+  async function signOut() {
+    closeLibraryMenu();
+    els.signOut.disabled = true;
+
+    try {
+      await request("/api/session", { method: "DELETE" });
+      window.location.assign("/login");
+    } catch (error) {
+      els.signOut.disabled = false;
+      showToast(
+        error.userMessage || "Couldn't sign out. Please try again.",
+        true,
+      );
+    }
   }
 
   function openRenameDialog(document) {
@@ -743,6 +763,13 @@
     return dateFormatter.format(date);
   }
 
+  function loginUrl() {
+    return (
+      "/login?next=" +
+      encodeURIComponent(window.location.pathname + window.location.search)
+    );
+  }
+
   async function request(path, options) {
     var fetchOptions = Object.assign({}, options || {});
     fetchOptions.headers = {
@@ -765,6 +792,13 @@
     }
 
     if (!response.ok) {
+      if (response.status === 401) {
+        window.location.assign(loginUrl());
+        var authError = new Error("Sign in required");
+        authError.userMessage = "Your session ended. Sign in again.";
+        throw authError;
+      }
+
       var message =
         response.status === 404
           ? "That document no longer exists."

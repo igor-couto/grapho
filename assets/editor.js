@@ -1343,6 +1343,13 @@ async function request(path, options) {
   }
 
   if (!response.ok) {
+    if (response.status === 401) {
+      // The session ended while the editor was open. Sign in, then come back.
+      window.location.assign(
+        "/login?next=" + encodeURIComponent(window.location.pathname + window.location.search),
+      );
+    }
+
     const message =
       response.status === 404 ? "That document no longer exists." : "The request couldn't be completed.";
     let payload = null;
