@@ -20,9 +20,15 @@ cd grapho
 cargo run --release
 ```
 
-Open http://127.0.0.1:25265. The first run creates a `data/` directory in the
-project root. The compiled binary is `target/release/grapho` (`grapho.exe` on
-Windows); it can be copied elsewhere and run on its own.
+Open http://127.0.0.1:25265. The compiled binary is `target/release/grapho`
+(`grapho.exe` on Windows); it can be copied elsewhere and run on its own.
+
+Documents go to a per-user directory: `$XDG_DATA_HOME/grapho` (usually
+`~/.local/share/grapho`) on Linux, `~/Library/Application Support/Grapho` on
+macOS, and `%LOCALAPPDATA%\Grapho` on Windows. A `data/` folder in the working
+directory that already holds `.json` files is used instead, so an existing
+checkout keeps its documents where they are. Set `GRAPHO_DATA_DIR=data` in a
+fresh checkout if you want them next to the source.
 
 Useful shortcuts: `Ctrl+S` saves now, `Ctrl+K` adds a link, `Ctrl+B` / `Ctrl+I` /
 `Ctrl+U` format text, and `/` focuses the search box on the home screen.
@@ -32,7 +38,7 @@ Useful shortcuts: `Ctrl+S` saves now, `Ctrl+K` adds a link, `Ctrl+B` / `Ctrl+I` 
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `GRAPHO_ADDR` | `127.0.0.1:25265` | Address and port to listen on. |
-| `GRAPHO_DATA_DIR` | `data` | Directory for document JSON files. |
+| `GRAPHO_DATA_DIR` | per-user directory | Directory for document JSON files. |
 | `GRAPHO_PASSWORD_HASH` | unset | Argon2id hash from `grapho hash-password`. Turns on the login screen. |
 | `GRAPHO_PASSWORD_HASH_FILE` | unset | File containing that hash. Wins over `GRAPHO_PASSWORD_HASH`. |
 
@@ -116,11 +122,12 @@ bind-mounted host directory must be writable by that user.
 
 ## Data
 
-Documents are stored in `GRAPHO_DATA_DIR/<document-id>.json` (under `data/` by
-default). Each file contains the title, sanitized HTML, and timestamps. Images are
-embedded as base64 data URLs, so a document stays one self-contained file; photos
-are shrunk in the browser first. A save replaces the file through a temporary
-file, so a crash is unlikely to leave a half-written document.
+Documents are stored in `GRAPHO_DATA_DIR/<document-id>.json`, which defaults to
+the per-user directory above. Each file contains the title, sanitized HTML, and
+timestamps. Images are embedded as base64 data URLs, so a document stays one
+self-contained file; photos are shrunk in the browser first. A save replaces the
+file through a temporary file, so a crash is unlikely to leave a half-written
+document.
 
 Copy the whole directory to back it up. Stop Grapho first if you want a
 consistent snapshot.

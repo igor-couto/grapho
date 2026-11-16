@@ -92,6 +92,16 @@ Data flow is deliberately simple:
 4. Documents use a simple versioned JSON format. Add `#[serde(default)]` when
    extending it, and preserve existing files.
 
+The default data directory is per-user, not the working directory:
+`$XDG_DATA_HOME/grapho` or `~/.local/share/grapho` on Linux,
+`~/Library/Application Support/Grapho` on macOS, and `%LOCALAPPDATA%\Grapho` on
+Windows. Package managers start the binary from arbitrary directories
+(`brew services` from `/`, a Chocolatey shim from `System32`), so a relative
+default would scatter documents. A `./data` folder that already holds `.json`
+files wins, which keeps checkouts and copied folders portable, and
+`GRAPHO_DATA_DIR` overrides everything. The container image sets that variable
+to `/data` explicitly.
+
 ## Editor architecture
 
 The editor does not use `contenteditable`. `assets/doc/input.js` owns the block
@@ -189,6 +199,18 @@ The workflow signs every archive, package, and `SHA256SUMS.txt` with armored
 detached `.asc` signatures and uploads `release-signing-key.asc`. It fails
 before publishing when `GPG_PRIVATE_KEY` is missing. Keep the private key out of
 the repository and logs.
+
+### Distribution
+
+Installers come from the same tagged release, so the asset names, archive
+layout, and checksums in `packaging/` must match `release.yml`. Every channel
+needs anonymous HTTPS downloads: nothing can be published while the repository
+is private.
+
+- `packaging/homebrew/Formula/grapho.rb` is the tap formula. Copy it to
+  `Formula/grapho.rb` in `igor-couto/homebrew-grapho` and replace the three
+  `sha256` placeholders with the `grapho` lines from that tag's
+  `SHA256SUMS.txt`.
 
 ## Checks
 

@@ -121,14 +121,7 @@ impl Config {
             format!("GRAPHO_ADDR is not a valid socket address ({raw_address:?}): {error}")
         })?;
 
-        let data_dir = env::var_os("GRAPHO_DATA_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("data"));
-        let data_dir = if data_dir.is_absolute() {
-            data_dir
-        } else {
-            env::current_dir()?.join(data_dir)
-        };
+        let data_dir = data_dir_from_environment()?;
 
         let auth = Auth::from_environment()?;
 
@@ -137,6 +130,113 @@ impl Config {
             data_dir,
             auth,
         })
+    }
+}
+
+/// Where documents live when nothing else decides it. Installed builds are
+/// launched from arbitrary working directories by service managers, shims, and
+/// shortcuts, so they cannot rely on a relative path.
+// Every variant exists on every platform so the rules below stay testable
+// wherever the suite runs, even though only one is constructed in a build.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Platform {
+    Unix,
+    MacOs,
+    Windows,
+}
+
+fn current_platform() -> Platform {
+    #[cfg(windows)]
+    const PLATFORM: Platform = Platform::Windows;
+    #[cfg(target_os = "macos")]
+    const PLATFORM: Platform = Platform::MacOs;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    const PLATFORM: Platform = Platform::Unix;
+
+    PLATFORM
+}
+
+fn data_dir_from_environment() -> Result<PathBuf, BoxError> {
+    if let Some(configured) = env::var_os("GRAPHO_DATA_DIR") {
+        return absolute(PathBuf::from(configured));
+    }
+
+    if let Some(portable) = portable_data_dir() {
+        return Ok(portable);
+    }
+
+    let home = env::var_os("HOME").map(PathBuf::from);
+    let xdg_data_home = env::var_os("XDG_DATA_HOME").map(PathBuf::from);
+    let local_app_data = env::var_os("LOCALAPPDATA").map(PathBuf::from);
+
+    let directory = per_user_data_dir(
+        current_platform(),
+        home.as_deref(),
+        xdg_data_home.as_deref(),
+        local_app_data.as_deref(),
+    )
+    .unwrap_or_else(|| PathBuf::from("data"));
+
+    absolute(directory)
+}
+
+fn per_user_data_dir(
+    platform: Platform,
+    home: Option<&Path>,
+    xdg_data_home: Option<&Path>,
+    local_app_data: Option<&Path>,
+) -> Option<PathBuf> {
+    match platform {
+        Platform::Unix => {
+            // The XDG base directory specification ignores relative values.
+            let base = xdg_data_home
+                .filter(|path| path.is_absolute())
+                .map(Path::to_path_buf)
+                .or_else(|| home.map(|home| home.join(".local").join("share")))?;
+            Some(base.join("grapho"))
+        }
+        Platform::MacOs => Some(
+            home?
+                .join("Library")
+                .join("Application Support")
+                .join("Grapho"),
+        ),
+        Platform::Windows => {
+            let base = local_app_data
+                .map(Path::to_path_buf)
+                .or_else(|| home.map(|home| home.join("AppData").join("Local")))?;
+            Some(base.join("Grapho"))
+        }
+    }
+}
+
+/// `./data` stays in use while it already holds documents, so a checkout or a
+/// folder copied around still behaves the way it did before the per-user
+/// default existed.
+fn portable_data_dir() -> Option<PathBuf> {
+    let candidate = env::current_dir().ok()?.join("data");
+    directory_holds_documents(&candidate).then_some(candidate)
+}
+
+fn directory_holds_documents(directory: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return false;
+    };
+
+    entries.flatten().any(|entry| {
+        entry
+            .path()
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+    })
+}
+
+fn absolute(path: PathBuf) -> Result<PathBuf, BoxError> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(env::current_dir()?.join(path))
     }
 }
 
@@ -256,5 +356,72 @@ mod tests {
 
         assert!(parse(&["--password", "hunter2"]).is_err());
         assert!(parse(&["hash-password", "extra"]).is_err());
+    }
+
+    #[test]
+    fn per_user_data_dir_follows_each_platform() {
+        // Temp paths are absolute on every platform, so this test can check the
+        // macOS and Windows branches everywhere.
+        let base = env::temp_dir();
+        let home = base.join("home");
+        let xdg = base.join("xdg");
+        let local_app_data = base.join("local");
+        let relative = Path::new("relative");
+
+        assert_eq!(
+            per_user_data_dir(Platform::Unix, Some(&home), Some(&xdg), None),
+            Some(xdg.join("grapho"))
+        );
+        assert_eq!(
+            per_user_data_dir(Platform::Unix, Some(&home), None, None),
+            Some(home.join(".local").join("share").join("grapho"))
+        );
+        assert_eq!(
+            per_user_data_dir(Platform::Unix, Some(&home), Some(relative), None),
+            Some(home.join(".local").join("share").join("grapho")),
+            "a relative XDG_DATA_HOME is ignored"
+        );
+        assert_eq!(per_user_data_dir(Platform::Unix, None, None, None), None);
+
+        assert_eq!(
+            per_user_data_dir(Platform::MacOs, Some(&home), None, None),
+            Some(
+                home.join("Library")
+                    .join("Application Support")
+                    .join("Grapho")
+            )
+        );
+        assert_eq!(per_user_data_dir(Platform::MacOs, None, None, None), None);
+
+        assert_eq!(
+            per_user_data_dir(Platform::Windows, Some(&home), None, Some(&local_app_data)),
+            Some(local_app_data.join("Grapho"))
+        );
+        assert_eq!(
+            per_user_data_dir(Platform::Windows, Some(&home), None, None),
+            Some(home.join("AppData").join("Local").join("Grapho")),
+            "LOCALAPPDATA is preferred but not required"
+        );
+        assert_eq!(per_user_data_dir(Platform::Windows, None, None, None), None);
+    }
+
+    #[test]
+    fn only_a_folder_with_json_documents_is_a_portable_store() {
+        let root = env::temp_dir().join(format!("grapho-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        assert!(!directory_holds_documents(&root));
+
+        std::fs::write(root.join("README.md"), b"not a document").unwrap();
+        assert!(!directory_holds_documents(&root));
+
+        std::fs::write(
+            root.join("6f9c1f2e-0000-4000-8000-000000000000.json"),
+            b"{}",
+        )
+        .unwrap();
+        assert!(directory_holds_documents(&root));
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
