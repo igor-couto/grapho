@@ -37,6 +37,16 @@ scoop bucket add grapho https://github.com/igor-couto/scoop-grapho
 scoop install grapho
 ```
 
+Docker, on amd64, arm64, and armv7:
+
+```bash
+docker run -d --name grapho -p 127.0.0.1:25265:25265 \
+  -v grapho-data:/data --restart unless-stopped \
+  ghcr.io/igor-couto/grapho:latest
+```
+
+Ports, passwords, and building from a checkout are covered [below](#docker).
+
 Anywhere else, unpack the tarball for your platform and put `grapho` on your
 `PATH`. Every archive is signed; see [Verifying releases](#verifying-releases).
 
@@ -121,8 +131,12 @@ WireGuard. The session cookie is marked `Secure` when the proxy sends
 
 ## Docker
 
-`compose.yaml` runs Grapho in a container; the image is a scratch image with the
-static binary, its license, and an empty `/data` directory.
+The image in the `docker run` above is a scratch image holding the static binary,
+its license, and an empty `/data` directory, published for amd64, arm64, and
+armv7. Pin a version instead of `latest` when you want to control upgrades, for
+example `ghcr.io/igor-couto/grapho:0.1.1`.
+
+`compose.yaml` builds the same image from a checkout:
 
 ```bash
 docker compose up -d
@@ -130,8 +144,7 @@ docker compose up -d
 
 That serves http://127.0.0.1:25265 and keeps documents in the `grapho-data`
 volume. Use `GRAPHO_PORT=8080` to pick another host port (on PowerShell, set
-`$env:GRAPHO_PORT` first). Without Compose, run
-`docker build -t grapho .` and
+`$env:GRAPHO_PORT` first). Without Compose, run `docker build -t grapho .` and
 `docker run --rm -p 127.0.0.1:25265:25265 -v grapho-data:/data grapho`.
 
 To require a password, generate the hash first and pass it in:
@@ -140,7 +153,7 @@ To require a password, generate the hash first and pass it in:
 grapho hash-password
 docker run --rm -p 127.0.0.1:25265:25265 \
   -e GRAPHO_PASSWORD_HASH='$argon2id$v=19$m=19456,t=2,p=1$...' \
-  -v grapho-data:/data grapho
+  -v grapho-data:/data ghcr.io/igor-couto/grapho:latest
 ```
 
 With Compose, the simple route is a file: write the hash to a file, mount it, and
@@ -168,7 +181,8 @@ consistent snapshot.
 A pushed tag such as `v0.1.0` runs the release workflow and publishes Linux
 (x86_64, aarch64, and armv7), FreeBSD x86_64, macOS universal, and
 Windows (x64 and arm64) builds. Linux x86_64 and aarch64 also get `.deb` and
-`.rpm` packages. The tag must match `version` in `Cargo.toml`. The armv7 and
+`.rpm` packages. The same tag updates the apt repository and publishes the
+container image. The tag must match `version` in `Cargo.toml`. The armv7 and
 FreeBSD builds are cross-compiled and not run in CI.
 
 ```bash
