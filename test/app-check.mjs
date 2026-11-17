@@ -772,7 +772,30 @@ async function main() {
         return true;
       })()`,
     );
-    await evaluate(cdp, `document.getElementById("documentMenuButton").click()`);
+    // The menu settles in with a short animation instead of popping open. It
+    // has to be brief enough that the next click never waits for it.
+    const menuOpening = await evaluate(
+      cdp,
+      `(() => {
+        document.getElementById("documentMenuButton").click();
+        const menu = document.getElementById("documentMenu");
+        return {
+          open: !menu.hidden,
+          animations: menu.getAnimations().map((animation) => ({
+            name: animation.animationName || "",
+            duration: animation.effect ? animation.effect.getTiming().duration : 0,
+          })),
+        };
+      })()`,
+    );
+    check(
+      "opening a menu animates it in briefly",
+      menuOpening.open &&
+        menuOpening.animations.some(
+          (animation) => animation.name === "menu-in" && animation.duration === 180,
+        ),
+      JSON.stringify(menuOpening),
+    );
     await evaluate(cdp, `document.querySelector('[data-doc-action="export-html"]').click()`);
     let exportedHtml = "";
     for (let attempt = 0; attempt < 40; attempt += 1) {

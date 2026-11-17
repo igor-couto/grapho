@@ -441,16 +441,27 @@ html[data-theme="dark"] .button-primary:hover {
   font-weight: 500;
   letter-spacing: -0.035em;
   line-height: 1.1;
-  /* The corners stay at 7px; hover only adds depth and a slightly darker
-     background, so nothing moves. */
-  transition: box-shadow 180ms ease, background-color 180ms ease;
+  /* The corners stay at 7px and nothing moves. Hover only adds a drop
+     shadow; the fill, the ink, and the border stay as they are. */
+  transition: box-shadow 180ms ease;
 }
 
 .new-document-button:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--feature-bg) 92%, #000);
+  /* The resting glow stays put; the drop shadow layered on it is the only
+     thing hover changes. */
   box-shadow:
     0 22px 50px -32px rgba(35, 34, 24, 0.5),
-    0 1px 3px rgba(0, 0, 0, 0.1);
+    0 2px 4px rgba(35, 34, 24, 0.16),
+    0 5px 12px -1px rgba(35, 34, 24, 0.32);
+}
+
+/* The warm drop shadow nearly disappears on charcoal, so the dark theme
+   casts a black one instead. */
+html[data-theme="dark"] .new-document-button:hover:not(:disabled) {
+  box-shadow:
+    0 22px 50px -32px rgba(35, 34, 24, 0.5),
+    0 2px 4px rgba(0, 0, 0, 0.3),
+    0 5px 12px -1px rgba(0, 0, 0, 0.55);
 }
 
 .new-document-button:disabled {
@@ -870,6 +881,9 @@ html[data-theme="dark"] .button-primary:hover {
 
 .card-menu,
 .popover-menu {
+  /* Where the opening animation starts: the last few pixels between the menu
+     and its trigger. Menus placed above the trigger flip it in JS. */
+  --menu-shift: -6px;
   position: absolute;
   z-index: 20;
   min-width: 174px;
@@ -883,6 +897,33 @@ html[data-theme="dark"] .button-primary:hover {
 .card-menu {
   top: 37px;
   right: 0;
+}
+
+/* Menus settle into place instead of popping in. `ease` spreads the fade over
+   the whole 180ms instead of finishing it in the first frames; that reads as
+   a quick settle, not a flash, and stays short enough to never delay a choice.
+   Reduced-motion readers get the menu instantly. */
+.card-menu:not([hidden]),
+.popover-menu:not([hidden]) {
+  animation: menu-in 180ms ease;
+}
+
+.popover-menu[data-side="above"] {
+  --menu-shift: 6px;
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--menu-shift));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card-menu:not([hidden]),
+  .popover-menu:not([hidden]) {
+    animation: none;
+  }
 }
 
 .menu-item {

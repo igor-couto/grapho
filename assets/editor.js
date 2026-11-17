@@ -830,11 +830,16 @@ function positionStyleMenu() {
   left = Math.max(margin, left);
 
   let top = buttonRect.bottom + gap;
+  let above = false;
   if (top + menuRect.height > window.innerHeight - margin) {
     top = buttonRect.top - menuRect.height - gap;
+    above = true;
   }
   top = Math.max(margin, top);
 
+  // Menus on the left and right of the toolbar open downwards unless the
+  // window is too short; the animation slides them out of the button's side.
+  els.styleMenu.dataset.side = above ? "above" : "below";
   els.styleMenu.style.left = Math.round(left) + "px";
   els.styleMenu.style.top = Math.round(top) + "px";
 }
@@ -929,11 +934,14 @@ function positionAlignMenu() {
   left = Math.max(margin, left);
 
   let top = buttonRect.bottom + gap;
+  let above = false;
   if (top + menuRect.height > window.innerHeight - margin) {
     top = buttonRect.top - menuRect.height - gap;
+    above = true;
   }
   top = Math.max(margin, top);
 
+  els.alignMenu.dataset.side = above ? "above" : "below";
   els.alignMenu.style.left = Math.round(left) + "px";
   els.alignMenu.style.top = Math.round(top) + "px";
 }
@@ -1249,11 +1257,16 @@ function positionImageMenu(entry) {
   left = Math.max(margin, left);
 
   let top = imageTop - menuRect.height - gap;
+  let above = true;
   if (top < margin) {
     top = Math.min(imageBottom + gap, window.innerHeight - menuRect.height - margin);
     top = Math.max(margin, top);
+    above = false;
   }
 
+  // The image menu is usually above the picture; animate it out of the side it
+  // actually landed on.
+  els.imageMenu.dataset.side = above ? "above" : "below";
   els.imageMenu.style.left = Math.round(left) + "px";
   els.imageMenu.style.top = Math.round(top) + "px";
 }
