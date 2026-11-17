@@ -1497,6 +1497,52 @@ async function main() {
       .map((event) => event.params.args.map((arg) => arg.value || arg.description).join(" "));
     check("no console errors in the real editor", consoleErrors.length === 0, consoleErrors.join("\n"));
 
+    // The library's card menu is placed by CSS rather than measured, and in
+    // grid view it opens above its button. The opening animation starts from
+    // --menu-shift, so the grid menu must start below its resting place and
+    // rise out of the button, while the list menu settles down out of it.
+    await cdp.send("Page.navigate", { url: base + "/" });
+    await waitForPage(cdp, base + "/", PAGE_TIMEOUT_MS);
+    let libraryCards = 0;
+    for (let attempt = 0; attempt < 60 && libraryCards === 0; attempt += 1) {
+      libraryCards = await evaluate(
+        cdp,
+        `document.querySelectorAll(".document-card").length`,
+      );
+      if (libraryCards === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+    check("the library lists the document as a card", libraryCards > 0);
+    const cardMenuShifts = await evaluate(
+      cdp,
+      `(() => {
+        const documents = document.getElementById("documents");
+        const toggle = document.getElementById("viewToggle");
+        const shift = () => {
+          const menu = documents.querySelector(".card-menu");
+          return menu
+            ? getComputedStyle(menu).getPropertyValue("--menu-shift").trim()
+            : "";
+        };
+        const list = shift();
+        toggle.click();
+        const grid = shift();
+        toggle.click();
+        return { isGrid: documents.classList.contains("is-grid"), list, grid };
+      })()`,
+    );
+    check(
+      "the list card menu settles down out of its button",
+      cardMenuShifts.list === "-6px",
+      JSON.stringify(cardMenuShifts),
+    );
+    check(
+      "the grid card menu settles up out of its button",
+      cardMenuShifts.grid === "6px",
+      JSON.stringify(cardMenuShifts),
+    );
+
     await evaluate(
       cdp,
       `fetch("/api/documents/${documentId}", { method: "DELETE" })`,

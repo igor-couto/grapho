@@ -882,7 +882,8 @@ html[data-theme="dark"] .new-document-button:hover:not(:disabled) {
 .card-menu,
 .popover-menu {
   /* Where the opening animation starts: the last few pixels between the menu
-     and its trigger. Menus placed above the trigger flip it in JS. */
+     and its trigger. Menus placed above the trigger flip the sign, in JS for
+     the measured editor popovers and in CSS for the grid card menu. */
   --menu-shift: -6px;
   position: absolute;
   z-index: 20;
@@ -1149,6 +1150,8 @@ html[data-theme="dark"] .new-document-button:hover:not(:disabled) {
 .documents.is-grid .card-menu {
   top: auto;
   bottom: 37px;
+  /* It opens above its button, so it settles upward, out of it. */
+  --menu-shift: 6px;
 }
 
 .documents.is-grid .document-card-skeleton {

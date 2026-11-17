@@ -51,9 +51,9 @@ roles, no per-document permissions. Keep it that way.
   typography and spacing, not piles of borders, shadows, or gradients.
 - Keep motion short and functional. Menus fade and settle into place over
   180ms (`menu-in` in `app.css`); `editor.js` names the side a fixed menu landed
-  on in `data-side` so a menu above its trigger rises out of it instead of
-  dropping away. Closing is instant so it never delays the next action. Respect
-  `prefers-reduced-motion`.
+  on in `data-side` and the grid card menu flips the sign in CSS, so a menu above
+  its trigger rises out of it instead of dropping away. Closing is instant so it
+  never delays the next action. Respect `prefers-reduced-motion`.
 - Check both a desktop width and a 390px-wide viewport. There should be no
   horizontal overflow, focus states must remain visible, and primary actions must
   not be hidden behind hover on touch devices.
