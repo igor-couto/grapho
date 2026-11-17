@@ -11,10 +11,13 @@ import {
   layoutNextLineRange,
   materializeLineRange,
 } from "../pretext/layout.js";
+import { getGraphemeEnds } from "../pretext/line-text.js";
 import { blockAlignment, blockIndent, blockText } from "./model.js";
 
-const READER = "Literata";
-const MONO = '"Cascadia Code", Consolas, "Liberation Mono", monospace';
+// These stacks must match --font-reading and --font-mono in app.css: Canvas
+// and the DOM have to resolve to the same font when a bundled face is missing.
+const READER = '"Literata", "Iowan Old Style", "Palatino Linotype", Georgia, serif';
+const MONO = '"Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace';
 const IMAGE_GAP = 24;
 const DOC_TOP = 29;
 const INDENT_STEP = 24;
@@ -24,13 +27,13 @@ export function contentTop() {
 }
 
 const STYLES = {
-  p: { size: 17.5, weight: 400, italic: false, lineHeight: 1.82, before: 0, after: 18.4 },
-  h1: { size: 33.25, weight: 500, italic: false, lineHeight: 1.23, before: 51.5, after: 18.3 },
-  h2: { size: 26.25, weight: 500, italic: false, lineHeight: 1.23, before: 40.7, after: 14.4 },
-  h3: { size: 21.7, weight: 500, italic: false, lineHeight: 1.23, before: 33.6, after: 11.9 },
-  h4: { size: 18.9, weight: 500, italic: false, lineHeight: 1.23, before: 29.3, after: 10.4 },
-  quote: { size: 19.25, weight: 400, italic: true, lineHeight: 1.72, before: 28.9, after: 28.9, indent: 26 },
-  list: { size: 17.5, weight: 400, italic: false, lineHeight: 1.82, before: 4.4, after: 4.4 },
+  p: { size: 17.5, weight: 400, italic: false, lineHeight: 1.82, before: 0, after: 18.4, tracking: 0 },
+  h1: { size: 33.25, weight: 500, italic: false, lineHeight: 1.23, before: 51.5, after: 18.3, tracking: -0.03 },
+  h2: { size: 26.25, weight: 500, italic: false, lineHeight: 1.23, before: 40.7, after: 14.4, tracking: -0.03 },
+  h3: { size: 21.7, weight: 500, italic: false, lineHeight: 1.23, before: 33.6, after: 11.9, tracking: -0.025 },
+  h4: { size: 18.9, weight: 500, italic: false, lineHeight: 1.23, before: 29.3, after: 10.4, tracking: -0.02 },
+  quote: { size: 19.25, weight: 400, italic: true, lineHeight: 1.72, before: 28.9, after: 28.9, indent: 26, tracking: 0 },
+  list: { size: 17.5, weight: 400, italic: false, lineHeight: 1.82, before: 4.4, after: 4.4, tracking: 0 },
   code: {
     size: 13.5,
     weight: 400,
@@ -40,6 +43,7 @@ const STYLES = {
     after: 24.5,
     padding: 17,
     paddingX: 19,
+    tracking: 0,
   },
 };
 
@@ -61,6 +65,11 @@ export function notifyFontsReady() {
 
 export function styleFor(block) {
   return STYLES[block.type] || STYLES.p;
+}
+
+export function trackingFor(block) {
+  const style = styleFor(block);
+  return style.tracking ? style.tracking * style.size : 0;
 }
 
 export function fontFor(block, marks) {
@@ -165,7 +174,8 @@ function segmentsFor(block) {
   }
 
   const segments = [];
-  let current = { items: [] };
+  const tracking = trackingFor(block);
+  let current = { items: [], start: 0 };
   let offset = 0;
   let runIndex = 0;
 
@@ -179,6 +189,7 @@ function segmentsFor(block) {
         current.items.push({
           text: run.text.slice(start, index),
           font: fontFor(block, run),
+          letterSpacing: tracking,
           marks: run,
           start: offset,
           runIndex,
@@ -186,8 +197,8 @@ function segmentsFor(block) {
         offset += index - start;
       }
       segments.push(current);
-      current = { items: [] };
       offset += 1;
+      current = { items: [], start: offset };
       start = index + 1;
     }
     if (start < run.text.length) {
@@ -195,6 +206,7 @@ function segmentsFor(block) {
       current.items.push({
         text,
         font: fontFor(block, run),
+        letterSpacing: tracking,
         marks: run,
         start: offset,
         runIndex,
@@ -215,7 +227,9 @@ function preparedSegments(block) {
     return prepared;
   }
   prepared = segmentsFor(block).map((segment) =>
-    segment.items.length ? prepareRichInline(segment.items) : null,
+    segment.items.length
+      ? prepareRichInline(segment.items, { whiteSpace: "pre-wrap" })
+      : null,
   );
   preparedByBlock.set(block, prepared);
   return prepared;
@@ -334,12 +348,61 @@ function pushFragment(line, fragment, items, x) {
     runIndex: item.runIndex,
     marks: item.marks,
     font: item.font,
+    letterSpacing: item.letterSpacing || 0,
+    tabStopAdvance: 0,
     gap: fragment.gapBefore,
     gapRunIndex: fragment.gapItemIndex >= 0 ? items[fragment.gapItemIndex].runIndex : -1,
+    lineStartX: line.x,
     spaceExtra: 0,
   };
   line.fragments.push(entry);
   return x + fragment.gapBefore + fragment.occupiedWidth;
+}
+
+// A tab advances to the next tab stop, counted from the line's start, exactly
+// as the browser paints it. Canvas measures "\t" as nothing, so a caret
+// measured with plain text width would sit on the wrong side of every tab.
+function textAdvance(fragment, text) {
+  const tracking = fragment.letterSpacing || 0;
+  const hasTab = text.indexOf("\t") !== -1;
+  if (!hasTab) {
+    // The common case: one Canvas measurement, and no grapheme walk on every
+    // pointer move through a long paragraph.
+    return tracking === 0
+      ? textWidth(text, fragment.font)
+      : textWidth(text, fragment.font) + tracking * graphemeCount(text);
+  }
+
+  let position = fragment.x - (fragment.lineStartX || 0);
+  const start = position;
+  let index = 0;
+
+  while (index < text.length) {
+    const tab = text.indexOf("\t", index);
+    const end = tab === -1 ? text.length : tab;
+    if (end > index) {
+      const run = text.slice(index, end);
+      const advance = textWidth(run, fragment.font) + tracking * graphemeCount(run);
+      position += advance;
+    }
+    if (tab === -1) {
+      break;
+    }
+    const stop = tabStopAdvance(fragment);
+    if (stop > 0) {
+      position += stop - (position - Math.floor(position / stop) * stop);
+    }
+    index = tab + 1;
+  }
+
+  return position - start;
+}
+
+function tabStopAdvance(fragment) {
+  if (fragment.tabStopAdvance) {
+    return fragment.tabStopAdvance;
+  }
+  return (textWidth(" ", fragment.font) + (fragment.letterSpacing || 0)) * 8;
 }
 
 function countSpaces(text) {
@@ -357,7 +420,30 @@ export function fragmentTextWidth(fragment, text) {
   if (text === fragment.text) {
     return fragment.width + extra;
   }
-  return textWidth(text, fragment.font) + extra;
+  // A heading's letter-spacing is painted between its graphemes, so a caret
+  // inside a fragment sits one tracking step per grapheme before the width of
+  // its text alone would suggest. Tabs need their own tab stops.
+  return textAdvance(fragment, text) + extra;
+}
+
+function graphemeCount(text) {
+  return Math.max(0, graphemeBoundaries(text).length - 1);
+}
+
+function paintedFragmentWidth(fragment) {
+  return (
+    textWidth(fragment.text, fragment.font) +
+    (fragment.letterSpacing || 0) * graphemeCount(fragment.text) +
+    (fragment.spaceExtra || 0) * countSpaces(fragment.text)
+  );
+}
+
+function trailingSpaces(text) {
+  let count = 0;
+  while (count < text.length && text[text.length - 1 - count] === " ") {
+    count += 1;
+  }
+  return count;
 }
 
 function justifyLine(line) {
@@ -370,6 +456,11 @@ function justifyLine(line) {
   for (const fragment of line.fragments) {
     slots += fragment.gap > 0 ? 1 : 0;
     slots += countSpaces(fragment.text);
+  }
+  // Trailing spaces hang at the line end; they are not expansion opportunities.
+  const lastFragment = line.fragments[line.fragments.length - 1];
+  if (lastFragment) {
+    slots -= trailingSpaces(lastFragment.text);
   }
   if (!slots) {
     return;
@@ -426,7 +517,8 @@ function layoutRichBlock(block, columnWidth, top, obstacles, style) {
 
   for (let index = 0; index < preparedAll.length; index += 1) {
     const prepared = preparedAll[index];
-    const items = rawSegments[index].items;
+    const segment = rawSegments[index];
+    const items = segment.items;
     const isLast = index === preparedAll.length - 1;
     const segmentStart = lines.length;
 
@@ -440,10 +532,14 @@ function layoutRichBlock(block, columnWidth, top, obstacles, style) {
       lines.push({
         y,
         x: indent,
+        boxX: indent,
+        boxRight: indent + Math.max(48, columnWidth - indent),
         width: Math.max(48, columnWidth - indent),
         height: lineHeight,
         fragments: [],
         contentWidth: 0,
+        offsetStart: segment.start,
+        offsetEnd: segment.start,
       });
       lines[lines.length - 1].lastOfSegment = true;
       y += lineHeight;
@@ -475,12 +571,54 @@ function layoutRichBlock(block, columnWidth, top, obstacles, style) {
         break;
       }
       const materialized = materializeRichInlineLineRange(prepared, range);
-      const line = { y, x, width: available, height: lineHeight, fragments: [], contentWidth: 0 };
+      const line = {
+        y,
+        x,
+        boxX: x,
+        boxRight: x + available,
+        width: available,
+        height: lineHeight,
+        fragments: [],
+        contentWidth: 0,
+        offsetStart: segment.start,
+        offsetEnd: segment.start,
+        softWrapped: lines.length > segmentStart,
+      };
       let cursorX = x;
       for (const fragment of materialized.fragments) {
         cursorX = pushFragment(line, fragment, items, cursorX);
       }
       line.contentWidth = cursorX - x;
+      if (line.fragments.length) {
+        line.offsetStart = line.fragments[0].start;
+        line.offsetEnd = line.fragments[line.fragments.length - 1].end;
+        const last = line.fragments[line.fragments.length - 1];
+        // Pretext hangs spaces at a soft wrap and leaves their advance out of
+        // the line's width. The view paints each line as its own block, where
+        // the browser does charge for that space, so keep the painted width
+        // for carets and clicks. Alignment still uses the visible width, so a
+        // right-aligned line ends its glyphs at the margin, not one space
+        // before it.
+        if (last.text.endsWith(" ")) {
+          const painted = paintedFragmentWidth(last);
+          if (painted > last.width + 0.5) {
+            // Pretext already hung this line's trailing space, so the width it
+            // reported is the visible one. Keep it for alignment, but paint the
+            // full fragment so the caret after the space sits where the browser
+            // puts it.
+            last.width = painted;
+          } else {
+            // The final line's trailing space is still in the reported width.
+            // Hang it for alignment without losing it from the caret width.
+            const trailing = trailingSpaces(last.text);
+            line.contentWidth =
+              cursorX -
+              x -
+              (textWidth(" ".repeat(trailing), last.font) + (last.letterSpacing || 0) * trailing);
+            last.width = painted;
+          }
+        }
+      }
       lines.push(line);
       y += lineHeight;
       cursor = range.end;
@@ -500,11 +638,13 @@ function layoutRichBlock(block, columnWidth, top, obstacles, style) {
 
 function layoutCodeBlock(block, columnWidth, top, style, obstacles) {
   const prepared = preparedCode(block);
+  const font = codeFont();
   const lineHeight = style.size * style.lineHeight;
   const innerWidth = Math.max(40, columnWidth - style.paddingX * 2);
   const lines = [];
   let cursor = { segmentIndex: 0, graphemeIndex: 0 };
   let y = top + style.padding;
+  let previousEnd = 0;
   let guard = 0;
 
   while (guard < 4000) {
@@ -528,17 +668,42 @@ function layoutCodeBlock(block, columnWidth, top, style, obstacles) {
       break;
     }
     const line = materializeLineRange(prepared, range);
+    const offsetStart = codeOffset(prepared, range.start);
+    // A hard break's newline is consumed between two lines, so the line owns
+    // only its visible text, not the line feed after it.
+    const offsetEnd = offsetStart + line.text.length;
+    const width = Math.max(range.width, textWidth(line.text, font));
     lines.push({
       y,
       x: band.x,
       width: available,
       height: lineHeight,
       text: line.text,
-      fragments: [],
+      contentWidth: width,
+      offsetStart,
+      offsetEnd,
+      softWrapped: lines.length > 0 && offsetStart === previousEnd,
       code: true,
+      fragments: [
+        {
+          text: line.text,
+          x: band.x,
+          width,
+          start: offsetStart,
+          end: offsetEnd,
+          font,
+          letterSpacing: 0,
+          tabStopAdvance: prepared.tabStopAdvance || 0,
+          gap: 0,
+          spaceExtra: 0,
+          marks: {},
+          lineStartX: band.x,
+        },
+      ],
     });
     y += lineHeight;
     cursor = range.end;
+    previousEnd = offsetEnd;
   }
 
   if (!lines.length) {
@@ -548,13 +713,55 @@ function layoutCodeBlock(block, columnWidth, top, style, obstacles) {
       width: innerWidth,
       height: lineHeight,
       text: "",
-      fragments: [],
+      contentWidth: 0,
+      offsetStart: 0,
+      offsetEnd: 0,
       code: true,
+      fragments: [
+        {
+          text: "",
+          x: style.paddingX,
+          width: 0,
+          start: 0,
+          end: 0,
+          font,
+          letterSpacing: 0,
+          tabStopAdvance: prepared.tabStopAdvance || 0,
+          gap: 0,
+          spaceExtra: 0,
+          marks: {},
+          lineStartX: style.paddingX,
+        },
+      ],
     });
     y += lineHeight;
   }
 
   return { lines, height: y - top + style.padding };
+}
+
+function codeOffset(prepared, cursor) {
+  const starts = prepared.sourceStarts || (prepared.sourceStarts = segmentStarts(prepared.segments));
+  if (cursor.segmentIndex >= starts.length) {
+    const last = starts.length ? starts[starts.length - 1] + prepared.segments[prepared.segments.length - 1].length : 0;
+    return last;
+  }
+  let offset = starts[cursor.segmentIndex];
+  if (cursor.graphemeIndex > 0) {
+    const ends = getGraphemeEnds(prepared, cursor.segmentIndex);
+    offset += ends[Math.min(cursor.graphemeIndex, ends.length) - 1] || 0;
+  }
+  return offset;
+}
+
+function segmentStarts(segments) {
+  const starts = [];
+  let offset = 0;
+  for (const segment of segments) {
+    starts.push(offset);
+    offset += segment.length;
+  }
+  return starts;
 }
 
 /* --------------------------------------------------------------------------
@@ -750,42 +957,49 @@ export function pointToOffset(entry, x, y) {
     return 0;
   }
   const line = lineAtY(entry, y);
-  if (!line || !line.fragments.length) {
+  if (!line) {
     return 0;
+  }
+  if (!line.fragments.length) {
+    return line.offsetStart || 0;
   }
 
   let best = { offset: line.fragments[0].start, distance: Infinity };
   for (const fragment of line.fragments) {
-    const offset = offsetAtX(fragment, x);
-    const caretX = xForOffset(fragment, offset);
-    const distance = Math.abs(caretX - x);
-    if (distance < best.distance) {
-      best = { offset, distance };
+    for (const offset of offsetCandidates(fragment, x)) {
+      const distance = Math.abs(xForOffset(fragment, offset) - x);
+      if (distance < best.distance || (distance === best.distance && offset < best.offset)) {
+        best = { offset, distance };
+      }
     }
   }
   return best.offset;
 }
 
-function offsetAtX(fragment, x) {
-  if (x <= fragment.x) {
-    return fragment.start;
-  }
-  if (x >= fragment.x + fragmentTextWidth(fragment, fragment.text)) {
-    return fragment.end;
-  }
+// The boundaries on either side of a click inside a fragment, plus the
+// fragment's own edges. Choosing between them by distance makes a click on the
+// right half of a glyph put the caret after it, as every text editor does.
+function offsetCandidates(fragment, x) {
   const boundaries = graphemeBoundaries(fragment.text);
-  let low = 0;
-  let high = boundaries.length - 1;
-  while (low < high) {
-    const middle = Math.ceil((low + high) / 2);
-    const width = fragmentTextWidth(fragment, fragment.text.slice(0, boundaries[middle]));
-    if (fragment.x + width <= x) {
-      low = middle;
-    } else {
-      high = middle - 1;
+  const offsets = [fragment.start, fragment.end];
+  if (x > fragment.x && x < fragment.x + fragmentTextWidth(fragment, fragment.text)) {
+    let low = 0;
+    let high = boundaries.length - 1;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      const width = fragmentTextWidth(fragment, fragment.text.slice(0, boundaries[middle]));
+      if (fragment.x + width <= x) {
+        low = middle;
+      } else {
+        high = middle - 1;
+      }
+    }
+    offsets.push(fragment.start + boundaries[low]);
+    if (low + 1 < boundaries.length) {
+      offsets.push(fragment.start + boundaries[low + 1]);
     }
   }
-  return fragment.start + boundaries[low];
+  return offsets;
 }
 
 function xForOffset(fragment, offset) {
@@ -793,16 +1007,21 @@ function xForOffset(fragment, offset) {
   return fragment.x + fragmentTextWidth(fragment, fragment.text.slice(0, cut));
 }
 
-export function caretPoint(entry, offset) {
+export function caretPoint(entry, offset, hintLine) {
   if (!entry || entry.block.type === "image" || !entry.lines.length) {
     return null;
   }
 
   let fallback = null;
+  const lastLine = entry.lines[entry.lines.length - 1];
 
-  for (const line of entry.lines) {
+  for (let index = 0; index < entry.lines.length; index += 1) {
+    const line = entry.lines[index];
     if (!line.fragments.length) {
-      if (offset === 0 || offset === entryOffsetEnd(entry)) {
+      // An empty line owns the offset it starts at. The very end of a block
+      // that stops on a hard break belongs to its last painted empty line,
+      // because the final empty segment opens no further line.
+      if (offset === line.offsetStart || (line === lastLine && offset === entryOffsetEnd(entry))) {
         fallback = { x: line.x, y: line.y, height: line.height, line };
       }
       continue;
@@ -810,6 +1029,22 @@ export function caretPoint(entry, offset) {
 
     const first = line.fragments[0];
     const last = line.fragments[line.fragments.length - 1];
+
+    // A soft wrap shares one offset between the end of a line and the start of
+    // the next. The caller's hint decides which side shows the caret: moving
+    // down or clicking onto the new line works at its start, while typing a
+    // space at the end of a line keeps the caret at that line's end.
+    const next = entry.lines[index + 1];
+    if (
+      hintLine === next &&
+      next &&
+      next.fragments.length &&
+      offset === line.offsetEnd &&
+      next.offsetStart === offset
+    ) {
+      continue;
+    }
+
     if (offset < first.start) {
       fallback = fallback || { x: first.x, y: line.y, height: line.height, line };
       continue;

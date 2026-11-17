@@ -7,7 +7,9 @@ files on disk.
 The home screen lists and searches documents. The editor has the formatting I use
 most, holds images that can be dragged into the text so the words flow around
 them and resized from their corners, saves as you type, and can export to HTML,
-Markdown, or plain text. Light and dark themes are included.
+Markdown, PDF, or plain text. Light and dark themes are included. Focus mode,
+from the editor's menu, hides the toolbar and takes the page fullscreen so only
+the writing and the menu button remain.
 
 ## Installing
 
@@ -71,6 +73,13 @@ directory that already holds `.json` files is used instead, so an existing
 checkout keeps its documents where they are. Set `GRAPHO_DATA_DIR=data` in a
 fresh checkout if you want them next to the source.
 
+The **Storage** page (the library's ⋯ menu, under Management) shows the folder
+in use, how many documents it holds, how much room they take, and the free space
+on that disk. Type another folder there and Grapho copies the library into it
+and keeps writing there; the old folder is left untouched. The same page adds
+backups — a folder, an SSH server, or a Google Drive folder — that receive a copy
+of every save.
+
 Useful shortcuts: `Ctrl+S` saves now, `Ctrl+K` adds a link, `Ctrl+B` / `Ctrl+I` /
 `Ctrl+U` format text, and `/` focuses the search box on the home screen.
 
@@ -79,7 +88,7 @@ Useful shortcuts: `Ctrl+S` saves now, `Ctrl+K` adds a link, `Ctrl+B` / `Ctrl+I` 
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `GRAPHO_ADDR` | `127.0.0.1:25265` | Address and port to listen on. |
-| `GRAPHO_DATA_DIR` | per-user directory | Directory for document JSON files. |
+| `GRAPHO_DATA_DIR` | per-user directory | Directory for document JSON files. Overrides the folder saved on the Storage page. |
 | `GRAPHO_PASSWORD_HASH` | unset | Argon2id hash from `grapho hash-password`. Turns on the login screen. |
 | `GRAPHO_PASSWORD_HASH_FILE` | unset | File containing that hash. Wins over `GRAPHO_PASSWORD_HASH`. |
 
@@ -176,6 +185,43 @@ crash is unlikely to leave a half-written document.
 Copy the whole directory to back it up. Stop Grapho first if you want a
 consistent snapshot.
 
+The folder is chosen in this order: `GRAPHO_DATA_DIR`, the folder saved on the
+Storage page, a `data/` folder in the working directory that already holds
+documents, and the per-user default. A folder chosen in the app is remembered in
+`~/.config/grapho/config.json` on Linux, `~/Library/Preferences/Grapho/` on
+macOS, and `%APPDATA%\Grapho\` on Windows, outside the data directory itself.
+Changing the folder copies every document before switching, so a folder that
+already holds another library's documents is refused rather than merged; choose
+the previous folder again and Grapho updates its copies instead.
+
+Backup locations are listed on the same page and configured in the same file.
+Add one and Grapho copies the whole library in, then mirrors every later save and
+delete. Any folder works: a local one, a mounted network share, or a Google
+Drive, OneDrive, or Dropbox folder that its desktop app keeps in sync. Copies run
+in the background, so a slow share never delays a save (a copy still queued when
+Grapho stops gets a few seconds to finish). Removing a backup stops the mirroring
+and leaves the files already in that folder alone. A backup folder that is the
+data folder, sits inside it, or holds another library's documents is refused.
+
+For a second machine, add an SSH server instead. Grapho copies over SFTP using
+your OpenSSH `sftp` client, so the keys, agent, and known_hosts you already use
+apply; it never asks for or stores a password, so use a key file or a key loaded
+in your agent. The remote folder is an absolute path as the SSH account sees it,
+and is refused if it already holds another library's documents. The first
+connection remembers the server's host key; if it changes later, copies fail
+until the old entry is removed.
+
+Google Drive needs an OAuth client that belongs to you, because Grapho cannot
+ship credentials for every installation. In the Google Cloud console create a
+project, enable the Drive API, and add an OAuth client of type "Desktop app"
+(the consent screen can stay in testing mode with your account as a test user).
+Paste its client id and secret into the Google Drive form, name the folder, and
+press Connect; Google asks for the `drive.file` scope, which limits Grapho to
+files it creates. Open Grapho at `http://127.0.0.1:25265` for this, since Google
+only redirects back to a loopback address. The refresh token is kept in
+`secrets.json` beside the settings file (owner-only where the platform allows),
+never in the data folder. Removing the connector leaves the Drive files alone.
+
 ## Releases
 
 A pushed tag such as `v0.1.0` runs the release workflow and publishes Linux
@@ -225,7 +271,13 @@ and working notes.
 
 Single user. No sharing, real-time collaboration, comments, tables, or version
 history. The optional password signs one person in: there are no accounts, no TLS,
-and failed logins pause globally rather than per address.
+and failed logins pause globally rather than per address. PDF downloads use A4
+pages and PDF's standard fonts; characters outside WinAnsi are replaced with
+question marks. Backups mirror to a folder, an SSH server, or Google Drive; there
+are no native OneDrive or Dropbox connectors, so use their synced folders. SSH
+backups need OpenSSH's `sftp` client on the machine running Grapho, which the
+container image does not include, and Google Drive needs a browser on the same
+machine to finish its sign-in.
 
 ## License
 

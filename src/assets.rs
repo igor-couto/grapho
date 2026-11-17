@@ -7,6 +7,7 @@ pub const INDEX_HTML: &str = include_str!("../assets/index.html");
 pub const EDITOR_HTML: &str = include_str!("../assets/editor.html");
 pub const LOGIN_HTML: &str = include_str!("../assets/login.html");
 pub const NOT_FOUND_HTML: &str = include_str!("../assets/not-found.html");
+pub const STORAGE_HTML: &str = include_str!("../assets/storage.html");
 pub const VERSION_HTML: &str = include_str!("../assets/version.html");
 
 pub fn find(path: &str) -> Option<Asset> {
@@ -31,10 +32,15 @@ pub fn find(path: &str) -> Option<Asset> {
             bytes: include_bytes!("../assets/login.js"),
             content_type: "text/javascript; charset=utf-8",
         },
+        "menu.js" => script(include_bytes!("../assets/menu.js")),
+        "storage.js" => script(include_bytes!("../assets/storage.js")),
         "version.js" => script(include_bytes!("../assets/version.js")),
+        "doc/image.js" => script(include_bytes!("../assets/doc/image.js")),
         "doc/input.js" => script(include_bytes!("../assets/doc/input.js")),
         "doc/layout.js" => script(include_bytes!("../assets/doc/layout.js")),
         "doc/model.js" => script(include_bytes!("../assets/doc/model.js")),
+        "doc/pdf.js" => script(include_bytes!("../assets/doc/pdf.js")),
+        "doc/pdf-fonts.js" => script(include_bytes!("../assets/doc/pdf-fonts.js")),
         "doc/view.js" => script(include_bytes!("../assets/doc/view.js")),
         "favicon.svg" => Asset {
             bytes: include_bytes!("../assets/favicon.ico"),

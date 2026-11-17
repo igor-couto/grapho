@@ -82,14 +82,53 @@ impl From<io::Error> for StoreError {
     }
 }
 
+/// How large the library is on disk.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub documents: usize,
+    pub bytes: u64,
+}
+
+/// The result of moving the library to another folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Relocated {
+    pub directory: PathBuf,
+    pub documents: usize,
+}
+
+/// Why a new data folder was refused. The HTTP layer turns these into messages
+/// a person can act on.
+#[derive(Debug)]
+pub enum RelocateError {
+    NotAbsolute,
+    SameDirectory,
+    Occupied { documents: usize },
+    Io { path: PathBuf, message: String },
+}
+
+impl RelocateError {
+    fn io(path: &Path, error: impl std::fmt::Display) -> Self {
+        Self::Io {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        }
+    }
+}
+
 /// A small, file-backed document store.
 ///
 /// The in-memory map is the read path; every mutation is written through to
 /// disk before it is acknowledged. This is intentionally simple and plenty for
 /// a personal, single-user library, while keeping the data portable.
 pub struct Store {
+    state: RwLock<State>,
+}
+
+/// The folder and the documents it holds move together: relocating has to swap
+/// both, and no request may see a half-applied change.
+struct State {
     directory: PathBuf,
-    documents: RwLock<HashMap<Uuid, Document>>,
+    documents: HashMap<Uuid, Document>,
 }
 
 impl Store {
@@ -142,14 +181,28 @@ impl Store {
         }
 
         Ok(Self {
-            directory,
-            documents: RwLock::new(documents),
+            state: RwLock::new(State {
+                directory,
+                documents,
+            }),
         })
     }
 
+    /// The folder documents are written to right now.
+    pub async fn directory(&self) -> PathBuf {
+        self.state.read().await.directory.clone()
+    }
+
+    /// What the folder holds, counted from the files themselves rather than the
+    /// in-memory map, so a hand-edited folder is reported honestly.
+    pub async fn usage(&self) -> Usage {
+        let directory = self.directory().await;
+        scan_usage(&directory).await
+    }
+
     pub async fn list(&self) -> Vec<DocumentSummary> {
-        let documents = self.documents.read().await;
-        let mut summaries: Vec<_> = documents.values().map(summary_for).collect();
+        let state = self.state.read().await;
+        let mut summaries: Vec<_> = state.documents.values().map(summary_for).collect();
         summaries.sort_by(|left, right| {
             right
                 .updated_at
@@ -160,11 +213,11 @@ impl Store {
     }
 
     pub async fn get(&self, id: Uuid) -> Option<Document> {
-        self.documents.read().await.get(&id).cloned()
+        self.state.read().await.documents.get(&id).cloned()
     }
 
     pub async fn create(&self) -> Result<Document, StoreError> {
-        let mut documents = self.documents.write().await;
+        let mut state = self.state.write().await;
         let now = now_millis();
         let document = Document {
             version: SCHEMA_VERSION,
@@ -176,8 +229,8 @@ impl Store {
             updated_at: now,
         };
 
-        persist_document(&self.directory, &document).await?;
-        documents.insert(document.id, document.clone());
+        persist_document(&state.directory, &document).await?;
+        state.documents.insert(document.id, document.clone());
         Ok(document)
     }
 
@@ -190,8 +243,8 @@ impl Store {
         content: Option<String>,
         paper_width: Option<u32>,
     ) -> Result<Option<Document>, StoreError> {
-        let mut documents = self.documents.write().await;
-        let Some(existing) = documents.get(&id).cloned() else {
+        let mut state = self.state.write().await;
+        let Some(existing) = state.documents.get(&id).cloned() else {
             return Ok(None);
         };
 
@@ -228,31 +281,161 @@ impl Store {
             updated_at,
         };
 
-        persist_document(&self.directory, &document).await?;
-        documents.insert(id, document.clone());
+        persist_document(&state.directory, &document).await?;
+        state.documents.insert(id, document.clone());
         Ok(Some(document))
     }
 
     pub async fn delete(&self, id: Uuid) -> Result<bool, StoreError> {
-        let mut documents = self.documents.write().await;
-        if !documents.contains_key(&id) {
+        let mut state = self.state.write().await;
+        if !state.documents.contains_key(&id) {
             return Ok(false);
         }
 
-        let path = self.directory.join(format!("{id}.json"));
+        let path = state.directory.join(format!("{id}.json"));
         match fs::remove_file(&path).await {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(StoreError::Io(error)),
         }
 
-        documents.remove(&id);
+        state.documents.remove(&id);
         Ok(true)
+    }
+
+    /// Move the library to another folder.
+    ///
+    /// Every document is written to the new folder before the store switches to
+    /// it, so a failure leaves the current folder exactly as it was. The old
+    /// files are never removed: the previous folder stays behind as a copy.
+    ///
+    /// A folder that only holds copies of these documents is accepted, which is
+    /// what makes choosing the previous folder again work. A folder holding any
+    /// other document is refused, so two libraries are never silently merged.
+    pub async fn relocate(&self, target: PathBuf) -> Result<Relocated, RelocateError> {
+        if !target.is_absolute() {
+            return Err(RelocateError::NotAbsolute);
+        }
+
+        let mut state = self.state.write().await;
+        if same_directory(&state.directory, &target) {
+            return Err(RelocateError::SameDirectory);
+        }
+
+        fs::create_dir_all(&target)
+            .await
+            .map_err(|error| RelocateError::io(&target, error))?;
+
+        let existing = document_files(&target).await;
+        let strangers = existing
+            .iter()
+            .filter(|(id, _)| !state.documents.contains_key(id))
+            .count();
+        if strangers > 0 {
+            return Err(RelocateError::Occupied {
+                documents: strangers,
+            });
+        }
+
+        let ours: HashSet<Uuid> = existing.iter().map(|(id, _)| *id).collect();
+
+        // Copies this call creates are the only ones a failure may remove; a
+        // file that was already there belongs to the folder's previous use.
+        let mut created = Vec::new();
+        for document in state.documents.values() {
+            if let Err(error) = persist_document(&target, document).await {
+                remove_copies(&target, &created).await;
+                return Err(RelocateError::io(&target, error));
+            }
+            if !ours.contains(&document.id) {
+                created.push(document.id);
+            }
+        }
+
+        state.directory = target.clone();
+        Ok(Relocated {
+            directory: target,
+            documents: state.documents.len(),
+        })
     }
 }
 
 fn schema_version() -> u32 {
     SCHEMA_VERSION
+}
+
+/// A document file is a UUID name with a `.json` extension. Anything else in the
+/// folder belongs to someone else and is never counted, copied, or removed.
+pub(crate) fn document_file_id(path: &Path) -> Option<Uuid> {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+        return None;
+    }
+    Uuid::parse_str(path.file_stem()?.to_str()?).ok()
+}
+
+async fn scan_usage(directory: &Path) -> Usage {
+    let files = document_files(directory).await;
+    Usage {
+        documents: files.len(),
+        bytes: files
+            .iter()
+            .fold(0, |total: u64, (_, bytes)| total.saturating_add(*bytes)),
+    }
+}
+
+/// Every document file in a folder, with its size. Names that are not UUID
+/// document files are ignored, and an unreadable folder simply has none.
+pub(crate) async fn document_files(directory: &Path) -> Vec<(Uuid, u64)> {
+    let mut files = Vec::new();
+    let Ok(mut entries) = fs::read_dir(directory).await else {
+        return files;
+    };
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let Some(id) = document_file_id(&entry.path()) else {
+            continue;
+        };
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        files.push((id, metadata.len()));
+    }
+
+    files
+}
+
+/// A typed path and the path the browser showed may differ in separators,
+/// trailing slashes, and letter case on Windows.
+pub(crate) fn same_directory(left: &Path, right: &Path) -> bool {
+    comparable_path(left) == comparable_path(right)
+}
+
+fn comparable_path(path: &Path) -> String {
+    let mut text = path.to_string_lossy().into_owned();
+
+    while text.len() > 1 && (text.ends_with('/') || text.ends_with('\\')) {
+        let trimmed = &text[..text.len() - 1];
+        if trimmed.ends_with(':') {
+            break;
+        }
+        text.pop();
+    }
+
+    #[cfg(windows)]
+    {
+        text = text.replace('/', "\\");
+        text.make_ascii_lowercase();
+    }
+
+    text
+}
+
+/// Best effort: the documents that were copied before a failure go away again,
+/// so a second attempt does not meet its own leftovers.
+async fn remove_copies(directory: &Path, written: &[Uuid]) {
+    for id in written {
+        let _ = fs::remove_file(directory.join(format!("{id}.json"))).await;
+    }
 }
 
 fn bounded_paper_width(width: u32) -> u32 {
@@ -334,6 +517,7 @@ pub fn sanitize_content(html: &str) -> String {
     image_attributes.insert("data-x");
     image_attributes.insert("data-y");
     image_attributes.insert("data-width");
+    image_attributes.insert("data-radius");
 
     let mut block_attributes = HashSet::new();
     block_attributes.insert("data-align");
@@ -407,6 +591,15 @@ pub fn sanitize_content(html: &str) -> String {
                     && value.chars().all(|digit| digit.is_ascii_digit())
                     && value != "0";
                 numeric.then_some(Cow::Borrowed(value))
+            }
+            ("img", "data-radius") => {
+                // Zero means square corners, so unlike `data-width` it is kept.
+                // The editor caps the radius at 200 (IMAGE_RADIUS_LIMIT in
+                // assets/doc/model.js); anything further is not a value it wrote.
+                let canonical = (value == "0" || (value.len() <= 3 && !value.starts_with('0')))
+                    && value.chars().all(|digit| digit.is_ascii_digit())
+                    && value.parse::<u32>().is_ok_and(|radius| radius <= 200);
+                canonical.then_some(Cow::Borrowed(value))
             }
             _ => Some(Cow::Borrowed(value)),
         })
@@ -509,7 +702,10 @@ fn make_excerpt(text: &str) -> String {
     format!("{}…", candidate[..cut].trim_end())
 }
 
-async fn persist_document(directory: &Path, document: &Document) -> Result<(), StoreError> {
+pub(crate) async fn persist_document(
+    directory: &Path,
+    document: &Document,
+) -> Result<(), StoreError> {
     let bytes = serde_json::to_vec_pretty(document).expect("a document is always serialisable");
     let destination = directory.join(format!("{}.json", document.id));
     let temporary = directory.join(format!(".{}.json.tmp", document.id));
@@ -524,14 +720,14 @@ async fn persist_document(directory: &Path, document: &Document) -> Result<(), S
 }
 
 #[cfg(not(windows))]
-async fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) async fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     fs::rename(source, destination).await
 }
 
 /// Windows does not replace an existing file with `rename`. Keep the previous
 /// version until the new file is safely in place, then remove the backup.
 #[cfg(windows)]
-async fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) async fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     match fs::rename(source, destination).await {
         Ok(()) => Ok(()),
         Err(first_error) => {
@@ -654,6 +850,28 @@ mod tests {
     }
 
     #[test]
+    fn image_corner_radius_is_bounded() {
+        let pixel = "data:image/png;base64,iVBORw0KGgo=";
+        let dirty = format!(
+            concat!(
+                "<img src=\"{}\" data-radius=\"0\">",
+                "<img src=\"{}\" data-radius=\"200\">",
+                "<img src=\"{}\" data-radius=\"201\">",
+                "<img src=\"{}\" data-radius=\"007\">",
+                "<img src=\"{}\" data-radius=\"round\">"
+            ),
+            pixel, pixel, pixel, pixel, pixel
+        );
+        let clean = sanitize_content(&dirty);
+
+        assert!(clean.contains("data-radius=\"0\""));
+        assert!(clean.contains("data-radius=\"200\""));
+        assert!(!clean.contains("data-radius=\"201\""));
+        assert!(!clean.contains("data-radius=\"007\""));
+        assert!(!clean.contains("data-radius=\"round\""));
+    }
+
+    #[test]
     fn paragraph_alignment_and_indent_are_bounded() {
         let dirty = concat!(
             "<p data-align=\"center\" data-indent=\"2\">Centered</p>",
@@ -673,6 +891,23 @@ mod tests {
         assert!(clean.contains("data-align=\"justify\""));
         assert!(!clean.contains("diagonal"));
         assert!(!clean.contains("data-indent=\"two\""));
+    }
+
+    #[test]
+    fn blank_lines_and_spacing_survive_sanitising() {
+        let clean =
+            sanitize_content("<p>one</p><p></p><p>two  three</p><p>tab\there</p><p>a<br><br>b</p>");
+
+        assert!(
+            clean.contains("<p></p>"),
+            "an empty paragraph survives: {clean}"
+        );
+        assert!(
+            clean.contains("two  three"),
+            "repeated spaces survive: {clean}"
+        );
+        assert!(clean.contains("tab\there"), "a tab survives: {clean}");
+        assert!(clean.contains("a<br><br>b"), "hard breaks survive: {clean}");
     }
 
     #[test]
@@ -737,6 +972,185 @@ mod tests {
         assert!(reloaded.delete(document.id).await.expect("delete succeeds"));
         assert!(reloaded.get(document.id).await.is_none());
         assert!(!directory.join(format!("{}.json", document.id)).exists());
+
+        let _ = fs::remove_dir_all(directory).await;
+    }
+
+    fn temp_directory(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("grapho-{label}-{}", Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn relocating_copies_the_library_and_writes_to_the_new_folder() {
+        let old = temp_directory("old");
+        let new = temp_directory("new");
+        let store = Store::load(old.clone()).await.expect("store loads");
+
+        let first = store.create().await.expect("document is created");
+        let second = store.create().await.expect("document is created");
+        store
+            .update(first.id, Some("A field note".to_owned()), None, None)
+            .await
+            .expect("update succeeds");
+
+        let relocated = store
+            .relocate(new.clone())
+            .await
+            .expect("the library moves");
+        assert_eq!(relocated.directory, new);
+        assert_eq!(relocated.documents, 2);
+        assert_eq!(store.directory().await, new);
+        let usage = store.usage().await;
+        assert_eq!(usage.documents, 2);
+        assert!(usage.bytes > 0, "the copied documents have a size");
+
+        // The old folder keeps its copy.
+        for id in [first.id, second.id] {
+            assert!(old.join(format!("{id}.json")).exists());
+            assert!(new.join(format!("{id}.json")).exists());
+        }
+
+        // Writes and deletes follow the store to the new folder.
+        store
+            .update(second.id, Some("After moving".to_owned()), None, None)
+            .await
+            .expect("update succeeds");
+        let moved = fs::read_to_string(new.join(format!("{}.json", second.id)))
+            .await
+            .expect("the new file exists");
+        assert!(moved.contains("After moving"));
+        let left_behind = fs::read_to_string(old.join(format!("{}.json", second.id)))
+            .await
+            .expect("the old file stays");
+        assert!(!left_behind.contains("After moving"));
+
+        assert!(store.delete(first.id).await.expect("delete succeeds"));
+        assert!(!new.join(format!("{}.json", first.id)).exists());
+        assert!(
+            old.join(format!("{}.json", first.id)).exists(),
+            "the old copy is never deleted"
+        );
+
+        drop(store);
+        let reloaded = Store::load(new.clone()).await.expect("store reloads");
+        assert_eq!(reloaded.list().await.len(), 1);
+        assert_eq!(reloaded.get(second.id).await.unwrap().title, "After moving");
+
+        let _ = fs::remove_dir_all(old).await;
+        let _ = fs::remove_dir_all(new).await;
+    }
+
+    #[tokio::test]
+    async fn relocating_refuses_a_folder_that_already_holds_documents() {
+        let old = temp_directory("occupied-old");
+        let occupied = temp_directory("occupied-target");
+        fs::create_dir_all(&occupied).await.unwrap();
+        let stranger = Uuid::new_v4();
+        fs::write(occupied.join(format!("{stranger}.json")), b"{}")
+            .await
+            .unwrap();
+
+        let store = Store::load(old.clone()).await.expect("store loads");
+        store.create().await.expect("document is created");
+
+        match store.relocate(occupied.clone()).await {
+            Err(RelocateError::Occupied { documents }) => assert_eq!(documents, 1),
+            other => panic!("expected an occupied folder, got {other:?}"),
+        }
+        assert_eq!(
+            store.directory().await,
+            old,
+            "a refusal leaves the store where it was"
+        );
+
+        let _ = fs::remove_dir_all(old).await;
+        let _ = fs::remove_dir_all(occupied).await;
+    }
+
+    #[tokio::test]
+    async fn the_previous_folder_can_be_chosen_again() {
+        let old = temp_directory("back-old");
+        let new = temp_directory("back-new");
+        let store = Store::load(old.clone()).await.expect("store loads");
+        let document = store.create().await.expect("document is created");
+
+        store
+            .relocate(new.clone())
+            .await
+            .expect("the library moves");
+        store
+            .update(
+                document.id,
+                Some("Changed after moving".to_owned()),
+                None,
+                None,
+            )
+            .await
+            .expect("update succeeds");
+
+        // The old folder holds copies of these documents, not strangers.
+        let moved_back = store
+            .relocate(old.clone())
+            .await
+            .expect("the previous folder is accepted");
+        assert_eq!(moved_back.directory, old);
+        assert_eq!(store.directory().await, old);
+
+        let content = fs::read_to_string(old.join(format!("{}.json", document.id)))
+            .await
+            .expect("the document is there");
+        assert!(
+            content.contains("Changed after moving"),
+            "the folder now holds the current copy"
+        );
+
+        let _ = fs::remove_dir_all(old).await;
+        let _ = fs::remove_dir_all(new).await;
+    }
+
+    #[tokio::test]
+    async fn relocating_needs_an_absolute_folder_that_is_not_the_current_one() {
+        let old = temp_directory("same-folder");
+        let store = Store::load(old.clone()).await.expect("store loads");
+
+        assert!(matches!(
+            store.relocate(PathBuf::from("relative-folder")).await,
+            Err(RelocateError::NotAbsolute)
+        ));
+        assert!(matches!(
+            store.relocate(old.clone()).await,
+            Err(RelocateError::SameDirectory)
+        ));
+        let with_separator =
+            PathBuf::from(format!("{}{}", old.display(), std::path::MAIN_SEPARATOR));
+        assert!(matches!(
+            store.relocate(with_separator).await,
+            Err(RelocateError::SameDirectory)
+        ));
+
+        let _ = fs::remove_dir_all(old).await;
+    }
+
+    #[tokio::test]
+    async fn usage_ignores_everything_that_is_not_a_document() {
+        let directory = temp_directory("usage");
+        let store = Store::load(directory.clone()).await.expect("store loads");
+        let document = store.create().await.expect("document is created");
+
+        fs::write(directory.join("notes.txt"), b"hello")
+            .await
+            .unwrap();
+        fs::write(directory.join("config.json"), b"{}")
+            .await
+            .unwrap();
+
+        let usage = store.usage().await;
+        assert_eq!(usage.documents, 1);
+        let size = fs::metadata(directory.join(format!("{}.json", document.id)))
+            .await
+            .unwrap()
+            .len();
+        assert_eq!(usage.bytes, size);
 
         let _ = fs::remove_dir_all(directory).await;
     }

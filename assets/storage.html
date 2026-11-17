@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Storage - Grapho</title>
+  <meta name="theme-color" content="#f3efe6">
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.ico">
+  <link rel="preload" href="/assets/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/assets/fonts/literata-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <script src="/assets/theme.js"></script>
+  <script src="/assets/menu.js" defer></script>
+  <script src="/assets/storage.js" defer></script>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="storage-page">
+  <header class="editor-header version-header">
+    <div class="editor-header-start">
+      <a class="back-link" href="/" aria-label="Back to library">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="m14.5 5-7 7 7 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>Library</span>
+      </a>
+    </div>
+
+    <div class="editor-header-end">
+      <div class="menu-wrap">
+        <button class="icon-button" type="button" id="pageMenuButton" aria-label="Page options" title="Page options" aria-haspopup="menu" aria-expanded="false">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <circle cx="5" cy="12" r="1.5" fill="currentColor"/>
+            <circle cx="12" cy="12" r="1.5" fill="currentColor"/>
+            <circle cx="19" cy="12" r="1.5" fill="currentColor"/>
+          </svg>
+        </button>
+        <div class="popover-menu library-menu" id="pageMenu" role="menu" aria-label="Page options" hidden></div>
+      </div>
+    </div>
+  </header>
+
+  <main class="storage-main shell">
+    <section class="storage-card" aria-labelledby="storageTitle">
+      <h1 id="storageTitle">Storage</h1>
+      <p class="storage-intro">Grapho keeps one JSON file per document, in a folder you choose.</p>
+
+      <p class="storage-path is-loading" id="storagePath">Reading the folder…</p>
+      <p class="storage-source" id="storageSource" hidden></p>
+
+      <dl class="storage-facts">
+        <div class="storage-fact">
+          <dt>Documents</dt>
+          <dd id="storageDocuments">—</dd>
+        </div>
+        <div class="storage-fact">
+          <dt>Space used</dt>
+          <dd id="storageUsed">—</dd>
+        </div>
+        <div class="storage-fact" id="storageFreeRow" hidden>
+          <dt>Disk space</dt>
+          <dd id="storageFree">—</dd>
+        </div>
+      </dl>
+      <div class="storage-bar" id="storageBar" hidden aria-hidden="true"><span id="storageBarFill"></span></div>
+
+      <form class="storage-form" id="storageForm" hidden>
+        <label class="field">
+          <span>Change folder</span>
+          <input id="storagePathInput" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="Paste a folder path" aria-describedby="storageHint">
+        </label>
+        <div class="storage-actions">
+          <button class="button button-primary" type="submit" id="storageSave">Use this folder</button>
+          <span class="storage-status" id="storageStatus" role="status" aria-live="polite"></span>
+        </div>
+        <p class="storage-hint" id="storageHint">Your documents are copied to the new folder, and Grapho writes there from then on. The old folder is left exactly as it is.</p>
+      </form>
+
+      <p class="storage-locked" id="storageLocked" hidden></p>
+
+      <section class="backups" aria-labelledby="backupsTitle">
+        <h2 id="backupsTitle">Backups</h2>
+        <p class="backups-intro">A second copy of every document, written again after each save.</p>
+
+        <ul class="backup-list" id="backupList" hidden></ul>
+        <p class="backups-empty" id="backupsEmpty">No backups yet.</p>
+        <p class="backups-locked" id="backupsLocked" hidden>Grapho can't remember backups on this system.</p>
+        <p class="storage-status backup-status" id="backupStatus" role="status" aria-live="polite"></p>
+
+        <div class="backup-add-row" id="backupAddRow" hidden>
+          <button class="button button-quiet backup-add" type="button" id="backupAdd">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+            </svg>
+            Add a folder
+          </button>
+          <button class="button button-quiet backup-add" type="button" id="backupAddSsh">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+            </svg>
+            Add an SSH server
+          </button>
+          <button class="button button-quiet backup-add" type="button" id="backupAddGoogle">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+            </svg>
+            Add Google Drive
+          </button>
+        </div>
+
+        <form class="backup-form" id="backupForm" hidden>
+          <label class="field">
+            <span>Backup folder</span>
+            <input id="backupPathInput" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="Paste a folder path" aria-describedby="backupHint">
+          </label>
+          <div class="storage-actions">
+            <button class="button button-primary" type="submit" id="backupSave">Add backup</button>
+            <button class="button button-quiet" type="button" id="backupCancel">Cancel</button>
+          </div>
+          <p class="storage-hint" id="backupHint">Any folder works: a local one, a network share, or a Google Drive, OneDrive, or Dropbox folder that its desktop app keeps in sync. Documents are copied there now and kept in step after every save. Removing a backup never deletes the files already there.</p>
+        </form>
+
+        <form class="backup-form" id="sshForm" hidden>
+          <div class="backup-fields">
+            <label class="field">
+              <span>Server</span>
+              <input id="sshHost" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="nas.local or 192.168.1.20">
+            </label>
+            <label class="field field-port">
+              <span>Port</span>
+              <input id="sshPort" type="text" inputmode="numeric" autocomplete="off" placeholder="22">
+            </label>
+            <label class="field field-full">
+              <span>User</span>
+              <input id="sshUser" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="igor">
+            </label>
+            <label class="field field-full">
+              <span>Remote folder</span>
+              <input id="sshDir" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="/volume1/grapho">
+            </label>
+            <label class="field field-full">
+              <span>Key file (optional)</span>
+              <input id="sshKey" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="Empty uses your SSH agent or config">
+            </label>
+          </div>
+          <div class="storage-actions">
+            <button class="button button-primary" type="submit" id="sshSave">Add SSH backup</button>
+            <button class="button button-quiet" type="button" id="sshCancel">Cancel</button>
+          </div>
+          <p class="storage-hint">Grapho runs your OpenSSH sftp client, so the keys, agent, and known_hosts you already use apply. Passwords are never stored: use a key file, or a key loaded in your agent. The first connection remembers the server's host key.</p>
+        </form>
+
+        <form class="backup-form" id="googleForm" hidden>
+          <div class="backup-fields">
+            <label class="field field-full">
+              <span>OAuth client ID</span>
+              <input id="googleClientId" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="…apps.googleusercontent.com">
+            </label>
+            <label class="field field-full">
+              <span>OAuth client secret</span>
+              <input id="googleClientSecret" type="password" autocomplete="off" spellcheck="false" placeholder="GOCSPX-…">
+            </label>
+            <label class="field field-full">
+              <span>Drive folder</span>
+              <input id="googleFolder" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="Grapho">
+            </label>
+          </div>
+          <div class="storage-actions">
+            <button class="button button-primary" type="submit" id="googleSave">Connect Google Drive</button>
+            <button class="button button-quiet" type="button" id="googleCancel">Cancel</button>
+          </div>
+          <p class="storage-hint">Create a Desktop-app OAuth client in your Google Cloud project, enable the Drive API, and keep the drive.file scope. Grapho sends the browser to Google's consent page, then back to 127.0.0.1. The refresh token is kept in a separate owner-only file beside Grapho's settings, never in the data folder, and only files Grapho creates are accessible.</p>
+        </form>
+      </section>
+    </section>
+  </main>
+
+  <template id="backupRowTemplate">
+    <li class="backup-item">
+      <svg class="backup-icon backup-icon-folder" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M3.5 7.2A2.2 2.2 0 0 1 5.7 5h3.1l1.6 1.8h8A2.2 2.2 0 0 1 20.5 9v8.3a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2V7.2Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+      </svg>
+      <svg class="backup-icon backup-icon-ssh" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <rect x="3.5" y="4" width="17" height="7" rx="2" stroke="currentColor" stroke-width="1.5"/>
+        <rect x="3.5" y="13" width="17" height="7" rx="2" stroke="currentColor" stroke-width="1.5"/>
+        <circle cx="7" cy="7.5" r="0.9" fill="currentColor"/>
+        <circle cx="7" cy="16.5" r="0.9" fill="currentColor"/>
+      </svg>
+      <svg class="backup-icon backup-icon-google" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M7.4 18.5A4.4 4.4 0 0 1 6.9 9.8a6 6 0 0 1 11.5 1.7 3.6 3.6 0 0 1-.6 7H7.4Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+      </svg>
+      <div class="backup-copy">
+        <p class="backup-path"></p>
+        <p class="backup-sub"></p>
+        <p class="backup-state"></p>
+      </div>
+      <button class="text-button backup-remove" type="button">Remove</button>
+    </li>
+  </template>
+</body>
+</html>

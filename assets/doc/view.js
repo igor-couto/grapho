@@ -1,8 +1,8 @@
 // View: paints a layout into the page and keeps the caret and selection in
 // sync. Only blocks whose geometry or text changed are rebuilt.
 
-import { blockLength } from "./model.js";
-import { fragmentTextWidth, textWidth } from "./layout.js";
+import { blockLength, imageRadius } from "./model.js";
+import { fontFor, fragmentTextWidth, textWidth } from "./layout.js";
 
 const HANDLE_CORNERS = [
   ["nw", 0, 0],
@@ -10,6 +10,11 @@ const HANDLE_CORNERS = [
   ["sw", 0, 1],
   ["se", 1, 1],
 ];
+
+// The strip the caret keeps clear at the top and bottom of the viewport. Page
+// Up/Down measures its jump against the same strip, so the caret ends where it
+// started on screen instead of drifting towards an edge.
+const CARET_MARGIN = 90;
 
 export class EditorView {
   constructor(root) {
@@ -70,6 +75,7 @@ export class EditorView {
         entry.image.height,
         block.src.slice(0, 24),
         block.src.length,
+        imageRadius(block),
       );
     }
     for (const line of entry.lines) {
@@ -129,6 +135,7 @@ export class EditorView {
       image.style.top = entry.image.y - entry.top + "px";
       image.style.width = entry.image.width + "px";
       image.style.height = entry.image.height + "px";
+      image.style.borderRadius = imageRadius(block) + "px";
       element.appendChild(image);
     }
 
@@ -169,7 +176,7 @@ export class EditorView {
       marker.className = "doc-marker" + (block.ordered ? " is-number" : "");
       const text = this.markerText(block, index);
       marker.textContent = text;
-      marker.style.left = entry.marker.x - textWidth(text, "17.5px Literata") + "px";
+      marker.style.left = entry.marker.x - textWidth(text, fontFor(block, null)) + "px";
       marker.style.top = entry.marker.y - entry.top + "px";
       element.appendChild(marker);
     }
@@ -183,7 +190,15 @@ export class EditorView {
     let number = 1;
     for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
       const previous = this.blocks[cursor];
-      if (!previous || previous.type !== "list" || previous.depth !== block.depth) {
+      if (!previous || previous.type !== "list") {
+        break;
+      }
+      if (previous.depth > block.depth) {
+        // A nested list belongs to the previous sibling; the numbers of this
+        // level continue after it.
+        continue;
+      }
+      if (previous.depth !== block.depth) {
         break;
       }
       if (!previous.ordered) {
@@ -224,6 +239,7 @@ export class EditorView {
           ring.style.top = entry.image.y - 2 + "px";
           ring.style.width = entry.image.width + 4 + "px";
           ring.style.height = entry.image.height + 4 + "px";
+          ring.style.borderRadius = imageRadius(entry.block) + 2 + "px";
           this.overlay.appendChild(ring);
           this.selectionElements.push(ring);
 
@@ -298,20 +314,40 @@ export class EditorView {
     }
   }
 
+  // One screen of document, minus the margins the caret keeps at the edges.
+  pageDistance() {
+    return Math.max(1, window.innerHeight - CARET_MARGIN * 2);
+  }
+
+  scrollBy(distance) {
+    if (distance) {
+      window.scrollBy({ top: distance, behavior: "instant" });
+    }
+  }
+
+  // A document-edge jump shows the whole paper's beginning or its end,
+  // including the title above the prose, rather than stopping at a caret
+  // margin that would leave it off screen.
+  scrollToPageEdge(toStart) {
+    const top = toStart ? 0 : document.scrollingElement.scrollHeight;
+    window.scrollTo({ top, behavior: "instant" });
+  }
+
   scrollCaretIntoView() {
     if (!this.caretPoint) {
       return;
     }
-    const top = this.caretPoint.y;
+    // caretPoint is in the editor's own coordinates; the editor itself starts
+    // wherever the page puts it, so compare viewport positions instead of
+    // comparing the content offset with window.scrollY.
+    const editorTop = this.root.getBoundingClientRect().top;
+    const top = editorTop + this.caretPoint.y;
     const bottom = top + this.caretPoint.height;
-    const viewTop = window.scrollY;
-    const viewBottom = viewTop + window.innerHeight;
-    const margin = 90;
 
-    if (top < viewTop + margin) {
-      window.scrollTo({ top: Math.max(0, top - margin), behavior: "auto" });
-    } else if (bottom > viewBottom - margin) {
-      window.scrollTo({ top: bottom - window.innerHeight + margin, behavior: "auto" });
+    if (top < CARET_MARGIN) {
+      window.scrollBy({ top: top - CARET_MARGIN, behavior: "instant" });
+    } else if (bottom > window.innerHeight - CARET_MARGIN) {
+      window.scrollBy({ top: bottom - window.innerHeight + CARET_MARGIN, behavior: "instant" });
     }
   }
 }

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Grapho editor harness</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.ico">
+  <link rel="stylesheet" href="/assets/app.css">
+  <style>
+    /* Tests need a stable page without the app's sticky header. */
+    body.editor-page { min-height: 100vh; }
+    .editor-workspace { padding: 0; }
+    .paper { min-height: 0; }
+  </style>
+</head>
+<body class="editor-page">
+  <main class="editor-workspace">
+    <div class="editor-column" id="editorColumn">
+      <article class="paper" id="paper" aria-busy="false">
+        <header class="paper-head">
+          <input class="document-title" id="documentTitle" type="text" value="Test document" aria-label="Document title">
+        </header>
+        <div class="prose" id="editor" role="textbox" aria-multiline="true" aria-label="Document content">
+          <div class="doc-content"></div>
+          <div class="doc-overlay" aria-hidden="true">
+            <div class="doc-caret"></div>
+          </div>
+          <textarea class="doc-input" id="docInput" aria-hidden="true" tabindex="-1" autocomplete="off" spellcheck="false"></textarea>
+        </div>
+      </article>
+    </div>
+  </main>
+  <script type="module" src="./editor.test.js"></script>
+</body>
+</html>

@@ -72,15 +72,23 @@ src/main.rs       configuration, CLI, startup, graceful shutdown
 src/api.rs        routes, static assets, security headers, same-origin check
 src/auth.rs       password gate: Argon2id, sessions, throttling, cookies
 src/store.rs      document model, JSON persistence, HTML sanitization
+src/settings.rs   data folder rules and the remembered folder choice
+src/backup.rs     backup connectors: a background mirror of every save
+src/sftp.rs       the system sftp client, driven in batch mode for SSH backups
+src/drive.rs      Google Drive: loopback OAuth, token cache, and Drive calls
+src/secrets.rs    connector secrets (OAuth client secret, refresh token)
+src/disk.rs       free space for the storage page (statvfs / GetDiskFreeSpaceEx)
 src/assets.rs     embedded HTML/CSS/JS/font lookup
 assets/           browser UI; no build step (login.html is the password gate)
-assets/doc/       the editor: model, layout, view, and input
+assets/doc/       the editor: model, layout, view, input, images, and PDF export
+assets/icons/     standalone SVG sources for the icons the pages inline
 assets/pretext/   vendored text layout engine (MIT); do not edit
 assets/fonts/     bundled Inter/Literata files and their licenses
 build.rs          git tag, commit, and commit date for /version
 Dockerfile        static musl binary on a scratch runtime image
 compose.yaml      local container: loopback port and grapho-data volume
 Cross.toml        cross-rs target images
+test/             browser tests for the editor and a real-server round trip
 ```
 
 Data flow is deliberately simple:
@@ -89,7 +97,7 @@ Data flow is deliberately simple:
    page and API call also needs a session cookie.
 2. The UI uses the JSON API for document operations.
 3. The Rust store keeps documents in an in-memory map and writes each change to
-   `GRAPHO_DATA_DIR/<uuid>.json`.
+   the data folder as `<uuid>.json`.
 4. Documents use a simple versioned JSON format. Add `#[serde(default)]` when
    extending it, and preserve existing files.
 
@@ -102,6 +110,61 @@ default would scatter documents. A `./data` folder that already holds `.json`
 files wins, which keeps checkouts and copied folders portable, and
 `GRAPHO_DATA_DIR` overrides everything. The container image sets that variable
 to `/data` explicitly.
+
+The folder is chosen in this order, and `settings.rs` owns the rules:
+`GRAPHO_DATA_DIR`, the folder saved on the Storage page, `./data` when it holds
+documents, and the per-user default. A saved folder is stronger than `./data`
+because choosing it is an explicit instruction, and the environment stays
+strongest: the Storage page refuses to change a folder that the environment
+selected. The saved value lives outside the data directory, in the per-user
+configuration directory (`~/.config/grapho/config.json`,
+`~/Library/Preferences/Grapho/config.json`, `%APPDATA%\Grapho\config.json`), so
+moving the documents cannot lose the record of where they went. A missing,
+unreadable, or malformed settings file just means "no saved choice".
+
+The Storage page (`/storage`, protected like the documents because it reveals a
+filesystem path) shows the folder, document count, bytes used, and free space
+from `statvfs` or `GetDiskFreeSpaceExW`. Changing the folder copies every
+document into the new folder through the same temporary-file-and-replace path
+before the store switches, so the previous folder is left behind as a complete
+copy. A folder holding documents that are not in the library is refused instead
+of merged; a folder holding copies of the library's own documents (such as the
+previous folder) is accepted. `GRAPHO_DATA_DIR` cannot be overruled from the
+browser.
+
+The same page adds backup connectors: a folder that receives a copy of every
+save, an SSH server reached over SFTP, or a Google Drive folder. A OneDrive or
+Dropbox folder works through its desktop sync client, and a mounted network share
+works like any other folder. Adding one seeds the whole library through the
+worker, then every create, update, and delete queues a job. `backup.rs` owns the
+worker: it reads the latest version from the store at write time, collapses a
+burst of saves into one write per document, and records the last failure per
+connector for the page to show. Copies never run on the request path, so a slow
+share cannot slow a save; on shutdown `BackupMirror::flush` gives queued copies a
+few seconds. Removing a connector stops mirroring and leaves the files already
+there alone.
+
+SSH connectors go through `sftp.rs`: Grapho runs the system OpenSSH `sftp` client
+in batch mode, one invocation per connector per batch. Nothing links an SSH
+library, and no password or key material is stored; the client uses the user's key
+file, agent, and known_hosts, with `BatchMode=yes` and
+`StrictHostKeyChecking=accept-new`. The process runs with the data folder as its
+working directory, so the script only names `<uuid>.json` files and never has to
+quote a local path. Adding an SSH connector lists the remote folder first (which
+proves the host, the account, and the path, and refuses another library's
+documents), then seeds; the connector is remembered only if both work.
+
+Google Drive connectors are native (`drive.rs`). The user creates a Desktop-app
+OAuth client in their own Google Cloud project — Grapho cannot ship a client id
+for every installation — and pastes its id and secret into the page. The browser
+is sent to Google with a PKCE challenge and the `drive.file` scope, and Google
+redirects back to the public `/oauth/google/callback`, which exchanges the code
+for an access token and a refresh token. Only the refresh token and client secret
+are kept, in `secrets.rs`'s file beside the settings; never in `config.json`, never
+in the data folder. Each batch lists the Drive folder once (that is also how file
+ids are found, so no local id map is needed), then uploads with resumable
+requests through `ureq`. The folder is found by name or created; a folder holding
+another library's documents is refused.
 
 `build.rs` records `GRAPHO_TAG`, `GRAPHO_COMMIT`, and `GRAPHO_COMMIT_DATE` when
 the build has a `.git` directory. `/version` renders them into
@@ -125,9 +188,11 @@ unchanged.
 - Every line comes from `prepare`/`layoutNextLineRange` or
   `prepareRichInline`/`layoutNextRichInlineLineRange`. Do not reintroduce browser
   text wrapping inside the document.
-- Typography lives twice: the font, size, and line-height constants in
-  `layout.js` are what pretext measures, and the matching `.doc-line` classes in
-  `app.css` paint them. Change both together, or carets and selections drift.
+- Typography lives twice: the font, size, line-height, and letter-spacing
+  constants in `layout.js` are what pretext measures, and the matching
+  `.doc-line` classes in `app.css` paint them. The Canvas font stacks include
+  the same fallbacks as `--font-reading` and `--font-mono`. Change both sides
+  together, or carets and selections drift.
 - Images are blocks. `mode: "left" | "right"` floats one over the following lines
   by narrowing them; `mode: "block"` centres it with its own vertical space;
   `mode: "free"` places it at `x` (from the column's left) and `y` (from the top
@@ -136,33 +201,89 @@ unchanged.
   and clear all images that meet a line at once. Code blocks wrap their lines the
   same way. If several wrapped images keep moving each other's anchors, the last
   pass pins them in place, so no line can end up beneath an image.
-- Dragging writes the new absolute position directly; arrow keys move a selected
-  image by 4 px (24 with Shift). A selected image shows four corner handles;
+- The image menu opens from the picture's context menu (a right click, or a long
+  press on touch) and selects the image it acts on. A plain click only selects
+  the picture, which keeps dragging, resizing, and the arrow keys working.
+- Dragging writes the new absolute position directly; holding Shift on the press
+  or during the drag locks the move to one axis, chosen from the direction the
+  pointer moved further on when Shift went down, and arrow keys move a selected
+  image by 4 px (24 with Shift). A Shift press that never moves still extends the
+  text selection to the image. A selected image shows four corner handles;
   dragging one keeps the opposite corner fixed, preserves the aspect ratio, and
   stores the rendered width as `data-width` (the natural `width`/`height` stay).
   Holding Alt scales around the image's centre instead. Resizing turns the image
   free, so the text reflows beside it.
+- Rotating and flipping are bitmap edits, not stored transforms: the three
+  buttons in the image menu rewrite the embedded data URL through
+  `assets/doc/image.js` and hand the block its new natural `width`/`height`. A
+  turn swaps the block's stored `data-width` for the height it was rendered at,
+  so the picture keeps the scale it was resized to. Every other reader of the
+  document (view, layout, PDF, HTML export) therefore needs no transform of its
+  own, and the menu stays open because one turn is rarely the whole gesture.
+  Undo restores the previous data URL.
+- A corner radius is the opposite: a bounded `data-radius` on the `<img>`, not
+  pixels. Images are square by default (`IMAGE_RADIUS_DEFAULT`), so only a
+  different value is stored; the menu field applies it on `input` with coalesced
+  undo, and `imageRadius()` clamps it. The view paints it as `border-radius`, the
+  PDF export clips the image with a rounded path, and the HTML export writes one
+  `img[data-radius="N"]` rule per radius the document uses, since it cannot put
+  an inline style on an image.
+- The image menu's placement row sets the three modes directly: the left and
+  right icons are the old `Wrap left`/`Wrap right` items, and the middle one
+  turns the picture into a block image with `data-width` pinned to the width it
+  already had, so it returns to the middle without being resized. `Block` stays
+  for a block image at its natural width, and a free image keeps the position it
+  was dropped at until one of the three is chosen.
 - Paragraph alignment and indentation are block properties, stored as
   `data-align` and `data-indent` on the block tag (or list item). Layout shifts
   each painted line for centre/right alignment, stretches spaces on justified
   lines except the last line of a segment, and adds 24 px per indent step. Lists
   keep `depth` for nesting, separate from the generic indent. `Tab` indents an
-  ordinary paragraph and nests a list; the Align & indent popover exposes the
-  rest. Code blocks and images are outside paragraph alignment.
+  ordinary paragraph, nests a list, and inserts a tab in a code block; the Align
+  & indent popover exposes the rest. Code blocks and images are outside
+  paragraph alignment.
 - Paper width belongs to the document, not the HTML: `paper_width` (pixels) in
   the document JSON, applied before the first layout. Dragging either border
   resizes both edges around the centre; the workspace bounds the drag and leaves
   a small gap at the edge of the screen. Widths near the 900 px default snap back
-  to it, which drops the stored preference so the page follows the stylesheet
-  again. Touch-only screens hide the grips.
+  to it with a short magnetic hold and an accent grip line; the snap drops the
+  stored preference so the page follows the stylesheet again. Touch-only screens
+  hide the grips.
 - Edits go through `DocEditor.commit()`, which snapshots undo state, re-lays out,
   and repaints. Do not mutate `blocks` in place.
+- A soft wrap shares one offset between the end of a line and the start of the
+  next. `lineHint` records which side a click or a vertical move chose; commits
+  clear it, so typing a space at the wrap keeps the caret on the line above.
+- A code line carries a synthetic fragment and its own offset range, so the same
+  caret, click, and selection code works in `<pre>` blocks. Trailing spaces at a
+  line end are painted for the caret but left out of alignment, as the browser
+  hangs them; the stored HTML escapes text before writing line feeds as `<br>`.
 - The hidden `<textarea>` only captures keystrokes, IME, and clipboard events; its
   value is cleared after every event.
+- Page Up and Page Down move the caret one screen and scroll the page by the same
+  distance, so the caret keeps its place and the next keystroke stays there. When
+  the jump would pass the document, the caret goes to its very first or very last
+  character and the paper scrolls to its edge, matching what a native text field
+  does. `Ctrl+Home`/`Ctrl+End` always go to those edges, and Shift extends. The
+  keys are handled by the editor because the focused textarea would otherwise
+  scroll the page and leave the caret behind. The jump is measured from
+  `window.innerHeight` minus the caret margin in `view.js`.
+- Focus mode hides the editor's bar and asks the browser for fullscreen, from
+  the document menu. The header stays in the DOM because its menu button is the
+  way out: CSS takes it out of the flow, hides the start and the toolbar, and
+  lets the paper fill the viewport. Leaving fullscreen leaves focus mode, and
+  Escape leaves both.
 - Known gaps: no native spellcheck, screen readers get the painted text but not a
   text-editing surface, printing the editor prints the painted page, image and
-  paper resizing need a pointer, and HTML or Markdown exports put
-  free-positioned images back into the text flow.
+  paper resizing need a pointer, turning an animated GIF keeps only its first
+  frame, and HTML or Markdown exports put free-positioned images back into the
+  text flow.
+- PDF export (`assets/doc/pdf.js`) lays the document out again at an A4 content
+  width, so its line breaks can differ from the paper on screen. It writes the
+  file itself and uses the standard PDF fonts (Times and Courier), so do not add
+  a PDF library or embed fonts. Fragment widths come from the layout and become
+  PDF horizontal scaling, which keeps lines aligned without Literata. Only
+  WinAnsi characters survive; anything else becomes `?`.
 
 ## Invariants
 
@@ -176,7 +297,9 @@ These should not be casually changed:
 - Formatting is stored as semantic tags (`<b>`, `<i>`, `<u>`, headings, lists),
   never inline styles. Paragraph alignment and indent are the one block-level
   exception: bounded `data-align` and `data-indent` attributes on the block tag,
-  validated by the sanitizer. The Content-Security-Policy forbids inline styles.
+  validated by the sanitizer. Images carry their own bounded `data-radius` and
+  `data-width`, validated there too. The Content-Security-Policy forbids inline
+  styles.
 - The stored HTML is the interchange format between the editor and older
   documents. `parseDocument`/`serializeDocument` must round-trip it; test with
   documents written by earlier versions.
@@ -196,7 +319,10 @@ These should not be casually changed:
   or in the document store, and never make the cookie readable from JavaScript.
 - Every route that reads or changes a document is registered on the protected
   router in `api.rs`. The public routes are `/login`, `/api/session`,
-  `/api/health`, `/version`, and `/assets/*`; a new public route needs a reason.
+  `/api/health`, `/version`, `/oauth/google/callback`, and `/assets/*`; a new
+  public route needs a reason. The Google callback is public because a
+  `SameSite=Strict` cookie is not sent on a redirect from accounts.google.com;
+  its single-use `state` value is the credential.
 - Argon2 runs on a blocking thread behind a single permit, failed logins are
   throttled, and authenticated responses are `no-store` with `Vary: Cookie`. Keep
   all three when touching the login code. Sessions and the failure counter are
@@ -206,6 +332,54 @@ These should not be casually changed:
   `nextPath()`); do not turn it into an open redirect.
 - Writes go through the temporary-file-and-replace path in `store.rs`. Do not
   introduce a database or write directly to a live document file.
+- The data folder is chosen by the rules in `settings.rs`: `GRAPHO_DATA_DIR`
+  first, then the folder saved on the Storage page, then `./data` when it holds
+  documents, then the per-user default. The Storage page must not overrule the
+  environment.
+- Changing the folder copies every document before the switch and never deletes
+  the previous folder's files. A target holding documents from another library is
+  refused, not merged; the store's own copies are accepted, which is what makes
+  choosing the previous folder again work.
+- `/storage` and `/api/storage` stay on the protected router: the page reveals a
+  filesystem path and the route moves the whole library. The settings file is
+  written outside the data directory it describes.
+- Free space is best effort (`disk.rs`). When the platform or the folder cannot
+  answer, hide the numbers instead of guessing or failing the page.
+- Backup copies go through the worker in `backup.rs`, never through a request
+  handler. A save must be acknowledged after the primary folder's write, no
+  matter how slow a connector is.
+- Removing a backup connector never deletes the copies already in its folder. A
+  failed copy is shown on the Storage page and retried on the next save, never by
+  a timer or polling loop.
+- A backup folder must not overlap the data folder, be a connector already, or
+  hold documents from another library; the same "refuse, do not merge" rule as
+  moving the data folder applies.
+- The settings file holds `data_dir` and `backups`. Every write is a
+  read-modify-write under the app state's settings lock so two rare actions
+  cannot lose each other, and the folder is written outside the data directory.
+- SSH backups run the system `sftp` client; do not link an SSH crate. No
+  password, private key, or passphrase is ever accepted or stored, and the client
+  must stay non-interactive (`BatchMode=yes`) with host keys accepted on first
+  use and refused when they change (`StrictHostKeyChecking=accept-new`).
+- The sftp script is built only from validated fields. Remote paths reject quotes
+  and newlines, host and user are restricted to plain name characters, and local
+  files are bare `<uuid>.json` names read from the data folder, never quoted
+  paths with spaces.
+- An SSH connector is remembered only after the remote listing and the seed both
+  succeed; a failed add leaves no connector and no inherited key material behind.
+- Google Drive uses the OAuth client the user creates in their own Cloud project,
+  and only the `drive.file` scope. Never request full Drive access, and never ship
+  a client id as if it belonged to the installation.
+- The OAuth client secret and refresh token live only in `secrets.json` beside the
+  settings file (owner-only where the platform allows), never in `config.json`,
+  never in the data folder, and never in a document. Removing the connector
+  deletes them.
+- The OAuth start route requires a loopback `Host` (Google only redirects to a
+  loopback IP literal), and the callback is public, single-use, and bounded to ten
+  minutes by its `state` value. Do not add a second public route for this flow.
+- Drive calls run on a blocking thread off the request path and report their
+  failure; a failed copy is retried by the next save, never by a timer or a
+  polling loop, and the browser never talks to Google for a backup.
 
 ## Releases
 
@@ -307,14 +481,29 @@ cargo fmt --all -- --check
 scratch image with an empty `/data` directory.
 
 `node --check assets/home.js`, `node --check assets/editor.js`,
-`node --check assets/login.js`, and `node --check assets/theme.js` are useful
+`node --check assets/login.js`, `node --check assets/menu.js`,
+`node --check assets/storage.js`, and `node --check assets/theme.js` are useful
 syntax checks when Node is available; Node is not a runtime dependency.
+
+The editor's caret, selection, and writing behavior is checked in a real
+browser. These tests need Node 22+ and a local Chrome or Chromium, but no npm
+packages:
+
+```bash
+node test/run.mjs          # editor geometry, typing, selections, undo, PDF
+node test/app-check.mjs    # real server: sanitizer, save, mouse, reload
+```
+
+`test/app-check.mjs` uses the debug binary; run `cargo build` first. Both
+scripts find Chrome themselves and accept `CHROME_PATH` (and `GRAPHO_BIN`) when
+needed. `node test/run.mjs --screenshot` writes `test/artifacts/editor.png`,
+which is ignored.
 
 For UI changes, start the app and check the real browser flow at least once:
 
 1. Create a document, type, wait for "Saved", reload, and confirm the content.
 2. Go back to the library and confirm search, rename, and delete still work.
-3. Export HTML and check that the title and body are present.
+3. Export HTML and PDF and check that the title and body are present.
 4. Try a narrow mobile viewport and confirm there is no horizontal overflow.
 5. Watch the console for errors or CSP violations.
 6. With `GRAPHO_PASSWORD_HASH` set, sign in, check the wrong-password message,

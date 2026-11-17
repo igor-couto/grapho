@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Document — Grapho</title>
+  <title>Document - Grapho</title>
   <meta name="description" content="Write in Grapho, a quiet local-first document editor.">
   <meta name="theme-color" content="#f3efe6">
   <link rel="icon" type="image/svg+xml" href="/assets/favicon.ico">
@@ -40,7 +40,7 @@
 
       <button class="style-button" type="button" id="styleButton" aria-haspopup="menu" aria-controls="styleMenu" aria-expanded="false" aria-label="Paragraph style: Normal text" disabled>
         <span class="style-button-label" id="styleButtonLabel">Normal text</span>
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m7 9.5 5 5 5-5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <svg class="style-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15 7 10h10Z" fill="currentColor"/></svg>
       </button>
 
       <span class="toolbar-rule" aria-hidden="true"></span>
@@ -115,6 +115,10 @@
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 4h8l4 4v12H6V4Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 4v4h4M9 12h6M9 16h4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
             Plain Text
           </button>
+          <button class="menu-item" type="button" role="menuitem" data-doc-action="export-pdf">
+            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><g transform="translate(-1792 -298)"><path d="M1807.333 300L1796.667 300A2.667 2.667 0 0 0 1794 302.667L1794 313.333A2.667 2.667 0 0 0 1796.667 316L1807.333 316A2.667 2.667 0 0 0 1810 313.333L1810 302.667A2.667 2.667 0 0 0 1807.333 300" fill="currentColor"/><path d="M1796.842 310.574Q1796.569 310.574 1796.37 310.374A0.66 0.66 0 0 1 1796.174 309.894L1796.174 306.237Q1796.174 305.93 1796.38 305.709A0.66 0.66 0 0 1 1796.877 305.488L1798.081 305.488Q1798.847 305.488 1799.299 305.933Q1799.754 306.377 1799.754 307.221L1799.754 307.241Q1799.754 308.106 1799.274 308.579Q1798.798 309.051 1798.032 309.051L1796.933 309.051L1796.933 307.962L1797.868 307.962Q1798.119 307.962 1798.26 307.812Q1798.403 307.658 1798.403 307.315L1798.403 307.262Q1798.403 306.922 1798.256 306.786A0.55 0.55 0 0 0 1797.864 306.65L1797.514 306.65L1797.514 309.894A0.65 0.65 0 0 1 1797.314 310.374Q1797.119 310.574 1796.842 310.574M1801.255 310.5A0.7 0.7 0 0 1 1800.737 310.283A0.7 0.7 0 0 1 1800.52 309.765L1800.52 306.223Q1800.52 305.923 1800.737 305.705A0.7 0.7 0 0 1 1801.255 305.488L1802.252 305.488Q1803.281 305.488 1803.842 306.143Q1804.405 306.797 1804.405 307.963L1804.405 308.019Q1804.405 309.145 1803.817 309.825Q1803.229 310.5 1802.252 310.5ZM1801.86 309.293L1802.21 309.293Q1802.633 309.293 1802.837 308.988Q1803.043 308.684 1803.043 308.075L1803.043 307.91Q1803.043 307.329 1802.833 307.018Q1802.623 306.707 1802.213 306.706L1801.86 306.706ZM1805.907 310.573Q1805.63 310.573 1805.431 310.374A0.66 0.66 0 0 1 1805.235 309.894L1805.235 306.213Q1805.235 305.914 1805.445 305.702A0.7 0.7 0 0 1 1805.952 305.488L1807.576 305.488Q1807.828 305.488 1808.006 305.667Q1808.189 305.845 1808.189 306.094C1808.189 306.343 1808.129 306.402 1808.007 306.521Q1807.828 306.699 1807.577 306.699L1806.575 306.699L1806.575 309.895A0.65 0.65 0 0 1 1806.375 310.374A0.63 0.63 0 0 1 1805.907 310.574M1806.026 308.61L1806.026 307.518L1807.342 307.518A0.53 0.53 0 0 1 1807.73 307.679A0.52 0.52 0 0 1 1807.895 308.064A0.52 0.52 0 0 1 1807.73 308.449A0.53 0.53 0 0 1 1807.342 308.61Z" fill="#fff"/></g></svg>
+            PDF
+          </button>
           <div class="menu-rule" role="separator"></div>
           <p class="popover-label" id="themeLabel">Theme</p>
           <div class="theme-choice" role="group" aria-labelledby="themeLabel">
@@ -130,6 +134,11 @@
               </svg>
             </button>
           </div>
+          <div class="menu-rule" role="separator"></div>
+          <button class="menu-item" type="button" role="menuitem" data-doc-action="focus">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4.5 9V4.5H9M15 4.5h4.5V9M4.5 15v4.5H9M19.5 15v4.5H15" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span id="focusMenuItemLabel">Focus mode</span>
+          </button>
           <div class="menu-rule" role="separator"></div>
           <button class="menu-item menu-item-danger" type="button" role="menuitem" data-doc-action="delete">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 7h14M9 7V4.8h6V7M7 7l.8 12.2h8.4L17 7M10 11v4.5M14 11v4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -205,11 +214,58 @@
   <input type="file" id="imageInput" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
 
   <div class="popover-menu image-menu" id="imageMenu" role="menu" aria-label="Image options" hidden>
-    <p class="popover-label">Image</p>
-    <button class="menu-item" type="button" role="menuitemradio" data-image-align="block" aria-checked="true">Block</button>
-    <button class="menu-item" type="button" role="menuitemradio" data-image-align="left" aria-checked="false">Wrap left</button>
-    <button class="menu-item" type="button" role="menuitemradio" data-image-align="right" aria-checked="false">Wrap right</button>
+    <button class="menu-item" type="button" role="menuitemradio" data-image-mode="block" aria-checked="true">Block</button>
     <button class="menu-item" type="button" role="menuitem" data-image-action="original" hidden>Original size</button>
+    <div class="menu-rule" role="separator"></div>
+    <p class="popover-label" id="imageAlignmentLabel">Alignment</p>
+    <div class="image-tools" role="group" aria-labelledby="imageAlignmentLabel">
+      <button class="image-tool" type="button" role="menuitemradio" aria-checked="true" data-image-align="left" title="Wrap left" aria-label="Wrap left">
+        <svg viewBox="0 0 18 18" aria-hidden="true">
+          <path d="M2.5 17L1 17L1 1L2.5 1ZM17 5L4 5L4 7L17 7ZM12 11L4 11L4 13L12 13Z" fill="currentColor"/>
+        </svg>
+      </button>
+      <button class="image-tool" type="button" role="menuitemradio" aria-checked="false" data-image-align="center" title="Centre" aria-label="Centre">
+        <svg viewBox="0 0 18 18" aria-hidden="true">
+          <path d="M16 7L16 5L9.75 5L9.75 1L8.25 1L8.25 5L2 5L2 7L8.25 7L8.25 11L4 11L4 13L8.25 13L8.25 17L9.75 17L9.75 13L14 13L14 11L9.75 11L9.75 7Z" fill="currentColor"/>
+        </svg>
+      </button>
+      <button class="image-tool" type="button" role="menuitemradio" aria-checked="false" data-image-align="right" title="Wrap right" aria-label="Wrap right">
+        <svg viewBox="0 0 18 18" aria-hidden="true">
+          <path d="M15.5 1L17 1L17 17L15.5 17ZM1 7L14 7L14 5L1 5ZM6 13L14 13L14 11L6 11Z" fill="currentColor"/>
+        </svg>
+      </button>
+    </div>
+    <p class="popover-label" id="imageTransformLabel">Transform</p>
+    <div class="image-tools" role="group" aria-labelledby="imageTransformLabel">
+      <button class="image-tool" type="button" role="menuitem" data-image-transform="rotate-90-clockwise" title="Rotate 90° clockwise" aria-label="Rotate 90° clockwise">
+        <svg viewBox="2 2 20 20" fill="none" aria-hidden="true">
+          <path d="M12 10.6 7.5 15.1 12 19.6l4.5-4.5-4.5-4.5Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+          <path d="M6.7 9.3a5.6 5.6 0 0 1 10.6 0" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          <path d="M18 6.9 17.3 9.3 15.1 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <button class="image-tool" type="button" role="menuitem" data-image-transform="flip-horizontal" title="Flip horizontal" aria-label="Flip horizontal">
+        <svg viewBox="2 2 20 20" fill="none" aria-hidden="true">
+          <path d="M12 6.5v11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          <path d="M5.2 8.6v6.8L9.2 12Z" fill="currentColor"/>
+          <path d="M18.8 8.6v6.8L14.8 12Z" fill="currentColor"/>
+        </svg>
+      </button>
+      <button class="image-tool" type="button" role="menuitem" data-image-transform="flip-vertical" title="Flip vertical" aria-label="Flip vertical">
+        <svg viewBox="2 2 20 20" fill="none" aria-hidden="true">
+          <path d="M6.5 12h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          <path d="M8.6 5.2h6.8L12 9.2Z" fill="currentColor"/>
+          <path d="M8.6 18.8h6.8L12 14.8Z" fill="currentColor"/>
+        </svg>
+      </button>
+    </div>
+    <p class="popover-label" id="imageRadiusLabel">Corner radius</p>
+    <label class="image-radius">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M9 4.5H4.5V9M15 4.5h4.5V9M4.5 15v4.5H9M19.5 15v4.5H15" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <input class="image-radius-input" id="imageRadiusInput" type="number" inputmode="numeric" min="0" max="200" step="2" aria-labelledby="imageRadiusLabel">
+    </label>
     <div class="menu-rule" role="separator"></div>
     <button class="menu-item menu-item-danger" type="button" role="menuitem" data-image-action="remove">Remove image</button>
   </div>
@@ -234,9 +290,6 @@
 
   <dialog class="modal modal-small" id="deleteDialog" aria-labelledby="deleteTitle">
     <form class="modal-panel" id="deleteForm">
-      <div class="modal-icon modal-icon-danger" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none"><path d="M5 7h14M9 7V4.8h6V7M7 7l.8 12.2h8.4L17 7M10 11v4.5M14 11v4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      </div>
       <h2 id="deleteTitle">Delete this document?</h2>
       <p class="modal-description">This removes the document from your library. It can't be undone.</p>
       <div class="modal-actions">

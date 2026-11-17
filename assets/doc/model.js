@@ -14,6 +14,11 @@ export const INDENT_LIMIT = 6;
 export const MARK_KEYS = ["b", "i", "u", "s", "code"];
 const ALIGNMENT_SET = new Set(ALIGNMENTS);
 
+// Images are square by default. A block stores its own radius only when it
+// differs from this, so untouched documents keep their markup.
+export const IMAGE_RADIUS_DEFAULT = 0;
+export const IMAGE_RADIUS_LIMIT = 200;
+
 let nextBlockId = 1;
 
 export function createBlockId() {
@@ -31,6 +36,14 @@ export function blockAlignment(block) {
 
 export function blockIndent(block) {
   return block ? normalizeIndent(block.indent) : 0;
+}
+
+export function imageRadius(block) {
+  const radius = block ? block.radius : null;
+  if (!Number.isFinite(radius)) {
+    return IMAGE_RADIUS_DEFAULT;
+  }
+  return Math.min(IMAGE_RADIUS_LIMIT, Math.max(0, Math.round(radius)));
 }
 
 export function emptyParagraph() {
@@ -281,15 +294,19 @@ export function parseDocument(html) {
     "text/html",
   );
   const blocks = [];
-  parseChildren(doc.body, blocks, "p", {}, null);
+  parseChildren(doc.body, blocks, "p", {}, null, true);
   if (!blocks.length) {
     blocks.push(emptyParagraph());
   }
   return blocks;
 }
 
-function parseChildren(parent, out, fallbackType, marks, format) {
+function parseChildren(parent, out, fallbackType, marks, format, container) {
   let pending = [];
+  // In a container that holds block elements, whitespace between the tags is
+  // formatting. In a container of inline content, a space between two spans is
+  // real text and has to stay.
+  const skipFormattingWhitespace = Boolean(container) && hasBlockChild(parent);
   const flush = () => {
     if (pending.length) {
       out.push(createBlock(fallbackType, pending, format));
@@ -300,6 +317,9 @@ function parseChildren(parent, out, fallbackType, marks, format) {
   for (const node of Array.from(parent.childNodes)) {
     if (node.nodeType === Node.TEXT_NODE) {
       const text = cleanText(node.nodeValue);
+      if (skipFormattingWhitespace && !text.trim()) {
+        continue;
+      }
       if (text) {
         pending.push({ text, ...marks });
       }
@@ -338,15 +358,46 @@ function parseChildren(parent, out, fallbackType, marks, format) {
   flush();
 }
 
+function hasBlockChild(parent) {
+  for (const node of Array.from(parent.childNodes)) {
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      continue;
+    }
+    const tag = node.tagName.toLowerCase();
+    if (BLOCK_TAGS.has(tag) || tag === "img") {
+      return true;
+    }
+  }
+  return false;
+}
+
 function parseBlockElement(node, tag, out, marks, format) {
   const ownFormat = formatFromNode(node, format);
 
   if (HEADING_LEVELS[tag]) {
-    parseChildren(node, out, "h" + HEADING_LEVELS[tag], marks, ownFormat);
+    const before = out.length;
+    parseChildren(node, out, "h" + HEADING_LEVELS[tag], marks, ownFormat, false);
+    if (out.length === before) {
+      out.push(createBlock("h" + HEADING_LEVELS[tag], [], ownFormat));
+    }
     return;
   }
-  if (tag === "p" || tag === "div") {
-    parseChildren(node, out, "p", marks, ownFormat);
+  if (tag === "p") {
+    const before = out.length;
+    parseChildren(node, out, "p", marks, ownFormat, false);
+    // An empty paragraph is a blank line the writer typed, not noise: the
+    // editor stores it as <p></p> and must bring it back unchanged.
+    if (out.length === before) {
+      out.push(createBlock("p", [], ownFormat));
+    }
+    return;
+  }
+  if (tag === "div") {
+    const before = out.length;
+    parseChildren(node, out, "p", marks, ownFormat, true);
+    if (out.length === before) {
+      out.push(createBlock("p", [], ownFormat));
+    }
     return;
   }
   if (tag === "pre") {
@@ -355,7 +406,7 @@ function parseBlockElement(node, tag, out, marks, format) {
   }
   if (tag === "blockquote") {
     const inner = [];
-    parseChildren(node, inner, "p", marks, ownFormat);
+    parseChildren(node, inner, "p", marks, ownFormat, true);
     const runs = [];
     inner.forEach((block, index) => {
       if (index > 0) {
@@ -489,7 +540,19 @@ function imageBlockFrom(node) {
     width: numberOr(node.getAttribute("width"), 0),
     height: numberOr(node.getAttribute("height"), 0),
     displayWidth: numberOr(node.getAttribute("data-width"), null),
+    radius: radiusOr(node.getAttribute("data-radius")),
   };
+}
+
+function radiusOr(value) {
+  if (value == null || value === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+  return Math.min(IMAGE_RADIUS_LIMIT, Math.round(parsed));
 }
 
 function numberOr(value, fallback) {
@@ -522,7 +585,12 @@ export function serializeDocument(blocks) {
         items.push(blocks[index]);
         index += 1;
       }
-      html += serializeList(items, 0, 0, ordered).html;
+      // A list is an HTML tree, and the model's depths are a number that can
+      // skip a level (an item's parent was deleted) or begin above zero (the
+      // first item was indented). Normalize the depths into a tree that HTML
+      // can represent so no item is lost and serialization always advances.
+      const normalized = normalizeListDepths(items);
+      html += serializeList(normalized, 0, 0, ordered).html;
       continue;
     }
     html += serializeBlock(block);
@@ -530,6 +598,15 @@ export function serializeDocument(blocks) {
   }
 
   return html;
+}
+
+function normalizeListDepths(items) {
+  let depth = 0;
+  return items.map((item, index) => {
+    const raw = Math.max(0, Math.min(6, Math.floor(Number(item.depth) || 0)));
+    depth = index === 0 ? 0 : Math.min(raw, depth + 1);
+    return depth === item.depth ? item : { ...item, depth };
+  });
 }
 
 function serializeList(items, startIndex, depth, ordered) {
@@ -547,6 +624,10 @@ function serializeList(items, startIndex, depth, ordered) {
     while (index < items.length && items[index].depth > depth) {
       const nested = serializeList(items, index, depth + 1, ordered);
       html += nested.html;
+      if (nested.next <= index) {
+        // Defensive: a malformed depth must never trap serialization here.
+        break;
+      }
       index = nested.next;
     }
     html += "</li>";
@@ -572,6 +653,7 @@ function serializeBlock(block) {
     const x = block.mode === "free" && Number.isFinite(block.x) ? ' data-x="' + Math.round(block.x) + '"' : "";
     const y = block.mode === "free" && Number.isFinite(block.y) ? ' data-y="' + Math.round(block.y) + '"' : "";
     const displayWidth = Number.isFinite(block.displayWidth) ? ' data-width="' + Math.round(block.displayWidth) + '"' : "";
+    const radius = Number.isFinite(block.radius) ? ' data-radius="' + Math.round(block.radius) + '"' : "";
     return (
       "<img" +
       classes +
@@ -579,6 +661,7 @@ function serializeBlock(block) {
       width +
       height +
       displayWidth +
+      radius +
       x +
       y +
       ' src="' +
@@ -623,8 +706,13 @@ export function serializeRuns(runs, options) {
   let html = "";
 
   for (const run of runs) {
-    const text = allowBreaks ? run.text.replace(/\n/g, "<br>") : run.text;
-    let inner = escapeText(text);
+    // Escape the text first, then turn real line feeds into <br>. Doing it the
+    // other way escapes the tag itself and saves a hard break as the visible
+    // characters "&lt;br&gt;" when the document is written back.
+    let inner = escapeText(run.text);
+    if (allowBreaks) {
+      inner = inner.replace(/\n/g, "<br>");
+    }
     if (run.code) {
       inner = "<code>" + inner + "</code>";
     }

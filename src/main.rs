@@ -1,6 +1,12 @@
 mod api;
 mod assets;
 mod auth;
+mod backup;
+mod disk;
+mod drive;
+mod secrets;
+mod settings;
+mod sftp;
 mod store;
 
 use std::env;
@@ -8,10 +14,13 @@ use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::net::TcpListener;
 
 use crate::auth::Auth;
+use crate::backup::BackupMirror;
+use crate::settings::Source;
 use crate::store::Store;
 
 type BoxError = Box<dyn Error + Send + Sync>;
@@ -88,10 +97,32 @@ fn command_from_args(mut args: impl Iterator<Item = String>) -> Result<Command, 
 }
 
 async fn run() -> Result<(), BoxError> {
-    let config = Config::from_env()?;
-    let store = Arc::new(Store::load(config.data_dir.clone()).await?);
+    let saved = settings::load();
+    let config = Config::from_env(saved.data_dir)?;
+    let store = Arc::new(
+        Store::load(config.data_dir.clone())
+            .await
+            .map_err(|error| format!("could not open {}: {error}", config.data_dir.display()))?,
+    );
+
+    let secrets_path =
+        settings::path().and_then(|file| file.parent().map(|folder| folder.join("secrets.json")));
+    let secrets = Arc::new(secrets::Secrets::load(secrets_path));
+    let drive = Arc::new(drive::Drive::new());
+    let backups = BackupMirror::start(store.clone(), saved.backups, drive.clone(), secrets.clone());
+
     let has_password = config.auth.is_some();
-    let app = api::router(store, config.auth.map(Arc::new));
+    let app = api::router(
+        store,
+        config.auth.map(Arc::new),
+        api::ServerOptions {
+            data_dir_source: config.data_dir_source,
+            settings_file: settings::path(),
+            backups: backups.clone(),
+            drive,
+            secrets,
+        },
+    );
 
     let listener = TcpListener::bind(config.address)
         .await
@@ -104,6 +135,12 @@ async fn run() -> Result<(), BoxError> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
+    // A copy queued by the last save should normally make it out too, but a
+    // backup folder that has gone away must not hold up the exit.
+    if !backups.flush(Duration::from_secs(3)).await {
+        eprintln!("backup copies were still pending when Grapho stopped");
+    }
+
     println!("\n  Grapho stopped. Your words are on disk.\n");
     Ok(())
 }
@@ -111,125 +148,70 @@ async fn run() -> Result<(), BoxError> {
 struct Config {
     address: SocketAddr,
     data_dir: PathBuf,
+    data_dir_source: Source,
     auth: Option<Auth>,
 }
 
 impl Config {
-    fn from_env() -> Result<Self, BoxError> {
+    fn from_env(saved_data_dir: Option<PathBuf>) -> Result<Self, BoxError> {
         let raw_address = env::var("GRAPHO_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_owned());
         let address = raw_address.parse::<SocketAddr>().map_err(|error| {
             format!("GRAPHO_ADDR is not a valid socket address ({raw_address:?}): {error}")
         })?;
 
-        let data_dir = data_dir_from_environment()?;
+        let (data_dir, data_dir_source) = data_dir_from_environment(saved_data_dir)?;
 
         let auth = Auth::from_environment()?;
 
         Ok(Self {
             address,
             data_dir,
+            data_dir_source,
             auth,
         })
     }
 }
 
-/// Where documents live when nothing else decides it. Installed builds are
-/// launched from arbitrary working directories by service managers, shims, and
-/// shortcuts, so they cannot rely on a relative path.
-// Every variant exists on every platform so the rules below stay testable
-// wherever the suite runs, even though only one is constructed in a build.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Platform {
-    Unix,
-    MacOs,
-    Windows,
-}
-
-fn current_platform() -> Platform {
-    #[cfg(windows)]
-    const PLATFORM: Platform = Platform::Windows;
-    #[cfg(target_os = "macos")]
-    const PLATFORM: Platform = Platform::MacOs;
-    #[cfg(all(unix, not(target_os = "macos")))]
-    const PLATFORM: Platform = Platform::Unix;
-
-    PLATFORM
-}
-
-fn data_dir_from_environment() -> Result<PathBuf, BoxError> {
-    if let Some(configured) = env::var_os("GRAPHO_DATA_DIR") {
-        return absolute(PathBuf::from(configured));
-    }
-
-    if let Some(portable) = portable_data_dir() {
-        return Ok(portable);
-    }
+fn data_dir_from_environment(saved: Option<PathBuf>) -> Result<(PathBuf, Source), BoxError> {
+    let configured = env::var_os("GRAPHO_DATA_DIR").map(PathBuf::from);
+    let portable = settings::portable_data_dir();
 
     let home = env::var_os("HOME").map(PathBuf::from);
     let xdg_data_home = env::var_os("XDG_DATA_HOME").map(PathBuf::from);
     let local_app_data = env::var_os("LOCALAPPDATA").map(PathBuf::from);
 
-    let directory = per_user_data_dir(
-        current_platform(),
+    let default = settings::per_user_data_dir(
+        settings::current_platform(),
         home.as_deref(),
         xdg_data_home.as_deref(),
         local_app_data.as_deref(),
     )
     .unwrap_or_else(|| PathBuf::from("data"));
 
-    absolute(directory)
+    choose_data_dir(configured, saved, portable, default)
 }
 
-fn per_user_data_dir(
-    platform: Platform,
-    home: Option<&Path>,
-    xdg_data_home: Option<&Path>,
-    local_app_data: Option<&Path>,
-) -> Option<PathBuf> {
-    match platform {
-        Platform::Unix => {
-            // The XDG base directory specification ignores relative values.
-            let base = xdg_data_home
-                .filter(|path| path.is_absolute())
-                .map(Path::to_path_buf)
-                .or_else(|| home.map(|home| home.join(".local").join("share")))?;
-            Some(base.join("grapho"))
-        }
-        Platform::MacOs => Some(
-            home?
-                .join("Library")
-                .join("Application Support")
-                .join("Grapho"),
-        ),
-        Platform::Windows => {
-            let base = local_app_data
-                .map(Path::to_path_buf)
-                .or_else(|| home.map(|home| home.join("AppData").join("Local")))?;
-            Some(base.join("Grapho"))
-        }
-    }
-}
-
-/// `./data` stays in use while it already holds documents, so a checkout or a
-/// folder copied around still behaves the way it did before the per-user
-/// default existed.
-fn portable_data_dir() -> Option<PathBuf> {
-    let candidate = env::current_dir().ok()?.join("data");
-    directory_holds_documents(&candidate).then_some(candidate)
-}
-
-fn directory_holds_documents(directory: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return false;
+/// The folder is chosen in this order: `GRAPHO_DATA_DIR`, the folder saved on
+/// the storage page, `./data` when it already holds documents, and finally the
+/// per-user default. A saved folder is deliberately stronger than `./data`,
+/// because choosing one in the app is an explicit instruction.
+fn choose_data_dir(
+    configured: Option<PathBuf>,
+    saved: Option<PathBuf>,
+    portable: Option<PathBuf>,
+    default: PathBuf,
+) -> Result<(PathBuf, Source), BoxError> {
+    let (directory, source) = if let Some(directory) = configured {
+        (directory, Source::Environment)
+    } else if let Some(directory) = saved {
+        (directory, Source::Settings)
+    } else if let Some(directory) = portable {
+        (directory, Source::Portable)
+    } else {
+        (default, Source::Default)
     };
 
-    entries.flatten().any(|entry| {
-        entry
-            .path()
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
-    })
+    Ok((absolute(directory)?, source))
 }
 
 fn absolute(path: PathBuf) -> Result<PathBuf, BoxError> {
@@ -359,69 +341,50 @@ mod tests {
     }
 
     #[test]
-    fn per_user_data_dir_follows_each_platform() {
-        // Temp paths are absolute on every platform, so this test can check the
-        // macOS and Windows branches everywhere.
+    fn the_data_folder_follows_the_documented_order() {
+        // Temp paths are absolute on every platform, so this test can compare
+        // them directly.
         let base = env::temp_dir();
-        let home = base.join("home");
-        let xdg = base.join("xdg");
-        let local_app_data = base.join("local");
-        let relative = Path::new("relative");
+        let configured = base.join("from-environment");
+        let saved = base.join("from-settings");
+        let portable = base.join("from-checkout");
+        let default = base.join("from-default");
+
+        let choose =
+            |configured: Option<PathBuf>, saved: Option<PathBuf>, portable: Option<PathBuf>| {
+                choose_data_dir(configured, saved, portable, default.clone())
+                    .expect("a folder is chosen")
+            };
 
         assert_eq!(
-            per_user_data_dir(Platform::Unix, Some(&home), Some(&xdg), None),
-            Some(xdg.join("grapho"))
+            choose(
+                Some(configured.clone()),
+                Some(saved.clone()),
+                Some(portable.clone())
+            ),
+            (configured.clone(), Source::Environment),
+            "the environment wins over everything"
         );
         assert_eq!(
-            per_user_data_dir(Platform::Unix, Some(&home), None, None),
-            Some(home.join(".local").join("share").join("grapho"))
+            choose(None, Some(saved.clone()), Some(portable.clone())),
+            (saved, Source::Settings),
+            "a folder chosen in Grapho wins over a checkout's data folder"
         );
         assert_eq!(
-            per_user_data_dir(Platform::Unix, Some(&home), Some(relative), None),
-            Some(home.join(".local").join("share").join("grapho")),
-            "a relative XDG_DATA_HOME is ignored"
+            choose(None, None, Some(portable.clone())),
+            (portable, Source::Portable)
         );
-        assert_eq!(per_user_data_dir(Platform::Unix, None, None, None), None);
-
-        assert_eq!(
-            per_user_data_dir(Platform::MacOs, Some(&home), None, None),
-            Some(
-                home.join("Library")
-                    .join("Application Support")
-                    .join("Grapho")
-            )
-        );
-        assert_eq!(per_user_data_dir(Platform::MacOs, None, None, None), None);
-
-        assert_eq!(
-            per_user_data_dir(Platform::Windows, Some(&home), None, Some(&local_app_data)),
-            Some(local_app_data.join("Grapho"))
-        );
-        assert_eq!(
-            per_user_data_dir(Platform::Windows, Some(&home), None, None),
-            Some(home.join("AppData").join("Local").join("Grapho")),
-            "LOCALAPPDATA is preferred but not required"
-        );
-        assert_eq!(per_user_data_dir(Platform::Windows, None, None, None), None);
+        assert_eq!(choose(None, None, None), (default, Source::Default));
     }
 
     #[test]
-    fn only_a_folder_with_json_documents_is_a_portable_store() {
-        let root = env::temp_dir().join(format!("grapho-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
+    fn a_relative_configuration_is_made_absolute() {
+        let (directory, source) =
+            choose_data_dir(None, None, None, PathBuf::from("grapho-relative-test"))
+                .expect("a folder is chosen");
 
-        assert!(!directory_holds_documents(&root));
-
-        std::fs::write(root.join("README.md"), b"not a document").unwrap();
-        assert!(!directory_holds_documents(&root));
-
-        std::fs::write(
-            root.join("6f9c1f2e-0000-4000-8000-000000000000.json"),
-            b"{}",
-        )
-        .unwrap();
-        assert!(directory_holds_documents(&root));
-
-        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(source, Source::Default);
+        assert!(directory.is_absolute());
+        assert!(directory.ends_with("grapho-relative-test"));
     }
 }

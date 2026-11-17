@@ -69,6 +69,7 @@ export class DocEditor {
     this.imageDrag = null;
     this.imageResize = null;
     this.focused = false;
+    this.lineHint = null;
     this.callbacks = {
       onChange,
       onSelection,
@@ -105,6 +106,7 @@ export class DocEditor {
     });
 
     this.root.addEventListener("pointerdown", (event) => this.handlePointerDown(event));
+    this.root.addEventListener("contextmenu", (event) => this.handleContextMenu(event));
     window.addEventListener("pointermove", (event) => this.handlePointerMove(event));
     window.addEventListener("pointerup", () => this.handlePointerUp());
     window.addEventListener("pointercancel", () => {
@@ -138,6 +140,7 @@ export class DocEditor {
     this.undoStack = [];
     this.redoStack = [];
     this.typing = null;
+    this.lineHint = null;
     this.width = this.root.clientWidth || 640;
     this.relayout();
     this.sync();
@@ -194,13 +197,13 @@ export class DocEditor {
     return true;
   }
 
-  updateImageBlock(index, changes) {
+  updateImageBlock(index, changes, options) {
     const block = this.blocks[index];
     if (!block || block.type !== "image") {
       return;
     }
     const next = this.replaceBlock(index, { ...block, ...changes });
-    this.commit(next, { block: index, offset: 0 }, { block: index, offset: 0 });
+    this.commit(next, { block: index, offset: 0 }, { block: index, offset: 0 }, options);
   }
 
   deleteBlockAt(index) {
@@ -224,6 +227,9 @@ export class DocEditor {
   }
 
   setSelection(anchor, focus, options) {
+    // Moving the caret or dragging a new selection ends the current typing
+    // run, so the next undo does not also swallow the text typed before it.
+    this.typing = null;
     this.anchor = { ...anchor };
     this.focus = { ...focus };
     if (!(options && options.keepMarks)) {
@@ -339,7 +345,7 @@ export class DocEditor {
     if (entry.block.type === "image") {
       return null;
     }
-    return caretPoint(entry, this.focus.offset);
+    return caretPoint(entry, this.focus.offset, this.lineHint);
   }
 
   positionInput() {
@@ -357,7 +363,7 @@ export class DocEditor {
   positionInputAtSelectionEnd() {
     const saved = this.focus;
     const entry = this.layout ? blockEntry(this.layout, saved.block) : null;
-    const point = entry && entry.block.type !== "image" ? caretPoint(entry, saved.offset) : null;
+    const point = entry && entry.block.type !== "image" ? caretPoint(entry, saved.offset, this.lineHint) : null;
     if (point) {
       this.textarea.style.left = point.x + "px";
       this.textarea.style.top = point.y + "px";
@@ -385,6 +391,7 @@ export class DocEditor {
     this.blocks = blocks;
     this.anchor = { ...anchor };
     this.focus = { ...focus };
+    this.lineHint = null;
 
     if (settings.coalesce) {
       this.typing = { time: Date.now() };
@@ -413,6 +420,7 @@ export class DocEditor {
     this.anchor = { ...previous.anchor };
     this.focus = { ...previous.focus };
     this.typing = null;
+    this.lineHint = null;
     this.relayout();
     this.sync();
     this.emitChange();
@@ -428,6 +436,7 @@ export class DocEditor {
     this.anchor = { ...next.anchor };
     this.focus = { ...next.focus };
     this.typing = null;
+    this.lineHint = null;
     this.relayout();
     this.sync();
     this.emitChange();
@@ -454,13 +463,37 @@ export class DocEditor {
       return;
     }
 
-    const parts = String(text).replace(/\r\n/g, "\n").split("\n");
+    const parts = String(text).replace(/\r\n?/g, "\n").split("\n");
     const marks = overrideMarks || this.pendingMarks || this.marksForTyping();
 
-    this.deleteSelectionIfAny();
+    // Replace a selection in the same commit as the insert, so one undo puts
+    // back everything that was selected instead of only the insert.
+    const deletion = this.selectionDeletion();
+    let caret = deletion ? { ...deletion.caret } : { ...this.focus };
+    let blocks = deletion ? deletion.blocks : this.blocks;
 
-    let caret = { ...this.focus };
-    let blocks = this.blocks;
+    // A collapsed caret can sit on an image block (a click selects it). Typing
+    // then replaces the image with a paragraph at the same position.
+    if (blocks[caret.block] && blocks[caret.block].type === "image") {
+      blocks = blocks.slice();
+      blocks[caret.block] = emptyParagraph();
+      caret = { block: caret.block, offset: 0 };
+    }
+
+    // A code block is one block even when a paste brings several lines: its
+    // line feeds belong in the code, not in new paragraph blocks.
+    const target = blocks[caret.block];
+    if (target && target.type === "code" && parts.length > 1) {
+      const runs = insertRuns(target, caret.offset, parts.join("\n"), {});
+      const next = blocks.slice();
+      next[caret.block] = { ...target, id: createBlockId(), runs };
+      caret = { block: caret.block, offset: caret.offset + parts.join("\n").length };
+      if (deletion) {
+        this.typing = null;
+      }
+      this.commit(next, caret, caret, { coalesce: true, keepMarks: true });
+      return;
+    }
 
     for (let index = 0; index < parts.length; index += 1) {
       if (index > 0) {
@@ -470,13 +503,20 @@ export class DocEditor {
       }
       if (parts[index]) {
         const block = blocks[caret.block];
-        const next = { ...block, id: createBlockId(), runs: insertRuns(block, caret.offset, parts[index], marks) };
+        const partMarks = block.type === "code" ? {} : marks;
+        const next = { ...block, id: createBlockId(), runs: insertRuns(block, caret.offset, parts[index], partMarks) };
         blocks = blocks.slice();
         blocks[caret.block] = next;
         caret = { block: caret.block, offset: caret.offset + parts[index].length };
       }
     }
 
+    // The replacement and the typing that follows it stay one undo step, but
+    // it must be a new step: do not merge with typing from before the
+    // selection.
+    if (deletion) {
+      this.typing = null;
+    }
     this.commit(blocks, caret, caret, { coalesce: true, keepMarks: true });
   }
 
@@ -509,9 +549,12 @@ export class DocEditor {
     return { blocks: next, caret: { block: caret.block + 1, offset: 0 } };
   }
 
-  deleteSelectionIfAny() {
+  // The blocks and caret that result from deleting the current selection, or
+  // null when it is collapsed. Callers that insert something immediately use
+  // this so the delete and the insert share one commit and one undo step.
+  selectionDeletion() {
     if (this.isCollapsed()) {
-      return false;
+      return null;
     }
     const { from, to } = this.normalized();
     const first = this.blocks[from.block];
@@ -522,15 +565,19 @@ export class DocEditor {
         const next = this.blocks.slice();
         next.splice(from.block, 1);
         const caret = previousPosition(next, from.block);
-        this.commit(next.length ? next : [emptyParagraph()], caret, caret);
-        return true;
+        return { blocks: next.length ? next : [emptyParagraph()], caret };
       }
       const block = { ...first, id: createBlockId(), runs: removeRangeFromRuns(first.runs, from.offset, to.offset) };
-      this.commit(this.replaceBlock(from.block, block), from, from);
-      return true;
+      return { blocks: this.replaceBlock(from.block, block), caret: from };
     }
 
     const headLength = from.offset;
+    if (first.type === "image" && last.type === "image") {
+      const next = this.blocks.slice();
+      next.splice(from.block, to.block - from.block + 1);
+      const caret = previousPosition(next, from.block);
+      return { blocks: next.length ? next : [emptyParagraph()], caret };
+    }
     const headRuns = first.type === "image" ? [] : runsInRange(first, 0, from.offset);
     const tailRuns = last.type === "image" ? [] : runsInRange(last, to.offset, blockLength(last));
     const base = first.type === "image" ? last : first;
@@ -543,8 +590,15 @@ export class DocEditor {
     };
     const next = this.blocks.slice();
     next.splice(from.block, to.block - from.block + 1, merged);
-    const caret = { block: from.block, offset: headLength };
-    this.commit(next, caret, caret);
+    return { blocks: next, caret: { block: from.block, offset: headLength } };
+  }
+
+  deleteSelectionIfAny() {
+    const deletion = this.selectionDeletion();
+    if (!deletion) {
+      return false;
+    }
+    this.commit(deletion.blocks, deletion.caret, deletion.caret);
     return true;
   }
 
@@ -670,16 +724,21 @@ export class DocEditor {
   }
 
   insertParagraph() {
-    this.deleteSelectionIfAny();
-    const index = this.focus.block;
-    const block = this.blocks[index];
+    const deletion = this.selectionDeletion();
+    const blocks = deletion ? deletion.blocks : this.blocks;
+    const index = deletion ? deletion.caret.block : this.focus.block;
+    const offset = deletion ? deletion.caret.offset : this.focus.offset;
+    const block = blocks[index];
     if (!block) {
+      if (deletion) {
+        this.commit(deletion.blocks, deletion.caret, deletion.caret);
+      }
       return;
     }
 
     if (block.type === "image") {
       const paragraph = emptyParagraph();
-      const next = this.blocks.slice();
+      const next = blocks.slice();
       next.splice(index + 1, 0, paragraph);
       const caret = { block: index + 1, offset: 0 };
       this.commit(next, caret, caret);
@@ -687,34 +746,36 @@ export class DocEditor {
     }
 
     if (block.type === "code") {
-      const runs = insertRuns(block, this.focus.offset, "\n", {});
-      const next = { ...block, id: createBlockId(), runs };
-      const caret = { block: index, offset: this.focus.offset + 1 };
-      this.commit(this.replaceBlock(index, next), caret, caret);
+      const runs = insertRuns(block, offset, "\n", {});
+      const next = blocks.slice();
+      next[index] = { ...block, id: createBlockId(), runs };
+      const caret = { block: index, offset: offset + 1 };
+      this.commit(next, caret, caret);
       return;
     }
 
     if (block.type === "list") {
       if (blockLength(block) === 0) {
+        const next = blocks.slice();
         if (block.depth > 0) {
-          const next = { ...block, id: createBlockId(), depth: block.depth - 1 };
-          this.commit(this.replaceBlock(index, next), this.focus, this.focus);
+          next[index] = { ...block, id: createBlockId(), depth: block.depth - 1 };
+          this.commit(next, { block: index, offset }, { block: index, offset });
           return;
         }
-        const paragraph = emptyParagraph();
-        this.commit(this.replaceBlock(index, paragraph), this.focus, this.focus);
+        next[index] = emptyParagraph();
+        this.commit(next, { block: index, offset }, { block: index, offset });
         return;
       }
-      const [first, second] = splitBlockModel(block, this.focus.offset);
-      const next = this.blocks.slice();
+      const [first, second] = splitBlockModel(block, offset);
+      const next = blocks.slice();
       next.splice(index, 1, first, second);
       const caret = { block: index + 1, offset: 0 };
       this.commit(next, caret, caret);
       return;
     }
 
-    const [first, second] = splitBlockModel(block, this.focus.offset);
-    const next = this.blocks.slice();
+    const [first, second] = splitBlockModel(block, offset);
+    const next = blocks.slice();
     next.splice(index, 1, first, second);
     const caret = { block: index + 1, offset: 0 };
     this.commit(next, caret, caret);
@@ -980,12 +1041,14 @@ export class DocEditor {
   }
 
   insertImage(block) {
-    this.deleteSelectionIfAny();
-    const index = this.focus.block;
-    const current = this.blocks[index];
+    const deletion = this.selectionDeletion();
+    const blocks = deletion ? deletion.blocks : this.blocks;
+    const index = deletion ? deletion.caret.block : this.focus.block;
+    const offset = deletion ? deletion.caret.offset : this.focus.offset;
+    const current = blocks[index];
 
     if (!current || current.type === "image") {
-      const next = this.blocks.slice();
+      const next = blocks.slice();
       next.splice(index + 1, 0, { ...block, id: createBlockId() });
       const paragraph = emptyParagraph();
       next.splice(index + 2, 0, paragraph);
@@ -994,8 +1057,8 @@ export class DocEditor {
       return;
     }
 
-    const [head, tail] = splitBlockModel(current, this.focus.offset);
-    const next = this.blocks.slice();
+    const [head, tail] = splitBlockModel(current, offset);
+    const next = blocks.slice();
     const replacement = [];
     if (blockLength(head) > 0 || current.type !== "p") {
       replacement.push(head);
@@ -1011,6 +1074,7 @@ export class DocEditor {
   }
 
   selectAll() {
+    this.lineHint = null;
     const last = this.blocks.length - 1;
     this.setSelection({ block: 0, offset: 0 }, { block: last, offset: blockLength(this.blocks[last]) });
   }
@@ -1092,7 +1156,7 @@ export class DocEditor {
       }
       if (key === "Home" || key === "End") {
         event.preventDefault();
-        this.moveToDocumentEdge(key === "Home");
+        this.moveToDocumentEdge(key === "Home", shift);
         return;
       }
       if (key === "ArrowLeft" || key === "ArrowRight") {
@@ -1140,6 +1204,11 @@ export class DocEditor {
         event.preventDefault();
         this.moveVertical(1, shift);
         return;
+      case "PageUp":
+      case "PageDown":
+        event.preventDefault();
+        this.moveByPage(key === "PageUp" ? -1 : 1, shift);
+        return;
       case "Home":
         event.preventDefault();
         this.moveToLineEdge(false, shift);
@@ -1150,7 +1219,15 @@ export class DocEditor {
         return;
       case "Tab":
         event.preventDefault();
-        this.indentForTab(shift ? -1 : 1);
+        if (this.blocks[this.focus.block] && this.blocks[this.focus.block].type === "code") {
+          if (shift) {
+            this.outdentCode();
+          } else {
+            this.insertText("\t");
+          }
+        } else {
+          this.indentForTab(shift ? -1 : 1);
+        }
         return;
       case "Escape":
         if (!this.isCollapsed()) {
@@ -1168,21 +1245,45 @@ export class DocEditor {
     }
   }
 
-  insertHardBreak() {
-    this.deleteSelectionIfAny();
+  outdentCode() {
     const index = this.focus.block;
     const block = this.blocks[index];
-    if (!block || block.type === "image") {
+    if (!block || block.type !== "code") {
       return;
     }
-    const marks = this.pendingMarks || this.marksForTyping();
-    const runs = insertRuns(block, this.focus.offset, "\n", marks);
+    const text = blockText(block);
+    const lineStart = text.lastIndexOf("\n", this.focus.offset - 1) + 1;
+    if (text[lineStart] !== "\t") {
+      return;
+    }
+    const runs = removeRangeFromRuns(block.runs, lineStart, lineStart + 1);
     const next = { ...block, id: createBlockId(), runs };
-    const caret = { block: index, offset: this.focus.offset + 1 };
+    const caret = { block: index, offset: Math.max(lineStart, this.focus.offset - 1) };
     this.commit(this.replaceBlock(index, next), caret, caret);
   }
 
+  insertHardBreak() {
+    const deletion = this.selectionDeletion();
+    const blocks = deletion ? deletion.blocks : this.blocks;
+    const index = deletion ? deletion.caret.block : this.focus.block;
+    const offset = deletion ? deletion.caret.offset : this.focus.offset;
+    const block = blocks[index];
+    if (!block || block.type === "image") {
+      if (deletion) {
+        this.commit(deletion.blocks, deletion.caret, deletion.caret);
+      }
+      return;
+    }
+    const marks = block.type === "code" ? {} : this.pendingMarks || this.marksForTyping();
+    const runs = insertRuns(block, offset, "\n", marks);
+    const next = blocks.slice();
+    next[index] = { ...block, id: createBlockId(), runs };
+    const caret = { block: index, offset: offset + 1 };
+    this.commit(next, caret, caret);
+  }
+
   moveHorizontal(direction, extend) {
+    this.lineHint = null;
     if (!extend && !this.isCollapsed()) {
       const { from, to } = this.normalized();
       this.collapseTo(direction < 0 ? from : to);
@@ -1200,6 +1301,7 @@ export class DocEditor {
   }
 
   moveWord(direction, extend) {
+    this.lineHint = null;
     const from = extend ? this.focus : this.normalized().from;
     const next = stepWord(this.blocks, from, direction);
     if (extend) {
@@ -1219,7 +1321,7 @@ export class DocEditor {
       return;
     }
 
-    const point = caretPoint(entry, this.focus.offset);
+    const point = caretPoint(entry, this.focus.offset, this.lineHint);
     const x = point ? point.x : 0;
     const line = point ? point.line : entry.lines[0];
     const lineIndex = entry.lines.indexOf(line);
@@ -1243,6 +1345,7 @@ export class DocEditor {
     }
 
     if (!targetLine) {
+      this.lineHint = null;
       if (direction < 0) {
         this.collapseTo({ block: 0, offset: 0 });
       } else {
@@ -1255,12 +1358,74 @@ export class DocEditor {
 
     const offset = pointToOffset(targetEntry, x, targetLine.y + 1);
     const next = { block: targetEntry.index, offset };
+    // The offset at a soft wrap belongs to both lines; this move chose the
+    // target line, so keep the caret there.
+    this.lineHint = targetLine;
     if (extend) {
       this.setSelection(this.anchor, next, { keepMarks: true });
     } else {
       this.collapseTo(next);
     }
     this.afterMove();
+  }
+
+  // Page Up/Down move the caret one screen and scroll the view by the same
+  // distance, so the caret keeps its place in the viewport. A text field moves
+  // the caret a page first and then exposes it at the top of the view; keeping
+  // the caret where it is reads more calmly and still pages a screen at a time.
+  // When the jump would pass the document, the caret goes to its very edge,
+  // which is what makes Page Up at the top reach the first character.
+  moveByPage(direction, extend) {
+    const point = this.layout ? this.caretGeometry() : null;
+    const page = this.view.pageDistance();
+    const target = point ? this.pageTarget(point.y + direction * page, point.x, direction) : null;
+    if (!target) {
+      if (point) {
+        this.moveToDocumentEdge(direction < 0, extend);
+      } else {
+        // An image is selected: there is no caret to move, so scroll instead.
+        this.view.scrollBy(direction * page);
+      }
+      return;
+    }
+
+    this.lineHint = target.line;
+    if (extend) {
+      this.setSelection(this.anchor, target.position, { keepMarks: true });
+    } else {
+      this.collapseTo(target.position);
+    }
+
+    this.view.scrollBy(target.line.y - point.y);
+    this.afterMove();
+  }
+
+  // The line at the target y, or the nearest one in the direction of travel.
+  // Pictures are skipped because a page move always lands where a caret fits.
+  // Null means the page runs past the document in that direction.
+  pageTarget(y, x, direction) {
+    let previous = null;
+    for (const entry of this.layout.blocks) {
+      if (entry.block.type === "image") {
+        continue;
+      }
+      for (const line of entry.lines) {
+        if (direction > 0) {
+          if (line.y + line.height > y) {
+            return this.pagePosition(entry, line, x);
+          }
+        } else if (line.y > y) {
+          return previous ? this.pagePosition(previous.entry, previous.line, x) : null;
+        }
+        previous = { entry, line };
+      }
+    }
+    return null;
+  }
+
+  pagePosition(entry, line, x) {
+    const offset = pointToOffset(entry, x, line.y + 1);
+    return { position: { block: entry.index, offset }, line };
   }
 
   moveToLineEdge(toEnd, extend) {
@@ -1268,16 +1433,17 @@ export class DocEditor {
       return;
     }
     const entry = blockEntry(this.layout, this.focus.block);
-    const point = caretPoint(entry, this.focus.offset);
+    const point = caretPoint(entry, this.focus.offset, this.lineHint);
     if (!entry || !point) {
       return;
     }
     const line = point.line;
-    let offset = 0;
+    let offset = line.offsetStart || 0;
     if (line.fragments.length) {
       offset = toEnd ? line.fragments[line.fragments.length - 1].end : line.fragments[0].start;
     }
     const next = { block: entry.index, offset };
+    this.lineHint = line;
     if (extend) {
       this.setSelection(this.anchor, next, { keepMarks: true });
     } else {
@@ -1286,14 +1452,18 @@ export class DocEditor {
     this.afterMove();
   }
 
-  moveToDocumentEdge(toStart) {
-    if (toStart) {
-      this.collapseTo({ block: 0, offset: 0 });
+  moveToDocumentEdge(toStart, extend) {
+    this.lineHint = null;
+    const last = this.blocks.length - 1;
+    const edge = toStart
+      ? { block: 0, offset: 0 }
+      : { block: last, offset: blockLength(this.blocks[last]) };
+    if (extend) {
+      this.setSelection(this.anchor, edge, { keepMarks: true });
     } else {
-      const last = this.blocks.length - 1;
-      this.collapseTo({ block: last, offset: blockLength(this.blocks[last]) });
+      this.collapseTo(edge);
     }
-    this.afterMove();
+    this.view.scrollToPageEdge(toStart);
   }
 
   deleteWordBackward() {
@@ -1306,8 +1476,12 @@ export class DocEditor {
       this.backspace();
       return;
     }
-    const boundaries = wordBoundaries(blockText(block));
-    const previous = previousBoundary(boundaries, position.offset);
+    const text = blockText(block);
+    const previous = previousWordStart(text, position.offset);
+    if (previous === position.offset) {
+      this.backspace();
+      return;
+    }
     const runs = removeRangeFromRuns(block.runs, previous, position.offset);
     const next = { ...block, id: createBlockId(), runs };
     const caret = { block: position.block, offset: previous };
@@ -1406,6 +1580,26 @@ export class DocEditor {
      Pointer
      --------------------------------------------------------------------- */
 
+  handleContextMenu(event) {
+    // A picture's context menu is the editor's image menu; the browser's own
+    // menu has none of these actions. Select the image first so the menu's
+    // actions and the arrow keys apply to the picture that was right-clicked.
+    if (!event.target.closest(".doc-image")) {
+      return;
+    }
+    const entry = this.imageEntryAt(event.clientX, event.clientY);
+    if (!entry) {
+      return;
+    }
+    event.preventDefault();
+    const position = { block: entry.index, offset: 0 };
+    this.setSelection(position, position);
+    this.focusEditor();
+    if (this.callbacks.onImageSelect) {
+      this.callbacks.onImageSelect(entry);
+    }
+  }
+
   handlePointerDown(event) {
     const resizeHandle = event.target.closest(".doc-resize-handle");
     if (resizeHandle) {
@@ -1428,8 +1622,15 @@ export class DocEditor {
       if (entry) {
         event.preventDefault();
         const position = { block: entry.index, offset: 0 };
-        this.setSelection(position, position);
-        this.focusEditor();
+        if (event.shiftKey) {
+          this.focusEditor();
+        } else {
+          this.setSelection(position, position);
+          this.focusEditor();
+        }
+        // Shift on the press means either extending the text selection to the
+        // image or locking the drag to one axis. A click never moves, so the
+        // release decides which gesture it was.
         this.imageDrag = {
           blockIndex: entry.index,
           startX: event.clientX,
@@ -1437,6 +1638,8 @@ export class DocEditor {
           startImage: { ...entry.image },
           anchorTop: entry.top,
           moved: false,
+          extend: event.shiftKey,
+          axis: null,
           snapshot: {
             blocks: this.blocks,
             anchor: { ...this.anchor },
@@ -1450,11 +1653,23 @@ export class DocEditor {
     event.preventDefault();
     this.focusEditor();
     const position = this.positionFromEvent(event);
-    this.pointer = { anchor: position };
-    this.collapseTo(position);
+    const extend = event.shiftKey;
+    this.pointer = { anchor: extend ? { ...this.anchor } : position };
+    if (extend) {
+      this.setSelection(this.anchor, position, { keepMarks: true });
+    } else {
+      this.collapseTo(position);
+    }
   }
 
   handlePointerMove(event) {
+    // A pointer released outside the window sends no pointerup here. Without
+    // this, an ordinary mouse move would go on dragging the old selection (or
+    // the old image) and text would feel impossible to select.
+    if (event.buttons === 0 && (this.pointer || this.imageDrag || this.imageResize)) {
+      this.handlePointerUp();
+      return;
+    }
     if (this.imageResize) {
       this.resizeImageTo(event);
       return;
@@ -1497,11 +1712,11 @@ export class DocEditor {
         this.focus = { ...drag.snapshot.focus };
         const position = { block: drag.blockIndex, offset: 0 };
         this.commit(finalBlocks, position, position);
-      } else {
-        const entry = this.layout ? this.layout.blocks[drag.blockIndex] : null;
-        if (entry && this.callbacks.onImageSelect) {
-          this.callbacks.onImageSelect(entry);
-        }
+      } else if (drag.extend) {
+        // The Shift press never moved, so it was the ordinary extend-selection
+        // click on the image rather than a constrained drag.
+        const position = { block: drag.blockIndex, offset: 0 };
+        this.setSelection(drag.snapshot.anchor, position, { keepMarks: true });
       }
       return;
     }
@@ -1519,6 +1734,12 @@ export class DocEditor {
     if (!drag.moved) {
       drag.moved = true;
       this.root.classList.add("is-dragging-image");
+      if (drag.extend) {
+        // The Shift press turned into a drag after all, so the image becomes
+        // the selection; the snapshot keeps the old one for undo.
+        const position = { block: drag.blockIndex, offset: 0 };
+        this.setSelection(position, position);
+      }
       if (this.callbacks.onImageDragStart) {
         this.callbacks.onImageDragStart();
       }
@@ -1533,8 +1754,26 @@ export class DocEditor {
         : entry && entry.image
           ? entry.image.width
           : drag.startImage.width;
-    const x = clamp(drag.startImage.x + dx, 0, Math.max(0, columnWidth - width));
-    const desiredTop = Math.max(contentTop(), drag.startImage.y + dy);
+
+    // Shift locks the move to the axis the pointer set off along, so the image
+    // slides along one line instead of drifting. Releasing Shift frees the
+    // move again, and pressing it again picks the axis from the movement so
+    // far.
+    let nextX = drag.startImage.x + dx;
+    let nextY = drag.startImage.y + dy;
+    if (event.shiftKey) {
+      drag.axis = drag.axis || (Math.abs(dx) >= Math.abs(dy) ? "x" : "y");
+      if (drag.axis === "x") {
+        nextY = drag.startImage.y;
+      } else {
+        nextX = drag.startImage.x;
+      }
+    } else {
+      drag.axis = null;
+    }
+
+    const x = clamp(nextX, 0, Math.max(0, columnWidth - width));
+    const desiredTop = Math.max(contentTop(), nextY);
 
     const next = this.blocks.slice();
     next[drag.blockIndex] = { ...next[drag.blockIndex], mode: "free", x, y: desiredTop };
@@ -1740,12 +1979,17 @@ export class DocEditor {
     const y = event.clientY - rect.top;
     const entry = entryAtY(this.layout, y);
     if (!entry) {
+      this.lineHint = null;
       const last = this.blocks.length - 1;
       return { block: last, offset: blockLength(this.blocks[last]) };
     }
     if (entry.block.type === "image") {
+      this.lineHint = null;
       return { block: entry.index, offset: 0 };
     }
+    // A click belongs to the line under the pointer, which resolves the shared
+    // offset at a soft wrap in that line's favour.
+    this.lineHint = lineAtY(entry, y);
     return { block: entry.index, offset: pointToOffset(entry, x, y) };
   }
 
@@ -1849,23 +2093,58 @@ function stepWord(blocks, position, direction) {
   if (!block || block.type === "image") {
     return stepPosition(blocks, position, direction);
   }
-  const boundaries = wordBoundaries(blockText(block));
+  const text = blockText(block);
   if (direction < 0) {
     if (position.offset === 0) {
       return stepPosition(blocks, position, -1);
     }
-    return { block: position.block, offset: previousBoundary(boundaries, position.offset) };
+    return { block: position.block, offset: previousWordStart(text, position.offset) };
   }
-  if (position.offset >= blockLength(block)) {
+  if (position.offset >= text.length) {
     return stepPosition(blocks, position, 1);
   }
-  return { block: position.block, offset: nextBoundaryAfter(boundaries, position.offset) };
+  return { block: position.block, offset: nextWordStart(text, position.offset) };
+}
+
+// Starts of the word-like segments, so word navigation skips the spaces and
+// punctuation between words instead of stopping on every segment edge.
+function wordStarts(text) {
+  const starts = [];
+  if (!ensureWordSegmenter()) {
+    return starts;
+  }
+  for (const part of wordSegmenter.segment(text)) {
+    if (part.isWordLike) {
+      starts.push(part.index);
+    }
+  }
+  return starts;
+}
+
+function previousWordStart(text, offset) {
+  const starts = wordStarts(text);
+  for (let index = starts.length - 1; index >= 0; index -= 1) {
+    if (starts[index] < offset) {
+      return starts[index];
+    }
+  }
+  return 0;
+}
+
+function nextWordStart(text, offset) {
+  const starts = wordStarts(text);
+  for (const start of starts) {
+    if (start > offset) {
+      return start;
+    }
+  }
+  return text.length;
 }
 
 let wordSegmenter = null;
 let wordChecked = false;
 
-function wordBoundaries(text) {
+function ensureWordSegmenter() {
   if (!wordChecked) {
     wordChecked = true;
     try {
@@ -1874,7 +2153,11 @@ function wordBoundaries(text) {
       wordSegmenter = null;
     }
   }
-  if (!wordSegmenter) {
+  return wordSegmenter;
+}
+
+function wordBoundaries(text) {
+  if (!ensureWordSegmenter()) {
     return graphemeBoundaries(text);
   }
   const points = [0];

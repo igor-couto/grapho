@@ -1,9 +1,18 @@
 // Grapho's editor page: loads a document, owns the pretext-backed editor, and
 // handles saving, formatting, links, images, and export.
 
-import { blockText, parseDocument, serializeDocument } from "./doc/model.js";
+import {
+  IMAGE_RADIUS_DEFAULT,
+  IMAGE_RADIUS_LIMIT,
+  blockText,
+  imageRadius,
+  parseDocument,
+  serializeDocument,
+} from "./doc/model.js";
 import { DocEditor } from "./doc/input.js";
+import { IMAGE_MAX_DATA_URL, encodeCanvas, transformImage } from "./doc/image.js";
 import { cacheImageSize, ensureFonts, loadMissingImages } from "./doc/layout.js";
+import { buildPdf } from "./doc/pdf.js";
 
 const state = {
   documentId: null,
@@ -16,21 +25,24 @@ const state = {
   savePromise: null,
   saveErrorNotified: false,
   imageEntry: null,
+  imageBusy: false,
   toastTimer: null,
   paperWidth: null,
   paperDrag: null,
+  exportingPdf: false,
+  focusMode: false,
 };
 
 const els = {};
 let editor = null;
 
 const IMAGE_MAX_EDGE = 1600;
-const IMAGE_MAX_DATA_URL = 1500000;
 const IMAGE_PASSTHROUGH_BYTES = 600 * 1024;
 const PAPER_MIN_WIDTH = 360;
 const PAPER_DEFAULT_WIDTH = 900; // Keep in sync with .editor-column in app.css.
 const PAPER_EDGE_GAP = 18;
-const PAPER_SNAP_DISTANCE = 16;
+const PAPER_SNAP_DISTANCE = 24;
+const PAPER_SNAP_RELEASE_DISTANCE = 44;
 
 document.addEventListener("DOMContentLoaded", init);
 
@@ -39,6 +51,7 @@ async function init() {
   els.backToLibrary = document.getElementById("backToLibrary");
   els.documentMenuButton = document.getElementById("documentMenuButton");
   els.documentMenu = document.getElementById("documentMenu");
+  els.focusMenuItemLabel = document.getElementById("focusMenuItemLabel");
   els.formatToolbar = document.getElementById("formatToolbar");
   els.styleButton = document.getElementById("styleButton");
   els.styleButtonLabel = document.getElementById("styleButtonLabel");
@@ -49,6 +62,7 @@ async function init() {
   els.imageButton = document.getElementById("imageButton");
   els.imageInput = document.getElementById("imageInput");
   els.imageMenu = document.getElementById("imageMenu");
+  els.imageRadiusInput = document.getElementById("imageRadiusInput");
   els.paper = document.getElementById("paper");
   els.editorColumn = document.querySelector(".editor-column");
   els.documentTitle = document.getElementById("documentTitle");
@@ -169,7 +183,7 @@ function showLoadFailure(error) {
   els.documentTitle.disabled = true;
   els.documentMenuButton.disabled = true;
   setToolbarEnabled(false);
-  document.title = notFound ? "Document not found — Grapho" : "Couldn't open document — Grapho";
+  document.title = notFound ? "Document not found - Grapho" : "Couldn't open document - Grapho";
 }
 
 function documentIdFromPath() {
@@ -233,7 +247,7 @@ function normalizeTitleField() {
 
 function updatePageTitle() {
   const title = String(els.documentTitle.value || "").trim() || "Untitled document";
-  document.title = title + " — Grapho";
+  document.title = title + " - Grapho";
 }
 
 function updateEditorPlaceholder() {
@@ -454,6 +468,8 @@ function bindEvents() {
   els.linkButton.addEventListener("click", openLinkDialog);
   els.imageButton.addEventListener("click", openImagePicker);
   els.imageInput.addEventListener("change", handleImagePicked);
+  els.imageRadiusInput.addEventListener("input", handleImageRadiusInput);
+  els.imageRadiusInput.addEventListener("blur", handleImageRadiusBlur);
 
   els.alignButton.addEventListener("click", toggleAlignMenu);
   els.alignMenu.addEventListener("click", handleAlignMenuClick);
@@ -462,6 +478,10 @@ function bindEvents() {
 
   els.imageMenu.addEventListener("click", handleImageMenuClick);
   els.imageMenu.addEventListener("keydown", (event) => {
+    // The radius field needs its own arrow keys, Backspace, and Delete.
+    if (event.target.closest(".image-radius-input")) {
+      return;
+    }
     if (!state.imageEntry) {
       return;
     }
@@ -512,8 +532,24 @@ function bindEvents() {
     addImages(files);
   });
 
+  // The whole sheet shows the text cursor, so a click on its margins or in the
+  // space below the last line has to put the caret on the nearest line instead
+  // of doing nothing.
+  els.paper.addEventListener("pointerdown", (event) => {
+    if (!state.loaded || event.button !== 0 || event.isPrimary === false) {
+      return;
+    }
+    if (els.editor.contains(event.target) || event.target.closest(".paper-grip, .document-title, .load-error")) {
+      return;
+    }
+    event.preventDefault();
+    editor.focusEditor();
+    editor.collapseTo(editor.positionFromEvent(event));
+  });
+
   els.documentMenuButton.addEventListener("click", toggleDocumentMenu);
   els.documentMenu.addEventListener("click", handleDocumentMenuAction);
+  document.addEventListener("fullscreenchange", handleFullscreenChange);
 
   els.backToLibrary.addEventListener("click", handleHomeLink);
 
@@ -599,6 +635,7 @@ function beginPaperResize(event, grip) {
     // shrink when the first movement tries to widen it.
     max: Math.max(bounds.max, startWidth),
     defaultWidth: bounds.defaultWidth,
+    snapped: false,
     moved: false,
   };
   grip.setPointerCapture(event.pointerId);
@@ -616,8 +653,15 @@ function movePaperResize(event) {
   const distance = drag.side === "left" ? drag.startX - event.clientX : event.clientX - drag.startX;
   // Both edges move, so one pixel of pointer travel adds two pixels of paper.
   const clamped = Math.min(Math.max(drag.startWidth + distance * 2, drag.min), drag.max);
-  const width =
-    Math.abs(clamped - drag.defaultWidth) <= PAPER_SNAP_DISTANCE ? null : Math.round(clamped);
+  const offset = Math.abs(clamped - drag.defaultWidth);
+  // Hold the default a little longer than it takes to enter it, so the snap
+  // feels magnetic instead of flickering whenever the pointer crosses it.
+  drag.snapped = drag.snapped
+    ? offset <= PAPER_SNAP_RELEASE_DISTANCE
+    : offset <= PAPER_SNAP_DISTANCE;
+  drag.grip.classList.toggle("is-snapped", drag.snapped);
+
+  const width = drag.snapped ? null : Math.round(clamped);
   if (width !== state.paperWidth) {
     applyPaperWidth(width);
     drag.moved = true;
@@ -631,7 +675,7 @@ function endPaperResize(event) {
   }
 
   state.paperDrag = null;
-  drag.grip.classList.remove("is-active");
+  drag.grip.classList.remove("is-active", "is-snapped");
   if (drag.grip.hasPointerCapture(drag.pointerId)) {
     drag.grip.releasePointerCapture(drag.pointerId);
   }
@@ -1089,51 +1133,48 @@ async function prepareImage(file) {
     throw new Error("That image couldn't be read.");
   }
 
+  // A large file is drawn into a canvas before it is stored, and a closed
+  // ImageBitmap cannot be drawn: Chrome throws "The image source is detached".
+  // Read the size and finish every draw while the bitmap is still alive.
   const naturalWidth = image.width || image.naturalWidth || 0;
   const naturalHeight = image.height || image.naturalHeight || 0;
-  if (image.close) {
-    image.close();
+  try {
+    if (file.size <= IMAGE_PASSTHROUGH_BYTES) {
+      return {
+        src: await readImageFile(file),
+        alt,
+        width: naturalWidth,
+        height: naturalHeight,
+      };
+    }
+
+    const scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(naturalWidth, naturalHeight));
+    const width = Math.max(1, Math.round(naturalWidth * scale));
+    const height = Math.max(1, Math.round(naturalHeight * scale));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext("2d").drawImage(image, 0, 0, width, height);
+
+    let src = encodeCanvas(canvas, 0.82);
+    if (src.length > IMAGE_MAX_DATA_URL) {
+      const smaller = document.createElement("canvas");
+      smaller.width = Math.max(1, Math.round(width * 0.72));
+      smaller.height = Math.max(1, Math.round(height * 0.72));
+      smaller.getContext("2d").drawImage(canvas, 0, 0, smaller.width, smaller.height);
+      src = encodeCanvas(smaller, 0.7);
+    }
+    if (src.length > IMAGE_MAX_DATA_URL) {
+      throw new Error("That image is too large to embed, even after shrinking.");
+    }
+
+    return { src, alt, width, height };
+  } finally {
+    if (image.close) {
+      image.close();
+    }
   }
-
-  if (file.size <= IMAGE_PASSTHROUGH_BYTES) {
-    return {
-      src: await readImageFile(file),
-      alt,
-      width: naturalWidth,
-      height: naturalHeight,
-    };
-  }
-
-  const scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(naturalWidth, naturalHeight));
-  const width = Math.max(1, Math.round(naturalWidth * scale));
-  const height = Math.max(1, Math.round(naturalHeight * scale));
-
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  canvas.getContext("2d").drawImage(image, 0, 0, width, height);
-
-  let src = encodeCanvas(canvas, 0.82);
-  if (src.length > IMAGE_MAX_DATA_URL) {
-    const smaller = document.createElement("canvas");
-    smaller.width = Math.max(1, Math.round(width * 0.72));
-    smaller.height = Math.max(1, Math.round(height * 0.72));
-    smaller.getContext("2d").drawImage(canvas, 0, 0, smaller.width, smaller.height);
-    src = encodeCanvas(smaller, 0.7);
-  }
-  if (src.length > IMAGE_MAX_DATA_URL) {
-    throw new Error("That image is too large to embed, even after shrinking.");
-  }
-
-  return { src, alt, width, height };
-}
-
-function encodeCanvas(canvas, quality) {
-  const src = canvas.toDataURL("image/webp", quality);
-  if (src.indexOf("data:image/webp") === 0) {
-    return src;
-  }
-  return canvas.toDataURL("image/jpeg", quality);
 }
 
 function decodeImage(file) {
@@ -1227,9 +1268,20 @@ function positionImageMenu(entry) {
 function updateImageMenuChecks(entry) {
   const block = entry && entry.block ? entry.block : null;
   const mode = block ? block.mode : "block";
-  els.imageMenu.querySelectorAll("[data-image-align]").forEach((button) => {
-    button.setAttribute("aria-checked", button.dataset.imageAlign === mode ? "true" : "false");
+  els.imageMenu.querySelectorAll("[data-image-mode]").forEach((button) => {
+    button.setAttribute("aria-checked", button.dataset.imageMode === mode ? "true" : "false");
   });
+
+  // The alignment row is the placement: the sides wrap the picture, and the
+  // middle keeps it on its own line in the middle at the size it already has.
+  const placement = mode === "left" || mode === "right" ? mode : mode === "block" ? "center" : "";
+  els.imageMenu.querySelectorAll("[data-image-align]").forEach((button) => {
+    button.setAttribute("aria-checked", button.dataset.imageAlign === placement ? "true" : "false");
+  });
+
+  if (els.imageRadiusInput && block) {
+    els.imageRadiusInput.value = String(imageRadius(block));
+  }
   const original = els.imageMenu.querySelector('[data-image-action="original"]');
   if (original) {
     const resized = Boolean(
@@ -1248,6 +1300,18 @@ function handleImageMenuClick(event) {
   }
   const index = state.imageEntry.index;
 
+  if (button.dataset.imageTransform) {
+    // The menu stays open: turning a photo straight twice is one gesture.
+    transformSelectedImage(button.dataset.imageTransform);
+    return;
+  }
+
+  if (button.dataset.imageAlign) {
+    // Also a quick repeated choice: left, then centre, then right.
+    applyImagePlacement(button.dataset.imageAlign);
+    return;
+  }
+
   if (button.dataset.imageAction === "remove") {
     closeImageMenu();
     editor.deleteBlockAt(index);
@@ -1263,7 +1327,7 @@ function handleImageMenuClick(event) {
     return;
   }
 
-  const mode = button.dataset.imageAlign;
+  const mode = button.dataset.imageMode;
   if (!mode) {
     return;
   }
@@ -1280,8 +1344,131 @@ function closeImageMenu() {
   state.imageEntry = null;
 }
 
+function applyImagePlacement(placement) {
+  const entry = state.imageEntry;
+  if (!entry || !entry.block || !entry.image) {
+    return;
+  }
+  const index = entry.index;
+
+  if (placement === "center") {
+    // Block already centres a picture on its own line; pinning the width it has
+    // now is what keeps this from sizing it up the way Block does.
+    if (entry.block.mode === "block") {
+      return;
+    }
+    editor.updateImageBlock(index, {
+      mode: "block",
+      displayWidth: Math.max(1, Math.round(entry.image.width)),
+    });
+  } else {
+    if (entry.block.mode === placement) {
+      return;
+    }
+    editor.updateImageBlock(index, { mode: placement });
+  }
+
+  const next = editor.entryFor(index);
+  if (next) {
+    state.imageEntry = next;
+    updateImageMenuChecks(next);
+    positionImageMenu(next);
+  }
+}
+
+async function transformSelectedImage(action) {
+  const entry = state.imageEntry;
+  if (state.imageBusy || !entry || !entry.image) {
+    return;
+  }
+  const index = entry.index;
+  const block = entry.block;
+  if (!block || block.type !== "image") {
+    return;
+  }
+
+  state.imageBusy = true;
+  setImageToolsBusy(true);
+  try {
+    const image = await transformImage(block.src, action);
+    // Pixels take a moment to make, and the document can move on meanwhile.
+    // Never write the result into whatever block has taken this index since.
+    if (editor.getDocument()[index] !== block) {
+      return;
+    }
+
+    // A turn swaps the picture's sides. Keeping the rendered height as the new
+    // rendered width holds a resized image at the size it was scaled to.
+    const displayWidth =
+      Number.isFinite(block.displayWidth) && entry.image
+        ? Math.max(48, Math.round(entry.image.height))
+        : null;
+
+    // The layout's image cache is keyed by source, so the freshly encoded
+    // bitmap is unknown to it until it is told the size the block now carries.
+    cacheImageSize(image.src, { width: image.width, height: image.height });
+
+    editor.updateImageBlock(index, {
+      src: image.src,
+      width: image.width,
+      height: image.height,
+      displayWidth,
+    });
+
+    if (!els.imageMenu.hidden) {
+      const next = editor.entryFor(index);
+      if (next) {
+        state.imageEntry = next;
+        updateImageMenuChecks(next);
+        positionImageMenu(next);
+      }
+    }
+  } catch (error) {
+    console.error(error);
+    showToast(error && error.message ? error.message : "That image couldn't be changed.", true);
+    closeImageMenu();
+  } finally {
+    state.imageBusy = false;
+    setImageToolsBusy(false);
+  }
+}
+
+function setImageToolsBusy(busy) {
+  els.imageMenu.querySelectorAll("[data-image-transform]").forEach((button) => {
+    button.disabled = busy;
+  });
+}
+
+function handleImageRadiusInput() {
+  const entry = state.imageEntry;
+  if (!entry || !entry.block || entry.block.type !== "image") {
+    return;
+  }
+  const typed = els.imageRadiusInput.value.trim();
+  const parsed = Number(typed);
+  if (typed === "" || !Number.isFinite(parsed)) {
+    return;
+  }
+  const radius = Math.min(IMAGE_RADIUS_LIMIT, Math.max(0, Math.round(parsed)));
+  if (radius === imageRadius(entry.block)) {
+    return;
+  }
+  editor.updateImageBlock(
+    entry.index,
+    { radius: radius === IMAGE_RADIUS_DEFAULT ? null : radius },
+    { coalesce: true },
+  );
+}
+
+function handleImageRadiusBlur() {
+  const entry = state.imageEntry;
+  if (entry && entry.block) {
+    els.imageRadiusInput.value = String(imageRadius(entry.block));
+  }
+}
+
 function handleDocumentPointer(event) {
-  if (!els.imageMenu.hidden && !els.imageMenu.contains(event.target) && !event.target.closest(".doc-image")) {
+  if (!els.imageMenu.hidden && !els.imageMenu.contains(event.target)) {
     closeImageMenu();
   }
   if (!els.documentMenu.hidden && !els.documentMenu.contains(event.target) && !event.target.closest("#documentMenuButton")) {
@@ -1346,6 +1533,13 @@ function handleDocumentMenuAction(event) {
       exportText();
       els.documentMenuButton.focus();
       break;
+    case "export-pdf":
+      exportPdf();
+      els.documentMenuButton.focus();
+      break;
+    case "focus":
+      toggleFocusMode();
+      break;
     case "delete":
       openDeleteDialog();
       break;
@@ -1354,13 +1548,112 @@ function handleDocumentMenuAction(event) {
   }
 }
 
+/* --------------------------------------------------------------------------
+   Focus mode
+   -------------------------------------------------------------------------- */
+
+function toggleFocusMode() {
+  if (state.focusMode) {
+    exitFocusMode();
+  } else {
+    enterFocusMode();
+  }
+}
+
+function enterFocusMode() {
+  if (state.focusMode) {
+    return;
+  }
+  state.focusMode = true;
+  document.body.classList.add("is-focus-mode");
+  updateFocusMenuItem();
+  editor.focusEditor();
+  // The menu click is the user gesture the Fullscreen API needs. If the
+  // browser refuses, the page still hides its chrome.
+  requestFocusFullscreen();
+}
+
+function exitFocusMode() {
+  if (!state.focusMode) {
+    return;
+  }
+  state.focusMode = false;
+  document.body.classList.remove("is-focus-mode");
+  closeDocumentMenu();
+  updateFocusMenuItem();
+  leaveFocusFullscreen();
+  editor.focusEditor();
+}
+
+function updateFocusMenuItem() {
+  if (els.focusMenuItemLabel) {
+    els.focusMenuItemLabel.textContent = state.focusMode ? "Exit focus mode" : "Focus mode";
+  }
+}
+
+function requestFocusFullscreen() {
+  const root = document.documentElement;
+  if (document.fullscreenElement || !root.requestFullscreen) {
+    return;
+  }
+  try {
+    const request = root.requestFullscreen();
+    if (request && typeof request.catch === "function") {
+      request.catch(() => {});
+    }
+  } catch (error) {
+    // Fullscreen is a bonus; focus mode itself needs nothing from it.
+  }
+}
+
+function leaveFocusFullscreen() {
+  if (!document.fullscreenElement || !document.exitFullscreen) {
+    return;
+  }
+  try {
+    const request = document.exitFullscreen();
+    if (request && typeof request.catch === "function") {
+      request.catch(() => {});
+    }
+  } catch (error) {
+    // The browser may have already left fullscreen.
+  }
+}
+
+function handleFullscreenChange() {
+  if (!state.focusMode) {
+    return;
+  }
+  if (!document.fullscreenElement) {
+    // Esc or the browser's own control left fullscreen, so leave focus mode
+    // with it. Leaving from the menu already cleared the state.
+    exitFocusMode();
+    return;
+  }
+  // Fullscreen can move focus off the hidden textarea; put it back so the
+  // first keystroke lands in the page.
+  editor.focusEditor();
+}
+
 function exportHtml() {
   if (!state.loaded) {
     return;
   }
   const title = normalizeTitle(els.documentTitle.value);
   const escapedTitle = escapeHtml(title);
-  const body = serializeDocument(editor.getDocument());
+  const blocks = editor.getDocument();
+  const body = serializeDocument(blocks);
+  // A radius lives on one image, and the export cannot put an inline style on
+  // it, so write one rule per radius this document actually uses.
+  const radii = new Set();
+  for (const block of blocks) {
+    if (block.type === "image" && Number.isFinite(block.radius)) {
+      radii.add(Math.round(block.radius));
+    }
+  }
+  const radiusRules = Array.from(radii)
+    .sort((left, right) => left - right)
+    .map((radius) => `img[data-radius="${radius}"]{border-radius:${radius}px;}`);
   const exported = [
     "<!doctype html>",
     '<html lang="en">',
@@ -1379,9 +1672,10 @@ function exportHtml() {
     "pre{padding:16px;background:#f1ece1;border-radius:8px;white-space:pre-wrap;",
     "font-family:ui-monospace,Consolas,monospace;font-size:.8em;}",
     "code{font-family:ui-monospace,Consolas,monospace;font-size:.84em;}",
-    "img{display:block;max-width:100%;height:auto;margin:1.6em auto;border-radius:6px;}",
+    "img{display:block;max-width:100%;height:auto;margin:1.6em auto;}",
     "img.wrap-left{float:left;max-width:42%;margin:.35em 1.35em 0 0;}",
     "img.wrap-right{float:right;max-width:42%;margin:.35em 0 0 1.35em;}",
+    ...radiusRules,
     "h2,h3,h4,blockquote,pre{clear:both;}",
     '[data-align="center"]{text-align:center;}',
     '[data-align="right"]{text-align:right;}',
@@ -1443,6 +1737,26 @@ function exportText() {
   const exported = title + "\n\n" + text + (text ? "\n" : "");
   downloadFile(slugify(title) + ".txt", exported, "text/plain;charset=utf-8");
   showToast("Text download started.");
+}
+
+async function exportPdf() {
+  if (!state.loaded || state.exportingPdf) {
+    return;
+  }
+  state.exportingPdf = true;
+  showToast("Preparing PDF…");
+
+  try {
+    const title = normalizeTitle(els.documentTitle.value);
+    const pdf = await buildPdf(editor.getDocument(), title);
+    downloadFile(slugify(title) + ".pdf", pdf, "application/pdf");
+    showToast("PDF download started.");
+  } catch (error) {
+    console.error(error);
+    showToast("That PDF couldn't be created.", true);
+  } finally {
+    state.exportingPdf = false;
+  }
 }
 
 function exportMarkdown() {
@@ -1667,6 +1981,18 @@ function handleGlobalKeydown(event) {
     if (!els.documentMenu.hidden) {
       event.preventDefault();
       closeDocumentMenu(true);
+      return;
+    }
+    // Escape already collapsed a selection, cancelled an image gesture, or
+    // closed a dialog when it reaches this point.
+    if (
+      state.focusMode &&
+      !event.defaultPrevented &&
+      !els.linkDialog.open &&
+      !els.deleteDialog.open
+    ) {
+      event.preventDefault();
+      exitFocusMode();
       return;
     }
   }

@@ -44,8 +44,6 @@
 
   var ICON_RENAME =
     '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m4 20 4.2-1L19 8.2 15.8 5 5 15.8 4 20Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="m13.8 7 3.2 3.2" stroke="currentColor" stroke-width="1.6"/></svg>';
-  var ICON_DELETE =
-    '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 7h14M9 7V4.8h6V7M7 7l.8 12.2h8.4L17 7M10 11v4.5M14 11v4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   var ICON_GRID =
     '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3.6" y="3.6" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6"/><rect x="13.4" y="3.6" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6"/><rect x="3.6" y="13.4" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6"/><rect x="13.4" y="13.4" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6"/></svg>';
   var ICON_LIST =
@@ -492,7 +490,7 @@
     els.actionDescription.textContent =
       "Give this document a name you'll recognize later.";
     els.actionIcon.innerHTML = ICON_RENAME;
-    els.actionIcon.classList.remove("modal-icon-danger");
+    els.actionIcon.hidden = false;
     els.renameField.hidden = false;
     els.renameInput.value = document.title;
     els.actionConfirm.textContent = "Save";
@@ -516,8 +514,8 @@
       "“" +
       document.title +
       "” will be removed from your library. It can't be undone.";
-    els.actionIcon.innerHTML = ICON_DELETE;
-    els.actionIcon.classList.add("modal-icon-danger");
+    els.actionIcon.innerHTML = "";
+    els.actionIcon.hidden = true;
     els.renameField.hidden = true;
     els.actionConfirm.textContent = "Delete";
     els.actionConfirm.className = "button button-danger";

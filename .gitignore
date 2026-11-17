@@ -12,3 +12,6 @@
 .vscode/
 *.swp
 .DS_Store
+
+# Browser test screenshots
+test/artifacts/
