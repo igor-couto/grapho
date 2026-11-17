@@ -1069,6 +1069,26 @@ mod tests {
     }
 
     #[test]
+    fn leading_indentation_survives_sanitising() {
+        // The editor indents a selected line by putting four spaces in its
+        // text, so leading whitespace has to survive the round trip exactly.
+        let clean = sanitize_content("<p>    indented</p><p>    </p><p>first<br>    second</p>");
+
+        assert!(
+            clean.contains("<p>    indented</p>"),
+            "leading spaces survive: {clean}"
+        );
+        assert!(
+            clean.contains("<p>    </p>"),
+            "a spaces-only paragraph survives: {clean}"
+        );
+        assert!(
+            clean.contains("first<br>    second"),
+            "indentation after a hard break survives: {clean}"
+        );
+    }
+
+    #[test]
     fn data_urls_never_become_links() {
         let clean =
             sanitize_content("<a href=\"data:text/html;base64,PHNjcmlwdD4=\">click</a><p>text</p>");

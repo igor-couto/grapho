@@ -8,9 +8,9 @@ The home screen lists and searches documents, showing a preview of each one in
 grid view. The editor has the formatting I use most, holds images that can be
 dragged into the text so the words flow around them and resized from their
 corners, saves as you type, and can export to HTML, Markdown, PDF, or plain
-text. Light and dark themes are included. Focus mode, from the editor's menu,
-hides the toolbar and takes the page fullscreen so only the writing and the menu
-button remain.
+text. The menu switches between a dark theme (the default) and a light one. Focus
+mode, from the editor's menu, hides the toolbar and takes the page fullscreen so
+only the writing and the menu button remain.
 
 ## Installing
 
@@ -76,8 +76,8 @@ fresh checkout if you want them next to the source.
 
 The **Storage** page (the library's ⋯ menu, under Management) shows the folder
 in use, how many documents it holds, how much room they take, and the free space
-on that disk. Type another folder there and Grapho copies the library into it
-and keeps writing there; the old folder is left untouched. The same page adds
+on that disk. Change the folder there and Grapho copies the library into it and
+keeps writing there; the old folder is left untouched. The same page adds
 backups — a folder, an SSH server, or a Google Drive folder — that receive a copy
 of every save.
 

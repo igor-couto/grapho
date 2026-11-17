@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Document - Grapho</title>
   <meta name="description" content="Write in Grapho, a quiet local-first document editor.">
-  <meta name="theme-color" content="#f3efe6">
+  <meta name="theme-color" content="#232126">
   <link rel="icon" type="image/svg+xml" href="/assets/favicon.ico">
   <link rel="preload" href="/assets/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/assets/fonts/literata-latin.woff2" as="font" type="font/woff2" crossorigin>
@@ -46,14 +46,14 @@
       <span class="toolbar-rule" aria-hidden="true"></span>
 
       <div class="toolbar-group">
-        <button class="toolbar-button align-button" type="button" id="alignButton" title="Align &amp; indent" aria-label="Align &amp; indent" aria-haspopup="menu" aria-controls="alignMenu" aria-expanded="false" data-current-align="left" disabled>
+        <button class="toolbar-button align-button" type="button" id="alignButton" title="Align" aria-label="Align" aria-haspopup="menu" aria-controls="alignMenu" aria-expanded="false" data-current-align="left" disabled>
           <span class="align-icon" aria-hidden="true">
             <svg data-align-icon="left" viewBox="0 0 24 24" fill="none"><path d="M3 4.5h18M3 8.25h12M3 12h15M3 15.75h10M3 19.5h14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
             <svg data-align-icon="center" viewBox="0 0 24 24" fill="none"><path d="M6 4.5h12M3 8.25h18M4.5 12h15M3 15.75h18M7 19.5h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
             <svg data-align-icon="right" viewBox="0 0 24 24" fill="none"><path d="M3 4.5h18M9 8.25h12M6 12h15M11 15.75h10M7 19.5h14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
             <svg data-align-icon="justify" viewBox="0 0 24 24" fill="none"><path d="M3 4.5h18M3 8.25h18M3 12h18M3 15.75h18M3 19.5h18" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
           </span>
-          <svg class="align-caret" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m7 9.5 5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <svg class="align-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15 7 10h10Z" fill="currentColor"/></svg>
         </button>
       </div>
 
@@ -102,6 +102,21 @@
           </svg>
         </button>
         <div class="popover-menu document-menu" id="documentMenu" role="menu" hidden>
+          <p class="popover-label" id="themeLabel">Theme</p>
+          <div class="theme-choice" role="group" aria-labelledby="themeLabel">
+            <button class="theme-choice-button" type="button" role="menuitemradio" aria-checked="false" data-theme-choice="light" aria-label="Light">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <circle cx="12" cy="12" r="3.5" stroke="currentColor" stroke-width="1.7"/>
+                <path d="M12 2.8v2M12 19.2v2M21.2 12h-2M4.8 12h-2M18.5 5.5l-1.4 1.4M6.9 17.1l-1.4 1.4M18.5 18.5l-1.4-1.4M6.9 6.9 5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <button class="theme-choice-button" type="button" role="menuitemradio" aria-checked="true" data-theme-choice="dark" aria-label="Dark">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M20 14.4A8.2 8.2 0 0 1 9.6 4a8.2 8.2 0 1 0 10.4 10.4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+          <div class="menu-rule" role="separator"></div>
           <p class="popover-label">Download</p>
           <button class="menu-item" type="button" role="menuitem" data-doc-action="export-html">
             <svg viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M11 5 15 9.5 11 14M7 5 3 9.5 7 14" stroke="currentColor" stroke-width="2"/></svg>
@@ -120,21 +135,6 @@
             PDF
           </button>
           <div class="menu-rule" role="separator"></div>
-          <p class="popover-label" id="themeLabel">Theme</p>
-          <div class="theme-choice" role="group" aria-labelledby="themeLabel">
-            <button class="theme-choice-button" type="button" role="menuitemradio" aria-checked="true" data-theme-choice="light" aria-label="Light">
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <circle cx="12" cy="12" r="3.5" stroke="currentColor" stroke-width="1.7"/>
-                <path d="M12 2.8v2M12 19.2v2M21.2 12h-2M4.8 12h-2M18.5 5.5l-1.4 1.4M6.9 17.1l-1.4 1.4M18.5 18.5l-1.4-1.4M6.9 6.9 5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-              </svg>
-            </button>
-            <button class="theme-choice-button" type="button" role="menuitemradio" aria-checked="false" data-theme-choice="dark" aria-label="Dark">
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M20 14.4A8.2 8.2 0 0 1 9.6 4a8.2 8.2 0 1 0 10.4 10.4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
-              </svg>
-            </button>
-          </div>
-          <div class="menu-rule" role="separator"></div>
           <button class="menu-item" type="button" role="menuitem" data-doc-action="focus">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4.5 9V4.5H9M15 4.5h4.5V9M4.5 15v4.5H9M19.5 15v4.5H15" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
             <span id="focusMenuItemLabel">Focus mode</span>
@@ -149,7 +149,7 @@
     </div>
   </header>
 
-  <div class="popover-menu align-menu" id="alignMenu" role="menu" aria-label="Align &amp; indent" hidden>
+  <div class="popover-menu align-menu" id="alignMenu" role="menu" aria-label="Align" hidden>
     <div class="align-choice" role="group" aria-label="Alignment">
       <button class="align-choice-button" type="button" role="menuitemradio" aria-checked="true" data-align-value="left" title="Align left" aria-label="Align left">
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 4.5h18M3 8.25h12M3 12h15M3 15.75h10M3 19.5h14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
@@ -164,15 +164,6 @@
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 4.5h18M3 8.25h18M3 12h18M3 15.75h18M3 19.5h18" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
       </button>
     </div>
-    <div class="menu-rule" role="separator"></div>
-    <button class="menu-item" type="button" role="menuitem" data-indent-action="-1">
-      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M10 5h11M10 9.7h11M10 14.4h11M10 19.1h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M7 12H2m0 0 3-3m-3 3 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      Decrease indent
-    </button>
-    <button class="menu-item" type="button" role="menuitem" data-indent-action="1">
-      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 5h11M3 9.7h11M3 14.4h11M3 19.1h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M2 12h5m0 0L4 9m3 3-3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      Increase indent
-    </button>
   </div>
 
   <div class="popover-menu style-menu" id="styleMenu" role="menu" aria-label="Paragraph style" hidden>

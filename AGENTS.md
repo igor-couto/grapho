@@ -39,6 +39,9 @@ roles, no per-document permissions. Keep it that way.
 - Start from the existing visual system in `assets/app.css`: warm paper, dark ink,
   one blue accent, Literata for writing, Inter for controls. Extend it; do not add
   a second design language.
+- Dark is the default theme; the menu's Light/Dark choice is remembered in
+  `localStorage` and wins over the default. Do not make the default follow
+  `prefers-color-scheme`.
 - No feature bloat. The home screen and editor should stay focused. Avoid adding
   dashboards, template galleries, onboarding tours, settings pages, extra side
   panels, or promotional sections unless asked.
@@ -51,6 +54,10 @@ roles, no per-document permissions. Keep it that way.
   horizontal overflow, focus states must remain visible, and primary actions must
   not be hidden behind hover on touch devices.
 - Nothing should block typing or make the editor feel busy.
+- Clickable buttons have opaque backgrounds. Bars, panels, fields, and cards may
+  stay translucent, but a button's fill never uses `transparent` or an alpha
+  color, even at rest; pick the solid color of the surface it sits on so flat
+  toolbars stay flat.
 
 ### Documentation
 
@@ -252,14 +259,23 @@ unchanged.
   already had, so it returns to the middle without being resized. `Block` stays
   for a block image at its natural width, and a free image keeps the position it
   was dropped at until one of the three is chosen.
-- Paragraph alignment and indentation are block properties, stored as
-  `data-align` and `data-indent` on the block tag (or list item). Layout shifts
-  each painted line for centre/right alignment, stretches spaces on justified
-  lines except the last line of a segment, and adds 24 px per indent step. Lists
-  keep `depth` for nesting, separate from the generic indent. `Tab` indents an
-  ordinary paragraph, nests a list, and inserts a tab in a code block; the Align
-  & indent popover exposes the rest. Code blocks and images are outside
-  paragraph alignment.
+- Paragraph alignment is a block property stored as `data-align` on the block tag
+  (or list item). Layout shifts each painted line for centre/right alignment and
+  stretches spaces on justified lines except the last line of a segment. Older
+  documents can still carry the bounded `data-indent` block property (24 px per
+  step); it is parsed, laid out, exported, and sanitized as before, but the
+  editor no longer creates one, and `Shift+Tab` only takes a step off it on an
+  ordinary paragraph line that has no text indentation to remove (a legacy
+  indent on a list item is left alone). Lists keep `depth` for nesting.
+  `Tab` types four spaces at the caret, nests a list item, and inserts a tab in
+  a code block. A selection gets one tab stop at the start of every line it
+  touches, the way a code editor indents a block of text: four spaces in a
+  paragraph (one per hard-break line), a tab in a code block, and a nesting
+  level for a list item. `Shift+Tab` removes one tab stop from every selected
+  line, takes back a tab typed immediately before the caret, or outdents a
+  list; it never deletes the selected text. A selection that ends exactly at
+  the start of a line leaves that line alone. The Align popover sets only
+  alignment. Code blocks and images are outside paragraph alignment.
 - Paper width belongs to the document, not the HTML: `paper_width` (pixels) in
   the document JSON, applied before the first layout. Dragging either border
   resizes both edges around the centre; the workspace bounds the drag and leaves

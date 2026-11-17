@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
+  <!-- Filled folder. Inlined in assets/storage.html for the backup buttons;
+       the fill follows the button's text colour, so the source keeps
+       currentColor. -->
+  <g transform="translate(-1590 -222)">
+    <path fill="currentColor" d="M1593.5 238A1.44 1.44 0 0 1 1592.448 237.552A1.44 1.44 0 0 1 1592 236.5L1592 227.5Q1592 226.875 1592.448 226.437A1.46 1.46 0 0 1 1593.5 226L1598 226L1600 228L1606.5 228Q1607.124 228 1607.563 228.438Q1608 228.874 1608 229.5L1608 236.5Q1608 237.105 1607.562 237.552A1.43 1.43 0 0 1 1606.5 238Z"/>
+  </g>
+</svg>

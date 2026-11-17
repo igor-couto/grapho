@@ -8,17 +8,27 @@
   var els = {
     path: document.getElementById("storagePath"),
     source: document.getElementById("storageSource"),
+    edit: document.getElementById("storageEdit"),
+    status: document.getElementById("storageStatus"),
+    locked: document.getElementById("storageLocked"),
+    folderDialog: document.getElementById("folderDialog"),
+    folderForm: document.getElementById("folderForm"),
+    folderInput: document.getElementById("folderPathInput"),
+    folderError: document.getElementById("folderError"),
+    folderConfirm: document.getElementById("folderConfirm"),
+    folderCancel: document.getElementById("folderCancel"),
+    backupRemoveDialog: document.getElementById("backupRemoveDialog"),
+    backupRemoveForm: document.getElementById("backupRemoveForm"),
+    backupRemoveDescription: document.getElementById("backupRemoveDescription"),
+    backupRemoveError: document.getElementById("backupRemoveError"),
+    backupRemoveConfirm: document.getElementById("backupRemoveConfirm"),
+    backupRemoveCancel: document.getElementById("backupRemoveCancel"),
     documents: document.getElementById("storageDocuments"),
     used: document.getElementById("storageUsed"),
     freeRow: document.getElementById("storageFreeRow"),
     free: document.getElementById("storageFree"),
     bar: document.getElementById("storageBar"),
     barFill: document.getElementById("storageBarFill"),
-    form: document.getElementById("storageForm"),
-    input: document.getElementById("storagePathInput"),
-    save: document.getElementById("storageSave"),
-    status: document.getElementById("storageStatus"),
-    locked: document.getElementById("storageLocked"),
     backupList: document.getElementById("backupList"),
     backupsEmpty: document.getElementById("backupsEmpty"),
     backupsLocked: document.getElementById("backupsLocked"),
@@ -49,6 +59,10 @@
   };
 
   var state = {
+    path: "",
+    busy: false,
+    removing: null,
+    removingBusy: false,
     mode: null,
     opener: null,
     backupsEditable: false,
@@ -60,6 +74,10 @@
     portable: "The data folder in Grapho's working directory.",
     default: "Grapho's default folder for this user.",
   };
+
+  // Warn only when the disk is nearly full: below 5% free it is a problem,
+  // while Explorer's 10% red bar is early on large drives.
+  var LOW_SPACE_SHARE = 0.05;
 
   function loginUrl() {
     return (
@@ -227,11 +245,16 @@
       status.textContent = "Up to date";
     }
 
+    var label = path.textContent;
+    if (!sub.hidden) {
+      label += " " + sub.textContent;
+    }
+
     var remove = item.querySelector(".backup-remove");
     remove.hidden = !editable;
-    remove.setAttribute("aria-label", "Remove backup " + path.textContent);
+    remove.setAttribute("aria-label", "Remove backup " + label);
     remove.addEventListener("click", function () {
-      removeBackup(backup.id, remove);
+      openBackupRemoval(backup.id, label, remove);
     });
 
     return item;
@@ -256,8 +279,11 @@
   }
 
   function render(data) {
+    showStatus(els.status, "", null);
+    state.path = data.path;
     els.path.textContent = data.path;
     els.path.classList.remove("is-loading");
+    els.edit.hidden = !data.editable;
 
     var note = SOURCE_NOTES[data.source];
     els.source.textContent = note || "";
@@ -275,16 +301,19 @@
       var used = (data.disk.total - data.disk.free) / data.disk.total;
       var share = Math.max(0, Math.min(1, used));
       els.barFill.style.width = (share * 100).toFixed(1) + "%";
+      els.bar.classList.toggle(
+        "is-low",
+        data.disk.free / data.disk.total < LOW_SPACE_SHARE
+      );
     } else {
       els.freeRow.hidden = true;
       els.bar.hidden = true;
+      els.bar.classList.remove("is-low");
     }
 
     if (data.editable) {
-      els.form.hidden = false;
       els.locked.hidden = true;
     } else {
-      els.form.hidden = true;
       els.locked.hidden = false;
       els.locked.textContent =
         data.source === "environment"
@@ -295,14 +324,141 @@
     renderBackups(data);
   }
 
-  async function removeBackup(id, button) {
-    button.disabled = true;
-    showStatus(els.backupStatus, "Removing…", null);
+  function showFolderError(message) {
+    els.folderError.textContent = message || "";
+    els.folderError.hidden = !message;
+    if (message) {
+      els.folderInput.setAttribute("aria-invalid", "true");
+      els.folderInput.setAttribute("aria-describedby", "folderHint folderError");
+    } else {
+      els.folderInput.removeAttribute("aria-invalid");
+      els.folderInput.setAttribute("aria-describedby", "folderHint");
+    }
+  }
+
+  function setFolderBusy(busy) {
+    state.busy = busy;
+    els.folderInput.disabled = busy;
+    els.folderCancel.disabled = busy;
+    els.folderConfirm.disabled = busy;
+    els.folderConfirm.textContent = busy ? "Copying…" : "Use this folder";
+    els.folderForm.setAttribute("aria-busy", busy ? "true" : "false");
+    if (busy) {
+      showFolderError("");
+    }
+  }
+
+  function openFolderDialog() {
+    showFolderError("");
+    setFolderBusy(false);
+    els.folderInput.value = state.path;
+    els.folderDialog.showModal();
+    window.requestAnimationFrame(function () {
+      els.folderInput.focus();
+      els.folderInput.select();
+    });
+  }
+
+  function closeFolderDialog() {
+    if (state.busy) {
+      return;
+    }
+    if (els.folderDialog.open) {
+      els.folderDialog.close();
+    }
+  }
+
+  async function changeFolder() {
+    if (state.busy) {
+      return;
+    }
+
+    var requested = els.folderInput.value.trim();
+    if (!requested) {
+      showFolderError("Enter a folder path.");
+      els.folderInput.focus();
+      return;
+    }
+    if (requested === state.path) {
+      showFolderError("That is already the folder Grapho uses.");
+      els.folderInput.focus();
+      return;
+    }
+
+    setFolderBusy(true);
+    try {
+      var data = await request("/api/storage", {
+        method: "PUT",
+        body: { path: requested },
+      });
+      setFolderBusy(false);
+      els.folderDialog.close();
+      render(data);
+      showStatus(
+        els.status,
+        "Documents copied. Grapho writes here from now on.",
+        "done"
+      );
+    } catch (error) {
+      setFolderBusy(false);
+      showFolderError(error.userMessage || "That folder couldn't be used.");
+      els.folderInput.focus();
+    }
+  }
+
+  function showRemoveError(message) {
+    els.backupRemoveError.textContent = message || "";
+    els.backupRemoveError.hidden = !message;
+  }
+
+  function setRemoveBusy(busy) {
+    state.removingBusy = busy;
+    els.backupRemoveForm.setAttribute("aria-busy", busy ? "true" : "false");
+    els.backupRemoveConfirm.disabled = busy;
+    els.backupRemoveCancel.disabled = busy;
+    els.backupRemoveConfirm.textContent = busy ? "Removing…" : "Remove backup";
+    if (busy) {
+      showRemoveError("");
+    }
+  }
+
+  function openBackupRemoval(id, label, opener) {
+    state.removing = { id: id, opener: opener };
+    els.backupRemoveDescription.textContent =
+      "Grapho stops copying saves to “" +
+      label +
+      "”. The copies already there stay.";
+    showRemoveError("");
+    setRemoveBusy(false);
+    els.backupRemoveDialog.showModal();
+    window.requestAnimationFrame(function () {
+      els.backupRemoveCancel.focus();
+    });
+  }
+
+  function closeBackupRemoval() {
+    if (state.removingBusy) {
+      return;
+    }
+    if (els.backupRemoveDialog.open) {
+      els.backupRemoveDialog.close();
+    }
+  }
+
+  async function confirmBackupRemoval() {
+    var pending = state.removing;
+    if (!pending || state.removingBusy) {
+      return;
+    }
+
+    setRemoveBusy(true);
     try {
       var data = await request(
-        "/api/storage/backups/" + encodeURIComponent(id),
+        "/api/storage/backups/" + encodeURIComponent(pending.id),
         { method: "DELETE" }
       );
+      setRemoveBusy(false);
+      els.backupRemoveDialog.close();
       render(data);
       showStatus(
         els.backupStatus,
@@ -310,12 +466,9 @@
         "done"
       );
     } catch (error) {
-      button.disabled = false;
-      showStatus(
-        els.backupStatus,
-        error.userMessage || "That backup couldn't be removed.",
-        "error"
-      );
+      setRemoveBusy(false);
+      showRemoveError(error.userMessage || "That backup couldn't be removed.");
+      els.backupRemoveConfirm.focus();
     }
   }
 
@@ -340,7 +493,7 @@
     } catch (error) {
       els.path.textContent = "Couldn't read the data folder.";
       els.path.classList.remove("is-loading");
-      els.form.hidden = true;
+      els.edit.hidden = true;
       els.backupAddRow.hidden = true;
       els.backupsEmpty.hidden = true;
       showStatus(
@@ -351,39 +504,78 @@
     }
   }
 
-  if (els.form) {
-    els.form.addEventListener("submit", async function (event) {
+  if (els.edit) {
+    els.edit.addEventListener("click", openFolderDialog);
+  }
+
+  if (els.folderDialog) {
+    els.folderForm.addEventListener("submit", function (event) {
       event.preventDefault();
+      changeFolder();
+    });
 
-      var requested = els.input.value.trim();
-      if (!requested) {
-        showStatus(els.status, "Enter a folder path.", "error");
-        els.input.focus();
-        return;
+    els.folderCancel.addEventListener("click", closeFolderDialog);
+
+    els.folderInput.addEventListener("input", function () {
+      showFolderError("");
+    });
+
+    els.folderDialog.addEventListener("cancel", function (event) {
+      if (state.busy) {
+        event.preventDefault();
       }
+    });
 
-      els.save.disabled = true;
-      showStatus(els.status, "Copying your documents…", null);
-      try {
-        var data = await request("/api/storage", {
-          method: "PUT",
-          body: { path: requested },
-        });
-        render(data);
-        els.input.value = "";
-        showStatus(
-          els.status,
-          "Documents copied. Grapho writes here from now on.",
-          "done"
-        );
-      } catch (error) {
-        showStatus(
-          els.status,
-          error.userMessage || "That folder couldn't be used.",
-          "error"
-        );
-      } finally {
-        els.save.disabled = false;
+    els.folderDialog.addEventListener("click", function (event) {
+      if (event.target === els.folderDialog) {
+        closeFolderDialog();
+      }
+    });
+
+    els.folderDialog.addEventListener("close", function () {
+      setFolderBusy(false);
+      showFolderError("");
+      els.folderInput.value = "";
+      if (!els.edit.hidden) {
+        els.edit.focus();
+      }
+    });
+  }
+
+  if (els.backupRemoveDialog) {
+    els.backupRemoveForm.addEventListener("submit", function (event) {
+      event.preventDefault();
+      confirmBackupRemoval();
+    });
+
+    els.backupRemoveCancel.addEventListener("click", closeBackupRemoval);
+
+    els.backupRemoveDialog.addEventListener("cancel", function (event) {
+      if (state.removingBusy) {
+        event.preventDefault();
+      }
+    });
+
+    els.backupRemoveDialog.addEventListener("click", function (event) {
+      if (event.target === els.backupRemoveDialog) {
+        closeBackupRemoval();
+      }
+    });
+
+    els.backupRemoveDialog.addEventListener("close", function () {
+      var pending = state.removing;
+      state.removing = null;
+      setRemoveBusy(false);
+      showRemoveError("");
+
+      var target =
+        pending && pending.opener && pending.opener.isConnected
+          ? pending.opener
+          : !els.backupAddRow.hidden
+            ? els.backupAdd
+            : null;
+      if (target) {
+        target.focus();
       }
     });
   }

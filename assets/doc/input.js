@@ -11,7 +11,6 @@ import {
   createBlock,
   createBlockId,
   emptyParagraph,
-  INDENT_LIMIT,
   marksAt,
   mergeBlocks,
   normalizeRuns,
@@ -39,6 +38,10 @@ const LIST_DEPTH_LIMIT = 5;
 const TYPING_COALESCE_MS = 700;
 const UNDO_LIMIT = 120;
 const ALIGNMENT_VALUES = new Set(ALIGNMENTS);
+// Tab types four spaces at the caret in a paragraph. A selection gets one tab
+// stop at the start of every line it touches instead, the way a code editor
+// indents a block of text.
+const TAB_TEXT = "    ";
 
 export class DocEditor {
   constructor({
@@ -278,11 +281,6 @@ export class DocEditor {
     return blockAlignment(block);
   }
 
-  activeIndent() {
-    const block = this.blocks[this.focus.block];
-    return blockIndent(block);
-  }
-
   /* ---------------------------------------------------------------------
      Layout and painting
      --------------------------------------------------------------------- */
@@ -315,7 +313,6 @@ export class DocEditor {
         marks: this.activeMarks(),
         blockType: this.activeBlockType(),
         alignment: this.activeAlignment(),
-        indent: this.activeIndent(),
         canUndo: this.undoStack.length > 0,
         canRedo: this.redoStack.length > 0,
         image: collapsed && entry && entry.block.type === "image" ? entry : null,
@@ -885,13 +882,12 @@ export class DocEditor {
       if (!block || block.type !== "list") {
         continue;
       }
-      const depth = block.depth + direction;
-      blocks = blocks.slice();
-      if (depth < 0) {
-        blocks[index] = { ...block, id: createBlockId(), type: "p", ordered: false, depth: 0 };
-      } else {
-        blocks[index] = { ...block, id: createBlockId(), depth: Math.min(depth, LIST_DEPTH_LIMIT) };
+      const next = nestListBlock(block, direction);
+      if (next === block) {
+        continue;
       }
+      blocks = blocks.slice();
+      blocks[index] = next;
       changed = true;
     }
 
@@ -932,65 +928,130 @@ export class DocEditor {
     }
   }
 
-  changeIndent(direction) {
-    const step = direction < 0 ? -1 : 1;
+  // Tab types four spaces at the caret in a paragraph, nests a list item, and
+  // inserts a tab in a code block. A selection gets one tab stop at the start
+  // of every line it touches instead, the way a code editor indents a block of
+  // text, so Tab never merges paragraphs and never replaces the selection.
+  handleTab(direction) {
+    if (!this.isCollapsed()) {
+      this.indentSelection(direction);
+      return;
+    }
+
+    const block = this.blocks[this.focus.block];
+    if (!block || block.type === "image") {
+      return;
+    }
+    if (block.type === "list") {
+      this.indentList(direction);
+      return;
+    }
+    if (direction > 0) {
+      this.insertText(block.type === "code" ? "\t" : TAB_TEXT);
+      return;
+    }
+    this.outdentAtCaret();
+  }
+
+  // Indent or outdent one tab stop on every line the selection touches. Text
+  // is only ever added or removed at the start of the selected lines, so
+  // Shift+Tab on an unindented selection is a no-op instead of a delete.
+  indentSelection(direction) {
     const { from, to } = this.normalized();
+    const anchor = { ...this.anchor };
+    const focus = { ...this.focus };
     let blocks = this.blocks;
     let changed = false;
 
     for (let index = from.block; index <= to.block; index += 1) {
+      // A selection dragged to the very start of a block does not touch it.
+      if (index === to.block && index !== from.block && to.offset === 0) {
+        continue;
+      }
       const block = blocks[index];
-      if (!block || block.type === "image" || block.type === "code") {
+      if (!block || block.type === "image") {
         continue;
       }
-      const current = blockIndent(block);
-      const indent = Math.max(0, Math.min(INDENT_LIMIT, current + step));
-      if (indent === current) {
+      if (block.type === "list") {
+        const next = nestListBlock(block, direction);
+        if (next !== block) {
+          blocks = blocks.slice();
+          blocks[index] = next;
+          changed = true;
+        }
         continue;
       }
-      const next = { ...block, id: createBlockId() };
-      if (indent === 0) {
-        delete next.indent;
-      } else {
-        next.indent = indent;
+
+      const shifted = shiftLines(block, from, to, index, direction);
+      let next = shifted ? shifted.block : null;
+      if (!next && direction < 0) {
+        // Documents written by older versions may still carry a block indent.
+        next = reduceBlockIndent(block);
+      }
+      if (!next) {
+        continue;
       }
       blocks = blocks.slice();
       blocks[index] = next;
       changed = true;
+      if (shifted) {
+        if (anchor.block === index) {
+          anchor.offset = mapOffsetThroughEdits(anchor.offset, shifted.edits);
+        }
+        if (focus.block === index) {
+          focus.offset = mapOffsetThroughEdits(focus.offset, shifted.edits);
+        }
+      }
     }
 
     if (changed) {
-      this.commit(blocks, this.anchor, this.focus);
+      this.commit(blocks, anchor, focus);
     }
   }
 
-  indentForTab(direction) {
-    const { from, to } = this.normalized();
-    let eligible = 0;
-    let allLists = true;
-    let indented = false;
-
-    for (let index = from.block; index <= to.block; index += 1) {
-      const block = this.blocks[index];
-      if (!block || block.type === "image" || block.type === "code") {
-        continue;
-      }
-      eligible += 1;
-      if (block.type !== "list") {
-        allLists = false;
-      }
-      if (blockIndent(block) > 0) {
-        indented = true;
-      }
-    }
-
-    if (!eligible) {
+  // Shift+Tab with a collapsed caret takes back a tab typed at the caret (the
+  // spaces Tab just inserted), or else outdents the line the caret sits on by
+  // one tab stop: one tab or up to four spaces. It never deletes text.
+  outdentAtCaret() {
+    const position = this.focus;
+    const block = this.blocks[position.block];
+    if (!block || block.type === "image") {
       return;
     }
-    if (allLists && !(direction < 0 && indented)) {
-      this.indentList(direction);
+
+    const text = blockText(block);
+    // At offset 0 the caret is on the first line whatever the text starts
+    // with; `lastIndexOf` would find a leading line feed in the wrong place.
+    const lineStart = position.offset === 0 ? 0 : text.lastIndexOf("\n", position.offset - 1) + 1;
+
+    // A tab typed into the middle of a line comes back before the indentation
+    // at the start of the line is touched.
+    let start = position.offset;
+    if (text[start - 1] === "\t") {
+      start -= 1;
     } else {
-      this.changeIndent(direction);
+      while (start > lineStart && position.offset - start < TAB_TEXT.length && text[start - 1] === " ") {
+        start -= 1;
+      }
+    }
+    if (start < position.offset && text.slice(lineStart, start).trim() !== "") {
+      const runs = removeRangeFromRuns(block.runs, start, position.offset);
+      const caret = { block: position.block, offset: start };
+      this.commit(this.replaceBlock(position.block, { ...block, id: createBlockId(), runs }), caret, caret);
+      return;
+    }
+
+    const count = outdentLength(text, lineStart);
+    if (count > 0) {
+      const runs = removeRangeFromRuns(block.runs, lineStart, lineStart + count);
+      const caret = { block: position.block, offset: Math.max(lineStart, position.offset - count) };
+      this.commit(this.replaceBlock(position.block, { ...block, id: createBlockId(), runs }), caret, caret);
+      return;
+    }
+
+    const next = reduceBlockIndent(block);
+    if (next) {
+      this.commit(this.replaceBlock(position.block, next), this.anchor, this.focus);
     }
   }
 
@@ -1219,15 +1280,7 @@ export class DocEditor {
         return;
       case "Tab":
         event.preventDefault();
-        if (this.blocks[this.focus.block] && this.blocks[this.focus.block].type === "code") {
-          if (shift) {
-            this.outdentCode();
-          } else {
-            this.insertText("\t");
-          }
-        } else {
-          this.indentForTab(shift ? -1 : 1);
-        }
+        this.handleTab(shift ? -1 : 1);
         return;
       case "Escape":
         if (!this.isCollapsed()) {
@@ -1243,23 +1296,6 @@ export class DocEditor {
       // Printable input arrives through the textarea's input event.
       this.pendingMarks = this.pendingMarks || null;
     }
-  }
-
-  outdentCode() {
-    const index = this.focus.block;
-    const block = this.blocks[index];
-    if (!block || block.type !== "code") {
-      return;
-    }
-    const text = blockText(block);
-    const lineStart = text.lastIndexOf("\n", this.focus.offset - 1) + 1;
-    if (text[lineStart] !== "\t") {
-      return;
-    }
-    const runs = removeRangeFromRuns(block.runs, lineStart, lineStart + 1);
-    const next = { ...block, id: createBlockId(), runs };
-    const caret = { block: index, offset: Math.max(lineStart, this.focus.offset - 1) };
-    this.commit(this.replaceBlock(index, next), caret, caret);
   }
 
   insertHardBreak() {
@@ -2011,6 +2047,136 @@ export class DocEditor {
 function insertRuns(block, offset, text, marks) {
   const { left, right } = splitRuns(block.runs, offset);
   return normalizeRuns([...left, { text, ...marks }, ...right]);
+}
+
+// Start offsets of the lines in a block's text: the text start, and every
+// offset just after a line feed.
+function lineStarts(text) {
+  const starts = [0];
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === "\n") {
+      starts.push(index + 1);
+    }
+  }
+  return starts;
+}
+
+function lineIndexAt(starts, offset) {
+  let line = 0;
+  while (line + 1 < starts.length && starts[line + 1] <= offset) {
+    line += 1;
+  }
+  return line;
+}
+
+// How much indentation one Shift+Tab takes off a line: a tab, or up to four
+// spaces.
+function outdentLength(text, start) {
+  if (text[start] === "\t") {
+    return 1;
+  }
+  let count = 0;
+  while (count < TAB_TEXT.length && text[start + count] === " ") {
+    count += 1;
+  }
+  return count;
+}
+
+// One Tab/Shift+Tab level for a list item, keeping its text. Taking a
+// top-level item out of a list turns it into a paragraph, as it always has.
+function nestListBlock(block, direction) {
+  const depth = block.depth + direction;
+  if (depth < 0) {
+    return { ...block, id: createBlockId(), type: "p", ordered: false, depth: 0 };
+  }
+  const clamped = Math.min(depth, LIST_DEPTH_LIMIT);
+  return clamped === block.depth ? block : { ...block, id: createBlockId(), depth: clamped };
+}
+
+// Older documents keep their paragraph indent as the `data-indent` attribute.
+// The editor no longer creates one, but Shift+Tab can still take a step off.
+function reduceBlockIndent(block) {
+  const indent = blockIndent(block);
+  if (indent <= 0) {
+    return null;
+  }
+  const next = { ...block, id: createBlockId() };
+  if (indent === 1) {
+    delete next.indent;
+  } else {
+    next.indent = indent - 1;
+  }
+  return next;
+}
+
+// Insert or remove one tab stop at the start of each selected line of one
+// block, and report the edits so the selection can move with the text.
+function shiftLines(block, from, to, index, direction) {
+  const text = blockText(block);
+  const starts = lineStarts(text);
+  let first = 0;
+  let last = starts.length - 1;
+  if (index === from.block) {
+    first = lineIndexAt(starts, from.offset);
+  }
+  if (index === to.block) {
+    last = lineIndexAt(starts, to.offset);
+    // A selection that ends exactly at a line start leaves that line alone,
+    // the way a code editor treats a selection dragged to the next line.
+    if (to.offset === starts[last]) {
+      last -= 1;
+    }
+  }
+  if (last < first) {
+    return null;
+  }
+
+  const added = direction > 0 ? (block.type === "code" ? "\t" : TAB_TEXT) : "";
+  let runs = block.runs;
+  const edits = [];
+  for (let line = last; line >= first; line -= 1) {
+    const start = starts[line];
+    if (direction > 0) {
+      runs = insertRuns({ runs }, start, added, {});
+      edits.push({ offset: start, delta: added.length });
+      continue;
+    }
+    const count = outdentLength(text, start);
+    if (count > 0) {
+      runs = removeRangeFromRuns(runs, start, start + count);
+      edits.push({ offset: start, delta: -count });
+    }
+  }
+  if (!edits.length) {
+    return null;
+  }
+  edits.sort((a, b) => a.offset - b.offset);
+  return { block: { ...block, id: createBlockId(), runs }, edits };
+}
+
+// Move one selection offset through the line edits of its block. Indentation
+// inserted before the offset pushes it right; indentation removed before it
+// pulls it left, and an offset inside the removed run lands on its start.
+function mapOffsetThroughEdits(offset, edits) {
+  let shift = 0;
+  for (const edit of edits) {
+    if (edit.delta > 0) {
+      if (offset < edit.offset) {
+        break;
+      }
+      shift += edit.delta;
+      continue;
+    }
+    const end = edit.offset - edit.delta;
+    if (offset <= edit.offset) {
+      break;
+    }
+    if (offset < end) {
+      return edit.offset + shift;
+    }
+    shift += edit.delta;
+  }
+  return offset + shift;
 }
 
 function clamp(value, min, max) {

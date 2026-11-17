@@ -563,6 +563,247 @@ async function main() {
     equal("the empty paragraph survives a real save and reload", blocks[1].text, "");
     equal("the paragraph count survives a real save and reload", blocks.length, 11);
 
+    // Tab types four spaces at the caret instead of moving the paragraph; the
+    // spaces must go through the sanitizer, the save, and the reload unchanged.
+    const firstGlyph = await evaluate(
+      cdp,
+      `(() => {
+        const line = document.querySelector(".doc-content > .doc-block .doc-line");
+        const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+        const node = walker.nextNode();
+        const range = document.createRange();
+        range.setStart(node, 0);
+        range.setEnd(node, 0);
+        const box = range.getBoundingClientRect();
+        return { x: box.right, y: box.top + box.height / 2 };
+      })()`,
+    );
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: firstGlyph.x + 0.5,
+      y: firstGlyph.y,
+      button: "left",
+      buttons: 1,
+      clickCount: 1,
+    });
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: firstGlyph.x + 0.5,
+      y: firstGlyph.y,
+      button: "left",
+      buttons: 0,
+      clickCount: 1,
+    });
+    await cdp.send("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: "Tab",
+      code: "Tab",
+      windowsVirtualKeyCode: 9,
+      nativeVirtualKeyCode: 9,
+    });
+    await cdp.send("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "Tab",
+      code: "Tab",
+      windowsVirtualKeyCode: 9,
+      nativeVirtualKeyCode: 9,
+    });
+
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      saved = await evaluate(
+        cdp,
+        `(async () => (await fetch("/api/documents/${documentId}")).json())()`,
+      );
+      if (saved && saved.content && saved.content.includes("<p>    FirstQ paragraph")) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    check(
+      "Tab at the start of a paragraph saves four spaces, not an indent",
+      saved && saved.content.includes("<p>    FirstQ paragraph"),
+      saved && saved.content,
+    );
+
+    await cdp.send("Page.navigate", { url: base + "/doc/" + documentId });
+    await waitForPage(cdp, base + "/doc/" + documentId, PAGE_TIMEOUT_MS);
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+    blocks = await paintedBlocks(cdp);
+    equal(
+      "reload paints the typed tab",
+      blocks[0].text,
+      "    FirstQ paragraph with  two  spaces.",
+    );
+
+    // A selection indents with spaces and Shift+Tab takes them back. Both used
+    // to act on the selected text itself, so run the real keyboard and save
+    // path and check what the server stored.
+    const lineStarts = await evaluate(
+      cdp,
+      `(() => {
+        const starts = [];
+        document.querySelectorAll(".doc-content > .doc-block").forEach((block) => {
+          const line = block.querySelector(".doc-line");
+          if (!line) return;
+          const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+          const node = walker.nextNode();
+          const range = document.createRange();
+          range.setStart(node || line, 0);
+          range.setEnd(node || line, 0);
+          const box = range.getBoundingClientRect();
+          starts.push({ x: box.right, y: box.top + box.height / 2 });
+        });
+        return starts;
+      })()`,
+    );
+
+    async function pressKey(key, code, virtualKeyCode, modifiers) {
+      await cdp.send("Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key,
+        code,
+        modifiers: modifiers || 0,
+        windowsVirtualKeyCode: virtualKeyCode,
+        nativeVirtualKeyCode: virtualKeyCode,
+      });
+      await cdp.send("Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key,
+        code,
+        modifiers: modifiers || 0,
+        windowsVirtualKeyCode: virtualKeyCode,
+        nativeVirtualKeyCode: virtualKeyCode,
+      });
+    }
+
+    async function selectWholeLine(index) {
+      const point = lineStarts[index];
+      await cdp.send("Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        x: point.x + 1,
+        y: point.y,
+        button: "left",
+        buttons: 1,
+        clickCount: 1,
+      });
+      await cdp.send("Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x: point.x + 1,
+        y: point.y,
+        button: "left",
+        buttons: 0,
+        clickCount: 1,
+      });
+      await pressKey("End", "End", 35, 8);
+    }
+
+    async function readSavedDocument() {
+      return evaluate(
+        cdp,
+        `(async () => (await fetch("/api/documents/${documentId}")).json())()`,
+      );
+    }
+
+    async function waitForSavedContent(probe) {
+      for (let attempt = 0; attempt < 80; attempt += 1) {
+        saved = await readSavedDocument();
+        if (saved && saved.content && saved.content.includes(probe)) {
+          return true;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      return false;
+    }
+
+    await selectWholeLine(0);
+    await pressKey("Tab", "Tab", 9, 8);
+    const outdented = await waitForSavedContent(
+      "<p>FirstQ paragraph with  two  spaces.</p>",
+    );
+    check(
+      "Shift+Tab outdents a selected paragraph instead of deleting it",
+      outdented,
+      saved && saved.content,
+    );
+
+    await pressKey("Tab", "Tab", 9, 0);
+    const reindented = await waitForSavedContent(
+      "<p>    FirstQ paragraph with  two  spaces.</p>",
+    );
+    check(
+      "Tab indents the selected paragraph with spaces and saves them",
+      reindented,
+      saved && saved.content,
+    );
+
+    // Shift+Tab on a selection with nothing to outdent must leave it alone.
+    await selectWholeLine(2);
+    await pressKey("Tab", "Tab", 9, 8);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    saved = await readSavedDocument();
+    check(
+      "Shift+Tab with nothing to outdent leaves the selected text alone",
+      Boolean(saved && saved.content && saved.content.includes("<p>Third R.</p>")),
+      saved && saved.content,
+    );
+
+    await cdp.send("Page.navigate", { url: base + "/doc/" + documentId });
+    await waitForPage(cdp, base + "/doc/" + documentId, PAGE_TIMEOUT_MS);
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+    blocks = await paintedBlocks(cdp);
+    equal(
+      "reload paints the indented selection",
+      blocks[0].text,
+      "    FirstQ paragraph with  two  spaces.",
+    );
+    equal("the untouched third line is still intact", blocks[2].text, "Third R.");
+
+    // The HTML export writes the stored HTML, so the text indentation has to be
+    // in it, and the exported stylesheet must not collapse it away.
+    await evaluate(
+      cdp,
+      `(() => {
+        window.__exported = [];
+        const nativeCreate = URL.createObjectURL.bind(URL);
+        URL.createObjectURL = function (blob) {
+          window.__exported.push(blob);
+          return nativeCreate(blob);
+        };
+        return true;
+      })()`,
+    );
+    await evaluate(cdp, `document.getElementById("documentMenuButton").click()`);
+    await evaluate(cdp, `document.querySelector('[data-doc-action="export-html"]').click()`);
+    let exportedHtml = "";
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      exportedHtml = await evaluate(
+        cdp,
+        `(async () => {
+          const blob = (window.__exported || [])[0];
+          if (!blob) return "";
+          return await new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result));
+            reader.readAsText(blob);
+          });
+        })()`,
+      );
+      if (exportedHtml) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    check(
+      "the HTML export keeps the paragraph indentation",
+      exportedHtml.includes("<p>    FirstQ paragraph with  two  spaces.</p>"),
+      exportedHtml.slice(0, 400),
+    );
+    check(
+      "the HTML export keeps leading spaces visible",
+      exportedHtml.includes("white-space:pre-wrap"),
+      exportedHtml.slice(0, 1400),
+    );
+
     // A narrow phone viewport must not gain a horizontal scrollbar from the
     // editor's absolutely positioned lines.
     await cdp.send("Emulation.setDeviceMetricsOverride", {

@@ -2120,11 +2120,17 @@ test("fuzz: a deterministic editing session keeps every invariant", async () => 
         editor.sync();
         editor.setAlignment(pick(["left", "center", "right", "justify"]));
         break;
-      case 14:
-        editor.collapseTo({ block: blockIndex, offset });
+      case 14: {
+        const other = integer(blocks.length);
+        const firstBlock = Math.min(blockIndex, other);
+        const lastBlock = Math.max(blockIndex, other);
+        const from = { block: firstBlock, offset: integer(blockLength(blocks[firstBlock]) + 1) };
+        const to = { block: lastBlock, offset: integer(blockLength(blocks[lastBlock]) + 1) };
+        editor.setSelection(from, to);
         editor.sync();
-        editor.changeIndent(pick([-1, 1]));
+        key("Tab", { shiftKey: random() < 0.5 });
         break;
+      }
       case 15:
         editor.collapseTo({ block: blockIndex, offset });
         editor.sync();
@@ -2451,18 +2457,288 @@ test("pointer: double-click selects words without trailing punctuation", async (
   }
 });
 
-test("keyboard: paragraph indent moves painted lines and clicks with them", async () => {
+test("keyboard: Tab types four spaces and leaves the paragraph in place", async () => {
   await load("<p>An indented paragraph line.</p>");
+  const lineX = entry(0).lines[0].x;
+  editor.collapseTo({ block: 0, offset: 0 });
+  editor.sync();
   key("Tab");
-  assertEqual(editor.getDocument()[0].indent, 1, "Tab indents the paragraph");
-  assertClose(entry(0).lines[0].x, 24, 0.01, "painted line shifts by one step");
-  const offset = 3;
-  const painted = paintedOffsetX(0, offset);
-  const point = caretPoint(entry(0), offset);
+  assertEqual(blockText(editor.getDocument()[0]), "    An indented paragraph line.", "Tab inserts four spaces");
+  assertEqual(editor.getSelection().focus.offset, 4, "caret moves past the tab");
+  assertEqual(editor.getDocument()[0].indent, undefined, "the paragraph is not indented");
+  assertEqual(entry(0).lines[0].x, lineX, "the paragraph does not move right");
+  assertEqual(paintedText(0), "    An indented paragraph line.", "the tab is painted in the text");
+  for (const offset of [1, 2, 3, 4]) {
+    const point = caretPoint(entry(0), offset);
+    const painted = paintedOffsetX(0, offset);
+    assert(painted !== null, `offset ${offset} has a painted position`);
+    assertClose(point.x, painted, 2, `caret inside the tab at offset ${offset}`);
+  }
+  const point = caretPoint(entry(0), 4);
+  const painted = paintedOffsetX(0, 4);
   clickAt(painted + 0.5, point.y + point.height / 2);
-  assertEqual(editor.getSelection().focus.offset, offset, "click matches the indented line");
+  assertEqual(editor.getSelection().focus.offset, 4, "click after the tab lands after the spaces");
   key("Tab", { shiftKey: true });
-  assertEqual(editor.getDocument()[0].indent, undefined, "Shift+Tab removes the indent");
+  assertEqual(blockText(editor.getDocument()[0]), "An indented paragraph line.", "Shift+Tab takes the tab back");
+  assertEqual(editor.getSelection().focus.offset, 0, "caret returns before the text");
+  assertEqual(editor.getDocument()[0].indent, undefined, "Shift+Tab never indents the paragraph");
+});
+
+test("keyboard: Tab and Shift+Tab work in the middle of a paragraph", async () => {
+  await load("<p>alpha beta</p>");
+  editor.collapseTo({ block: 0, offset: 5 });
+  editor.sync();
+  key("Tab");
+  assertEqual(blockText(editor.getDocument()[0]), "alpha" + " ".repeat(5) + "beta", "Tab types four spaces at the caret");
+  assertEqual(editor.getSelection().focus.offset, 9, "the caret moves past them");
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "alpha beta", "Shift+Tab removes the four spaces");
+  assertEqual(editor.getSelection().focus.offset, 5, "the caret returns to where the tab was");
+
+  editor.insertText("  ");
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "alpha beta", "Shift+Tab removes a shorter run of spaces");
+  assertEqual(editor.getSelection().focus.offset, 5, "the caret lands at the start of the run");
+
+  await load("<p>one\ttwo</p>");
+  editor.collapseTo({ block: 0, offset: 4 });
+  editor.sync();
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "onetwo", "Shift+Tab removes a pasted tab character");
+});
+
+test("keyboard: Tab indents every selected line with spaces, and Shift+Tab takes them back", async () => {
+  await load("<p>one</p><p>two</p>");
+  const lineX = entry(0).lines[0].x;
+  editor.setSelection({ block: 0, offset: 1 }, { block: 1, offset: 2 });
+  editor.sync();
+  key("Tab");
+  assertEqual(blockText(editor.getDocument()[0]), "    one", "the first selected line gains four spaces");
+  assertEqual(blockText(editor.getDocument()[1]), "    two", "the second selected line gains four spaces");
+  assertEqual(editor.getDocument()[0].indent, undefined, "the first block keeps no indent property");
+  assertEqual(editor.getDocument()[1].indent, undefined, "the second block keeps no indent property");
+  assertEqual(editor.getDocument().length, 2, "no block is merged or added");
+  assertEqual(paintedText(0), "    one", "the spaces are painted in the text");
+  assertEqual(entry(0).lines[0].x, lineX, "the text moves right, not the block");
+  assertEqual(editor.getSelection().anchor.offset, 5, "the selection start moves with its line");
+  assertEqual(editor.getSelection().focus.offset, 6, "the selection end moves with its line");
+  const stored = serializeDocument(editor.getDocument());
+  const reloaded = parseDocument(stored);
+  assertEqual(blockText(reloaded[0]), "    one", "the indentation survives the stored HTML");
+
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "one", "Shift+Tab takes the first line back");
+  assertEqual(blockText(editor.getDocument()[1]), "two", "Shift+Tab takes the second line back");
+  assertEqual(editor.getSelection().anchor.offset, 1, "the selection start returns");
+  assertEqual(editor.getSelection().focus.offset, 2, "the selection end returns");
+});
+
+test("keyboard: Tab on part of a paragraph indents its line, not the selection", async () => {
+  await load("<p>alpha beta</p>");
+  editor.setSelection({ block: 0, offset: 6 }, { block: 0, offset: 10 });
+  editor.sync();
+  key("Tab");
+  assertEqual(blockText(editor.getDocument()[0]), "    alpha beta", "the whole line gains four spaces");
+  assertEqual(editor.selectionText(), "beta", "the selected word stays selected");
+  assertEqual(editor.getSelection().anchor.offset, 10, "the selection start follows its text");
+  assertEqual(editor.getSelection().focus.offset, 14, "the selection end follows its text");
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "alpha beta", "Shift+Tab takes the line indent back");
+  assertEqual(editor.selectionText(), "beta", "the word is still selected");
+  assertEqual(editor.getSelection().focus.offset, 10, "the selection ends where it began");
+});
+
+test("keyboard: Shift+Tab never deletes selected text", async () => {
+  // The reported bug: after indenting and outdenting a selection once,
+  // selecting again and pressing Shift+Tab removed the selected paragraph.
+  await load("<p>alpha beta</p><p>gamma delta</p>");
+  editor.setSelection({ block: 0, offset: 0 }, { block: 0, offset: 10 });
+  editor.sync();
+  key("Tab");
+  assertEqual(blockText(editor.getDocument()[0]), "    alpha beta", "Tab indents the paragraph");
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "alpha beta", "Shift+Tab takes the indent back");
+  assertEqual(editor.selectionText(), "alpha beta", "the text was never replaced or removed");
+
+  editor.collapseTo({ block: 1, offset: 0 });
+  editor.sync();
+  editor.setSelection({ block: 0, offset: 0 }, { block: 0, offset: 10 });
+  editor.sync();
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "alpha beta", "a fresh selection is not deleted");
+  assertEqual(editor.selectionText(), "alpha beta", "the selected text survives");
+  assertEqual(blockText(editor.getDocument()[1]), "gamma delta", "the next paragraph is untouched");
+
+  await load("<p>alpha beta</p>");
+  editor.setSelection({ block: 0, offset: 6 }, { block: 0, offset: 10 });
+  editor.sync();
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "alpha beta", "an inline selection is not deleted either");
+  assertEqual(editor.selectionText(), "beta", "the inline word is still selected");
+});
+
+test("keyboard: a selection that ends at a line start does not indent that line", async () => {
+  await load("<p>one</p><p>two</p>");
+  editor.setSelection({ block: 0, offset: 0 }, { block: 1, offset: 0 });
+  editor.sync();
+  key("Tab");
+  assertEqual(blockText(editor.getDocument()[0]), "    one", "the selected paragraph is indented");
+  assertEqual(blockText(editor.getDocument()[1]), "two", "the line the selection ends on is untouched");
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "one", "Shift+Tab outdents the selected paragraph");
+
+  await load("<p>one</p><ul><li>two</li></ul>");
+  editor.setSelection({ block: 0, offset: 0 }, { block: 1, offset: 0 });
+  editor.sync();
+  key("Tab");
+  assertEqual(blockText(editor.getDocument()[0]), "    one", "the paragraph line is indented");
+  assertEqual(editor.getDocument()[1].depth, 0, "the list item the selection ends on is not nested");
+
+  await load("<p>abc<br>def</p>");
+  editor.setSelection({ block: 0, offset: 0 }, { block: 0, offset: 4 });
+  editor.sync();
+  key("Tab");
+  assertEqual(blockText(editor.getDocument()[0]), "    abc\ndef", "the hard-break line the selection ends on is untouched");
+});
+
+test("keyboard: Tab follows a backwards selection's endpoints", async () => {
+  await load("<p>one</p><p>two</p>");
+  editor.setSelection({ block: 1, offset: 2 }, { block: 0, offset: 1 });
+  editor.sync();
+  key("Tab");
+  assertEqual(blockText(editor.getDocument()[0]), "    one", "the first line is indented");
+  assertEqual(blockText(editor.getDocument()[1]), "    two", "the second line is indented");
+  assertEqual(editor.getSelection().anchor.offset, 6, "the anchor moves with the second line");
+  assertEqual(editor.getSelection().focus.offset, 5, "the focus moves with the first line");
+  key("Tab", { shiftKey: true });
+  assertEqual(editor.getSelection().anchor.offset, 2, "the anchor returns");
+  assertEqual(editor.getSelection().focus.offset, 1, "the focus returns");
+});
+
+test("keyboard: Shift+Tab keeps a selection whose endpoint sits inside the indent", async () => {
+  await load("<p>    indented line</p>");
+  editor.setSelection({ block: 0, offset: 2 }, { block: 0, offset: 7 });
+  editor.sync();
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "indented line", "the line is outdented");
+  assertEqual(editor.getSelection().anchor.offset, 0, "an endpoint inside the indent lands on the line start");
+  assertEqual(editor.getSelection().focus.offset, 3, "the other endpoint follows its text");
+  assertEqual(editor.selectionText(), "ind", "the selection keeps the text after the indent");
+});
+
+test("keyboard: Tab indents every hard-break line of one paragraph", async () => {
+  await load("<p>first<br>second</p>");
+  editor.setSelection({ block: 0, offset: 2 }, { block: 0, offset: 8 });
+  editor.sync();
+  key("Tab");
+  assertEqual(blockText(editor.getDocument()[0]), "    first\n    second", "both hard-break lines gain four spaces");
+  assertEqual(editor.selectionText(), "rst\n    se", "the selection keeps its text and the new indent");
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "first\nsecond", "both hard-break lines lose the spaces");
+  assertEqual(editor.getSelection().anchor.offset, 2, "the selection start returns");
+  assertEqual(editor.getSelection().focus.offset, 8, "the selection end returns");
+});
+
+test("keyboard: one undo takes back a selection indent", async () => {
+  await load("<p>one</p><p>two</p>");
+  editor.setSelection({ block: 0, offset: 1 }, { block: 1, offset: 2 });
+  editor.sync();
+  key("Tab");
+  assertEqual(blockText(editor.getDocument()[0]), "    one", "the indent was applied");
+  editor.undo();
+  assertEqual(blockText(editor.getDocument()[0]), "one", "undo removes the first line indent");
+  assertEqual(blockText(editor.getDocument()[1]), "two", "undo removes the second line indent");
+  assertEqual(editor.getSelection().anchor.offset, 1, "undo restores the selection start");
+  assertEqual(editor.getSelection().focus.offset, 2, "undo restores the selection end");
+  editor.redo();
+  assertEqual(blockText(editor.getDocument()[0]), "    one", "redo applies it again");
+});
+
+test("keyboard: Shift+Tab with no selection outdents the line the caret is on", async () => {
+  await load("<p>    indented line</p>");
+  editor.collapseTo({ block: 0, offset: 8 });
+  editor.sync();
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "indented line", "the leading tab stop is removed");
+  assertEqual(editor.getSelection().focus.offset, 4, "the caret moves with its text");
+
+  await load("<p>    indented line</p>");
+  editor.collapseTo({ block: 0, offset: 2 });
+  editor.sync();
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "indented line", "outdenting from inside the indent works");
+  assertEqual(editor.getSelection().focus.offset, 0, "the caret lands at the line start");
+
+  await load("<p>plain line</p>");
+  editor.collapseTo({ block: 0, offset: 0 });
+  editor.sync();
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "plain line", "an unindented line is left alone");
+  assertEqual(editor.getSelection().focus.offset, 0, "the caret stays put");
+});
+
+test("keyboard: Shift+Tab on the empty first line does not reach the next line", async () => {
+  await load("<p><br>    abc</p>");
+  editor.collapseTo({ block: 0, offset: 0 });
+  editor.sync();
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "\n    abc", "the next line keeps its indentation");
+  assertEqual(editor.getSelection().focus.offset, 0, "the caret stays on the empty first line");
+
+  await load("<p><br>\tabc</p>");
+  editor.collapseTo({ block: 0, offset: 0 });
+  editor.sync();
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "\n\tabc", "the next line keeps its tab");
+
+  await load("<p><br>    abc</p>");
+  editor.collapseTo({ block: 0, offset: 1 });
+  editor.sync();
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "\nabc", "the caret's own line is still outdented");
+
+  await load("<pre></pre>");
+  editor.insertText("\n    x");
+  editor.collapseTo({ block: 0, offset: 0 });
+  editor.sync();
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "\n    x", "a leading code break does not expose the next line");
+});
+
+test("keyboard: Shift+Tab still outdents an older block indent", async () => {
+  await load('<p data-indent="2">legacy</p>');
+  editor.setSelection({ block: 0, offset: 0 }, { block: 0, offset: 6 });
+  editor.sync();
+  key("Tab", { shiftKey: true });
+  assertEqual(editor.getDocument()[0].indent, 1, "one block indent step is removed");
+  assertEqual(blockText(editor.getDocument()[0]), "legacy", "the text is untouched");
+  key("Tab", { shiftKey: true });
+  assertEqual(editor.getDocument()[0].indent, undefined, "the paragraph is no longer indented");
+});
+
+test("keyboard: Tab keeps list nesting and spaces in a mixed selection", async () => {
+  await load("<ul><li>one</li><li>two</li></ul><p>three</p>");
+  editor.setSelection({ block: 0, offset: 0 }, { block: 2, offset: 5 });
+  editor.sync();
+  key("Tab");
+  assertEqual(editor.getDocument()[0].depth, 1, "the first list item nests");
+  assertEqual(editor.getDocument()[1].depth, 1, "the second list item nests");
+  assertEqual(blockText(editor.getDocument()[0]), "one", "nesting does not add spaces to a list item");
+  assertEqual(blockText(editor.getDocument()[2]), "    three", "the paragraph line gains four spaces");
+  key("Tab", { shiftKey: true });
+  assertEqual(editor.getDocument()[0].depth, 0, "the first list item unnests");
+  assertEqual(editor.getDocument()[1].depth, 0, "the second list item unnests");
+  assertEqual(blockText(editor.getDocument()[2]), "three", "the paragraph loses its spaces");
+});
+
+test("keyboard: Tab indents selected code lines with tabs", async () => {
+  await load("<pre>one\ntwo</pre>");
+  editor.setSelection({ block: 0, offset: 1 }, { block: 0, offset: 5 });
+  editor.sync();
+  key("Tab");
+  assertEqual(blockText(editor.getDocument()[0]), "\tone\n\ttwo", "both selected code lines get a tab");
+  key("Tab", { shiftKey: true });
+  assertEqual(blockText(editor.getDocument()[0]), "one\ntwo", "Shift+Tab removes the tabs again");
 });
 
 test("lists: ordered markers renumber after deleting an item", async () => {

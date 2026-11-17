@@ -3,7 +3,6 @@
 
   var STORAGE_KEY = "grapho-theme";
   var root = document.documentElement;
-  var media = window.matchMedia("(prefers-color-scheme: dark)");
 
   function storedTheme() {
     try {
@@ -12,10 +11,6 @@
     } catch (error) {
       return null;
     }
-  }
-
-  function preferredTheme() {
-    return media && media.matches ? "dark" : "light";
   }
 
   function currentTheme() {
@@ -49,7 +44,9 @@
     syncControls();
   }
 
-  applyTheme(storedTheme() || preferredTheme(), false);
+  // Dark is the default until the reader picks a theme; the stored choice is
+  // the reader's and always wins. The OS preference is deliberately ignored.
+  applyTheme(storedTheme() || "dark", false);
 
   document.addEventListener("DOMContentLoaded", function () {
     syncControls();
@@ -60,18 +57,4 @@
       });
     });
   });
-
-  if (media) {
-    var onSystemChange = function (event) {
-      if (!storedTheme()) {
-        applyTheme(event.matches ? "dark" : "light", false);
-      }
-    };
-
-    if (typeof media.addEventListener === "function") {
-      media.addEventListener("change", onSystemChange);
-    } else if (typeof media.addListener === "function") {
-      media.addListener(onSystemChange);
-    }
-  }
 })();

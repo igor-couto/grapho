@@ -317,14 +317,14 @@ img {
   place-items: center;
   border: 1px solid var(--line);
   border-radius: 11px;
-  background: color-mix(in srgb, var(--surface) 42%, transparent);
+  background: var(--surface);
   color: var(--muted);
   transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
 }
 
 .icon-button:hover {
   border-color: var(--line-strong);
-  background: var(--surface);
+  background: var(--bg-soft);
   color: var(--ink);
 }
 
@@ -373,7 +373,7 @@ html[data-theme="dark"] .button-primary:hover {
 
 .button-quiet {
   border-color: var(--line);
-  background: transparent;
+  background: var(--surface-raised);
   color: var(--ink-soft);
 }
 
@@ -392,12 +392,16 @@ html[data-theme="dark"] .button-primary:hover {
 }
 
 .text-button {
-  padding: 2px 0;
+  padding: 5px 9px;
+  border-radius: 7px;
+  background: var(--surface-raised);
   color: var(--accent);
   font-size: 13px;
   font-weight: 600;
-  text-decoration: underline;
-  text-underline-offset: 3px;
+}
+
+.text-button:hover {
+  background: var(--surface-soft);
 }
 
 /* --------------------------------------------------------------------------
@@ -574,7 +578,7 @@ html[data-theme="dark"] .button-primary:hover {
   width: 34px;
   height: 34px;
   border-color: transparent;
-  background: transparent;
+  background: var(--bg);
 }
 
 .library-toolbar .icon-button:hover,
@@ -828,6 +832,7 @@ html[data-theme="dark"] .button-primary:hover {
   height: 32px;
   place-items: center;
   border-radius: 8px;
+  background: var(--surface);
   color: var(--faint);
   opacity: 0;
   pointer-events: none;
@@ -888,6 +893,7 @@ html[data-theme="dark"] .button-primary:hover {
   gap: 9px;
   padding: 7px 9px;
   border-radius: 7px;
+  background: var(--surface-raised);
   color: var(--ink-soft);
   font-size: 12.5px;
   font-weight: 500;
@@ -947,6 +953,7 @@ html[data-theme="dark"] .button-primary:hover {
   height: 32px;
   place-items: center;
   border-radius: 7px;
+  background: var(--surface-raised);
   color: var(--muted);
   transition: background 160ms ease, color 160ms ease;
 }
@@ -1674,12 +1681,39 @@ html[data-theme="dark"] .toast.is-error {
   line-height: 1.6;
 }
 
-.storage-path {
-  margin-top: 20px;
-  padding: 10px 12px;
+.storage-section {
+  margin-top: 28px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+}
+
+.storage-card > .storage-section:first-of-type {
+  margin-top: 26px;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.storage-section h2 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+}
+
+.storage-path-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 4px 4px 4px 12px;
   border: 1px solid var(--line);
   border-radius: 9px;
   background: var(--bg-soft);
+}
+
+.storage-path {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 0;
   color: var(--ink-soft);
   font-family: var(--font-mono);
   font-size: 12px;
@@ -1691,6 +1725,28 @@ html[data-theme="dark"] .toast.is-error {
   color: var(--faint);
 }
 
+.storage-edit {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--bg-soft);
+  color: var(--muted);
+  transition: color 160ms ease, background 160ms ease;
+}
+
+.storage-edit:hover {
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.storage-edit svg {
+  width: 16px;
+  height: 16px;
+}
+
 .storage-source {
   margin-top: 8px;
   color: var(--faint);
@@ -1698,9 +1754,16 @@ html[data-theme="dark"] .toast.is-error {
   line-height: 1.5;
 }
 
+.storage-folder-status {
+  margin-top: 10px;
+}
+
+.storage-folder-status:empty {
+  display: none;
+}
+
 .storage-facts {
-  margin-top: 18px;
-  border-top: 1px solid var(--line);
+  margin-top: 14px;
 }
 
 .storage-fact {
@@ -1737,15 +1800,12 @@ html[data-theme="dark"] .toast.is-error {
   height: 100%;
   border-radius: inherit;
   background: var(--accent);
-  transition: width 200ms ease;
+  transition: width 200ms ease, background-color 160ms ease;
 }
 
-.storage-form {
-  margin-top: 26px;
-}
-
-.storage-form .field {
-  margin-top: 0;
+/* Below 10% free, like Explorer's drive bar. */
+.storage-bar.is-low span {
+  background: var(--danger);
 }
 
 .storage-actions {
@@ -1777,26 +1837,21 @@ html[data-theme="dark"] .toast.is-error {
   line-height: 1.55;
 }
 
+.folder-hint {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .storage-locked {
-  margin-top: 24px;
+  margin-top: 16px;
   color: var(--muted);
   font-size: 12.5px;
   line-height: 1.6;
 }
 
 /* Backups on the storage page */
-
-.backups {
-  margin-top: 30px;
-  padding-top: 24px;
-  border-top: 1px solid var(--line);
-}
-
-.backups h2 {
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.012em;
-}
 
 .backups-intro {
   margin-top: 5px;
@@ -1893,8 +1948,8 @@ html[data-theme="dark"] .toast.is-error {
 }
 
 .backup-add svg {
-  width: 15px;
-  height: 15px;
+  width: 17px;
+  height: 17px;
 }
 
 .backup-sub {
@@ -2046,7 +2101,7 @@ html[data-theme="dark"] .toast.is-error {
 }
 
 .back-link:hover {
-  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  background: var(--bg-soft);
   color: var(--ink);
 }
 
@@ -2062,6 +2117,7 @@ html[data-theme="dark"] .toast.is-error {
   min-width: 80px;
   padding: 7px 9px;
   border-radius: 7px;
+  background: var(--danger-soft);
   color: var(--danger);
   font-size: 11.5px;
   font-weight: 500;
@@ -2075,7 +2131,7 @@ html[data-theme="dark"] .toast.is-error {
 }
 
 .save-status:hover {
-  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  background: color-mix(in srgb, var(--danger-soft) 86%, var(--danger));
 }
 
 .save-dot {
@@ -2108,7 +2164,6 @@ html[data-theme="dark"] .toast.is-error {
 .align-menu {
   position: fixed;
   z-index: 60;
-  min-width: 188px;
 }
 
 .style-menu {
@@ -2133,6 +2188,7 @@ html[data-theme="dark"] .toast.is-error {
   height: 38px;
   place-items: center;
   border-radius: 8px;
+  background: var(--surface-raised);
   color: var(--muted);
   transition: background 150ms ease, color 150ms ease;
 }
@@ -2152,11 +2208,6 @@ html[data-theme="dark"] .toast.is-error {
   color: var(--accent);
 }
 
-.align-menu .menu-item svg {
-  width: 17px;
-  height: 17px;
-}
-
 .image-menu .menu-item[aria-checked="true"] {
   background: var(--accent-soft);
   color: var(--accent);
@@ -2174,6 +2225,7 @@ html[data-theme="dark"] .toast.is-error {
   height: 35px;
   place-items: center;
   border-radius: 8px;
+  background: var(--surface-raised);
   color: var(--muted);
   transition: background 150ms ease, color 150ms ease;
 }
@@ -2198,7 +2250,7 @@ html[data-theme="dark"] .toast.is-error {
 }
 
 .image-tool:disabled:hover {
-  background: transparent;
+  background: var(--surface-raised);
   color: var(--muted);
 }
 
@@ -2254,7 +2306,7 @@ html[data-theme="dark"] .toast.is-error {
 
 .icon-button:disabled:hover {
   border-color: var(--line);
-  background: transparent;
+  background: var(--surface);
   color: var(--muted);
 }
 
@@ -2299,11 +2351,11 @@ html[data-theme="dark"] .toast.is-error {
   pointer-events: auto;
 }
 
-/* The menu button has to stay legible over the page, including at phone
-   widths, where the normal editor bar leaves it borderless. */
+/* The menu button floats over the page in focus mode, so it keeps the same
+   border and solid fill it has in the editor bar. */
 .editor-page.is-focus-mode .editor-header-end .icon-button {
   border-color: var(--line);
-  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  background: var(--surface);
 }
 
 .editor-page.is-focus-mode .editor-workspace {
@@ -2347,6 +2399,7 @@ html[data-theme="dark"] .toast.is-error {
   height: 32px;
   place-items: center;
   border-radius: 7px;
+  background: var(--surface);
   color: var(--muted);
   transition: background 140ms ease, color 140ms ease;
 }
@@ -2431,9 +2484,15 @@ html[data-theme="dark"] .toast.is-error {
 }
 
 .align-button .align-caret {
-  width: 9px;
-  height: 9px;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
   color: var(--faint);
+  transition: transform 140ms ease;
+}
+
+.align-button[aria-expanded="true"] .align-caret {
+  transform: rotate(180deg);
 }
 
 .style-button {
@@ -2446,6 +2505,7 @@ html[data-theme="dark"] .toast.is-error {
   padding: 0 8px 0 10px;
   flex: 0 0 auto;
   border-radius: 7px;
+  background: var(--surface);
   color: var(--ink-soft);
   font-size: 12px;
   font-weight: 500;
@@ -2482,7 +2542,8 @@ html[data-theme="dark"] .toast.is-error {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .style-button > svg {
+  .style-button > svg,
+  .align-button .align-caret {
     transition: none;
   }
 }
@@ -3047,16 +3108,12 @@ body.is-resizing-paper * {
   .editor-header-end .icon-button {
     width: 35px;
     height: 35px;
-    border-color: transparent;
-    background: transparent;
   }
 
-  /* The version page keeps the library's menu button, borders and all. */
+  /* The version page keeps the library's 40px menu button. */
   .version-header .icon-button {
     width: 40px;
     height: 40px;
-    border-color: var(--line);
-    background: color-mix(in srgb, var(--surface) 42%, transparent);
   }
 
   .save-status {

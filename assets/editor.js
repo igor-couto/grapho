@@ -864,7 +864,7 @@ function handleStyleMenuKeydown(event) {
 }
 
 /* --------------------------------------------------------------------------
-   Alignment and indent
+   Alignment
    -------------------------------------------------------------------------- */
 
 const ALIGNMENT_LABELS = {
@@ -877,7 +877,7 @@ const ALIGNMENT_LABELS = {
 function updateAlignState(alignment) {
   const value = ALIGNMENT_LABELS[alignment] ? alignment : "left";
   els.alignButton.dataset.currentAlign = value;
-  els.alignButton.setAttribute("aria-label", "Align & indent: " + ALIGNMENT_LABELS[value]);
+  els.alignButton.setAttribute("aria-label", "Align: " + ALIGNMENT_LABELS[value]);
   els.alignMenu.querySelectorAll("[data-align-value]").forEach((button) => {
     button.setAttribute("aria-checked", button.dataset.alignValue === value ? "true" : "false");
   });
@@ -940,19 +940,12 @@ function positionAlignMenu() {
 
 function handleAlignMenuClick(event) {
   const alignChoice = event.target.closest("[data-align-value]");
-  if (alignChoice) {
-    editor.setAlignment(alignChoice.dataset.alignValue);
-    closeAlignMenu();
-    editor.focusEditor();
+  if (!alignChoice) {
     return;
   }
-
-  const indentChoice = event.target.closest("[data-indent-action]");
-  if (indentChoice) {
-    editor.changeIndent(Number(indentChoice.dataset.indentAction));
-    closeAlignMenu();
-    editor.focusEditor();
-  }
+  editor.setAlignment(alignChoice.dataset.alignValue);
+  closeAlignMenu();
+  editor.focusEditor();
 }
 
 function handleAlignMenuKeydown(event) {
@@ -1670,6 +1663,9 @@ function exportHtml() {
     "h2{font-size:1.55em;line-height:1.3;}h3{font-size:1.25em;}",
     "p{margin:0 0 1em;}blockquote{margin:1.4em 0;padding-left:1.2em;",
     "border-left:2px solid #1967d2;font-style:italic;color:#4a4e43;}",
+    // Tab indents a selected line by putting spaces in the text, and a normal
+    // HTML paragraph collapses them away. Keep the indentation visible.
+    "p,h1,h2,h3,h4,blockquote{white-space:pre-wrap;}",
     "pre{padding:16px;background:#f1ece1;border-radius:8px;white-space:pre-wrap;",
     "font-family:ui-monospace,Consolas,monospace;font-size:.8em;}",
     "code{font-family:ui-monospace,Consolas,monospace;font-size:.84em;}",

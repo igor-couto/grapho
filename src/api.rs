@@ -922,7 +922,7 @@ fn oauth_page(title: &str, message: &str, redirect: Option<&str>) -> Response {
         concat!(
             "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
-            "<title>{title} — Grapho</title><meta name=\"theme-color\" content=\"#f3efe6\">",
+            "<title>{title} — Grapho</title><meta name=\"theme-color\" content=\"#232126\">",
             "<link rel=\"icon\" type=\"image/svg+xml\" href=\"/assets/favicon.ico\">",
             "<script src=\"/assets/theme.js\"></script>{refresh}",
             "<link rel=\"stylesheet\" href=\"/assets/app.css\"></head>",
