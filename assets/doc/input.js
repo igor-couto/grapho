@@ -238,11 +238,14 @@ export class DocEditor {
     if (!(options && options.keepMarks)) {
       this.pendingMarks = null;
     }
-    this.sync();
+    // A selection set here always comes from a cursor gesture (a key, a click,
+    // a drag), so the caret slides to it unless the caller is a viewport jump
+    // that keeps the caret in place on screen.
+    this.sync({ animateCaret: !options || options.animateCaret !== false });
   }
 
-  collapseTo(position) {
-    this.setSelection(position, position);
+  collapseTo(position, options) {
+    this.setSelection(position, position, options);
   }
 
   focusEditor() {
@@ -291,7 +294,8 @@ export class DocEditor {
     this.view.setLayout(this.layout, this.blocks);
   }
 
-  sync() {
+  sync(options) {
+    const settings = options || {};
     this.clampSelection();
     const collapsed = this.isCollapsed();
     const entry = this.layout ? blockEntry(this.layout, this.focus.block) : null;
@@ -300,7 +304,7 @@ export class DocEditor {
 
     if (collapsed) {
       const point = this.caretGeometry();
-      this.view.setCaret(this.focused ? point : null);
+      this.view.setCaret(this.focused ? point : null, settings.animateCaret === true);
       this.positionInput();
     } else {
       this.view.setCaret(null);
@@ -1426,10 +1430,12 @@ export class DocEditor {
     }
 
     this.lineHint = target.line;
+    // The page scrolls by the same distance, so the caret keeps its place on
+    // screen. Sliding its document coordinates would make it streak instead.
     if (extend) {
-      this.setSelection(this.anchor, target.position, { keepMarks: true });
+      this.setSelection(this.anchor, target.position, { keepMarks: true, animateCaret: false });
     } else {
-      this.collapseTo(target.position);
+      this.collapseTo(target.position, { animateCaret: false });
     }
 
     this.view.scrollBy(target.line.y - point.y);
@@ -1494,10 +1500,12 @@ export class DocEditor {
     const edge = toStart
       ? { block: 0, offset: 0 }
       : { block: last, offset: blockLength(this.blocks[last]) };
+    // The paper jumps to its edge below, so the caret must not slide across
+    // the whole document while the viewport teleports.
     if (extend) {
-      this.setSelection(this.anchor, edge, { keepMarks: true });
+      this.setSelection(this.anchor, edge, { keepMarks: true, animateCaret: false });
     } else {
-      this.collapseTo(edge);
+      this.collapseTo(edge, { animateCaret: false });
     }
     this.view.scrollToPageEdge(toStart);
   }

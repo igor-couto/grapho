@@ -2815,6 +2815,10 @@ body.is-resizing-paper * {
   width: 2px;
   border-radius: 1px;
   background: var(--accent);
+  /* The caret slides between positions, but only when the view says the move
+     came from an explicit gesture. Typing and history jumps pin it in place
+     with an inline transition-property of "none". */
+  transition: left 80ms ease, top 80ms ease;
 }
 
 .doc-caret.is-blinking {
@@ -2952,6 +2956,10 @@ body.is-resizing-paper * {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .doc-caret {
+    transition: none;
+  }
+
   .doc-caret.is-blinking {
     animation: none;
   }

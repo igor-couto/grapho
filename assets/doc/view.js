@@ -280,13 +280,18 @@ export class EditorView {
     }
   }
 
-  setCaret(point) {
+  setCaret(point, animate) {
     this.caretPoint = point;
     if (!point) {
       this.caret.style.display = "none";
       return;
     }
     this.caret.style.display = "";
+    // Pinning transition-property is what scopes the slide to real cursor
+    // moves: a paused move lands immediately, and the next explicit move
+    // restores the stylesheet transition. The browser's computed position at
+    // that moment is the animation's start, so no previous point is stored.
+    this.caret.style.transitionProperty = animate ? "" : "none";
     this.caret.style.left = point.x + "px";
     this.caret.style.top = point.y + "px";
     this.caret.style.height = point.height + "px";

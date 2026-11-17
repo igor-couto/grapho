@@ -302,6 +302,13 @@ unchanged.
   keys are handled by the editor because the focused textarea would otherwise
   scroll the page and leave the caret behind. The jump is measured from
   `window.innerHeight` minus the caret margin in `view.js`.
+- The caret slides to a new position over 80 ms when a cursor gesture places it
+  (keys, clicks, drags): `app.css` transitions `left` and `top`, and
+  `view.js`'s `setCaret` pins `transition-property: none` for moves that must
+  land immediately. Typing, undo/redo, relayout, and the viewport jumps above
+  reach `sync()` without `animateCaret`, so they snap; the next gesture restores
+  the slide. `prefers-reduced-motion` removes it. A selection hides the caret,
+  so collapsing one shows it at the new spot without a slide.
 - Focus mode hides the editor's bar and asks the browser for fullscreen, from
   the document menu. The header stays in the DOM because its menu button is the
   way out: CSS takes it out of the flow, hides the start and the toolbar, and

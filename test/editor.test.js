@@ -837,6 +837,53 @@ test("caret: scrolling keeps the caret in the viewport", async () => {
   await settle();
 });
 
+test("caret: smooth animation follows gestures but not typing or history", async () => {
+  await load("<p>alpha beta gamma</p><p>delta</p>");
+  window.scrollTo({ top: 0, behavior: "instant" });
+  editor.focusEditor();
+  const caret = root.querySelector(".doc-caret");
+  assert(caret, "the caret is painted");
+  // CSS transitions surface through getAnimations(); the caret's blink
+  // animation does too, so only the position transitions are counted.
+  const moving = () =>
+    caret
+      .getAnimations()
+      .filter((animation) => animation.transitionProperty === "left" || animation.transitionProperty === "top");
+
+  const point = caretPoint(entry(0), "alpha ".length);
+  const paintedX = paintedOffsetX(0, "alpha ".length);
+  clickAt(paintedX, point.y + point.height / 2);
+  const style = window.getComputedStyle(caret);
+  assertEqual(style.transitionProperty, "left, top", "the caret stylesheet transitions its position");
+  assertEqual(style.transitionDuration, "0.08s, 0.08s", "the slide lasts 80ms");
+  assertEqual(caret.style.transitionProperty, "", "a click animates the caret");
+  assert(moving().length > 0, "the click starts a position transition");
+
+  key("ArrowRight");
+  assertEqual(caret.style.transitionProperty, "", "an arrow move animates the caret");
+  assert(moving().length > 0, "the arrow move starts a position transition");
+
+  typeText("x");
+  assertEqual(caret.style.transitionProperty, "none", "typing snaps the caret");
+  assertEqual(moving().length, 0, "typing cancels the slide so it lands immediately");
+
+  editor.undo();
+  assertEqual(caret.style.transitionProperty, "none", "undo snaps the caret");
+  assertEqual(moving().length, 0, "undo leaves no slide running");
+
+  key("ArrowLeft");
+  assertEqual(caret.style.transitionProperty, "", "the next cursor gesture animates again");
+  assert(moving().length > 0, "the next gesture starts a position transition");
+
+  key("PageDown");
+  assertEqual(caret.style.transitionProperty, "none", "a page move snaps so the caret keeps its place on screen");
+  assertEqual(moving().length, 0, "a page move leaves no slide running");
+
+  key("End", { ctrlKey: true });
+  assertEqual(caret.style.transitionProperty, "none", "a document-edge jump snaps");
+  assertEqual(moving().length, 0, "a document-edge jump leaves no slide running");
+});
+
 test("keyboard: Page Up and Page Down move the caret a screen at a time", async () => {
   const paragraphs = [];
   for (let index = 0; index < 60; index += 1) {
