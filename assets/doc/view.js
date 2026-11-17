@@ -363,6 +363,9 @@ export class EditorView {
 }
 
 function lineClass(block) {
+  if (block.source === true) {
+    return "is-source";
+  }
   if (block.type === "h1" || block.type === "h2" || block.type === "h3" || block.type === "h4") {
     return "is-" + block.type;
   }

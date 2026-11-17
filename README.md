@@ -10,7 +10,9 @@ dragged into the text so the words flow around them and resized from their
 corners, saves as you type, and can export to HTML, Markdown, PDF, or plain
 text. The menu switches between a dark theme (the default) and a light one. Focus
 mode, from the editor's menu, hides the toolbar and takes the page fullscreen so
-only the writing and the menu button remain.
+only the writing and the menu button remain. Markdown mode, next to it, turns the
+page into editable Markdown source; leaving it renders the document again, and
+the file on disk stays the same JSON.
 
 ## Installing
 

@@ -10,6 +10,24 @@ import {
   serializeDocument,
 } from "./doc/model.js";
 import { DocEditor } from "./doc/input.js";
+import {
+  mapRichCaretToSource,
+  mapSourceCaretToRich,
+  richToSource,
+  sourceToRich,
+  wrapInlineText,
+} from "./doc/markdown.js";
+import {
+  clearFormatting as clearSourceFormatting,
+  inspect as inspectSource,
+  linkAt as sourceLinkAt,
+  removeLink as removeSourceLink,
+  setAlign as setSourceAlign,
+  setBlockStyle as setSourceBlockStyle,
+  setLink as setSourceLink,
+  setMark as setSourceMark,
+  toggleList as toggleSourceList,
+} from "./doc/markdown-edit.js";
 import { IMAGE_MAX_DATA_URL, encodeCanvas, transformImage } from "./doc/image.js";
 import { cacheImageSize, ensureFonts, loadMissingImages } from "./doc/layout.js";
 import { buildPdf } from "./doc/pdf.js";
@@ -31,6 +49,15 @@ const state = {
   paperDrag: null,
   exportingPdf: false,
   focusMode: false,
+  // Markdown mode is a per-visit view state (like focus mode): it starts off
+  // on every page load and is never stored with the document. The stored HTML
+  // stays the interchange format; these fields only hold the transient source
+  // form while the mode is on.
+  markdownMode: false,
+  sourceDirty: false,
+  richSnapshot: null,
+  markdownConversion: null,
+  savedContent: "",
 };
 
 const els = {};
@@ -52,6 +79,7 @@ async function init() {
   els.documentMenuButton = document.getElementById("documentMenuButton");
   els.documentMenu = document.getElementById("documentMenu");
   els.focusMenuItemLabel = document.getElementById("focusMenuItemLabel");
+  els.markdownMenuItemLabel = document.getElementById("markdownMenuItemLabel");
   els.formatToolbar = document.getElementById("formatToolbar");
   els.styleButton = document.getElementById("styleButton");
   els.styleButtonLabel = document.getElementById("styleButtonLabel");
@@ -96,6 +124,8 @@ async function init() {
     onSave: () => saveNow(),
     onLink: openLinkDialog,
     onPasteImages: (files) => addImages(files),
+    onSourceFormat: handleSourceFormat,
+    onSourceWrap: wrapSourceTypedText,
   });
   editor.bind();
 
@@ -141,6 +171,7 @@ async function applyDocument(document) {
     editor.sync();
   });
   editor.setDocument(blocks);
+  state.savedContent = blocksContent(blocks);
 
   setToolbarEnabled(true);
   els.documentMenuButton.disabled = false;
@@ -209,6 +240,9 @@ function handleEditorChange() {
   if (!state.loaded) {
     return;
   }
+  if (state.markdownMode) {
+    state.sourceDirty = true;
+  }
   updateEditorPlaceholder();
   markDirty();
 }
@@ -261,12 +295,30 @@ function updateEditorPlaceholder() {
   els.editor.dataset.empty = hasText ? "false" : "true";
 }
 
-function buildPayload() {
-  const blocks = editor ? editor.getDocument() : [];
+// The rich blocks this document is made of right now. In Markdown mode the
+// editor holds source lines, so saving and exporting parse them back first
+// (which is also what keeps the stored JSON in the usual HTML format).
+function documentBlocks() {
+  if (!editor) {
+    return [];
+  }
+  const blocks = editor.getDocument();
+  return state.markdownMode ? sourceToRich(blocks).blocks : blocks;
+}
+
+// The content string the document stores for a set of rich blocks. Empty and
+// all-blank documents store "", which is what makes an empty document's
+// no-op Markdown toggle compare cleanly against the saved content.
+function blocksContent(blocks) {
   const hasContent = blocks.some((block) => block.type === "image" || blockText(block).trim().length > 0);
+  return hasContent ? serializeDocument(blocks) : "";
+}
+
+function buildPayload() {
+  const blocks = documentBlocks();
   const payload = {
     title: normalizeTitle(els.documentTitle.value),
-    content: hasContent ? serializeDocument(blocks) : "",
+    content: blocksContent(blocks),
     // Zero tells the server to drop a stored width, so a document snapped back
     // to the default follows the stylesheet again.
     paper_width: state.paperWidth || 0,
@@ -316,6 +368,7 @@ function saveNow() {
         body: payload,
       });
 
+      state.savedContent = payload.content;
       state.saving = false;
       state.saveErrorNotified = false;
       hideSaveStatus();
@@ -689,6 +742,11 @@ function runCommand(command) {
   if (!state.loaded || !command) {
     return;
   }
+  if (state.markdownMode) {
+    runSourceCommand(command);
+    editor.focusEditor();
+    return;
+  }
   switch (command) {
     case "undo":
       editor.undo();
@@ -728,12 +786,6 @@ function handleSelectionChange(info) {
     return;
   }
 
-  const marks = info.marks || {};
-  setPressed("bold", Boolean(marks.b));
-  setPressed("italic", Boolean(marks.i));
-  setPressed("underline", Boolean(marks.u));
-  setPressed("strikeThrough", Boolean(marks.s));
-
   const undoButton = els.formatToolbar.querySelector('[data-command="undo"]');
   const redoButton = els.formatToolbar.querySelector('[data-command="redo"]');
   if (undoButton) {
@@ -743,16 +795,58 @@ function handleSelectionChange(info) {
     redoButton.disabled = !info.canRedo;
   }
 
+  if (info.image) {
+    state.imageEntry = info.image;
+  }
+
+  if (state.markdownMode) {
+    // The editor reports the plain source block ("p" with no marks); what the
+    // toolbar shows is read out of the Markdown syntax at the selection, plus
+    // any marks armed for the next typed text.
+    const source = inspectSource(editor.getDocument(), editor.getSelection());
+    const marks = source.marks || {};
+    const pending = editor.getSourcePendingMarks ? editor.getSourcePendingMarks() : null;
+    const pressed = (key) => Boolean(marks[key] || (pending && pending[key]));
+    setPressed("bold", pressed("b"));
+    setPressed("italic", pressed("i"));
+    setPressed("underline", pressed("u"));
+    setPressed("strikeThrough", pressed("s"));
+    setListPressed(source.ordered);
+    if (els.linkButton) {
+      els.linkButton.setAttribute("aria-pressed", marks.href ? "true" : "false");
+    }
+    updateStyleState(source.style || "p");
+    updateAlignState(source.align || "left");
+    return;
+  }
+
+  const marks = info.marks || {};
+  setPressed("bold", Boolean(marks.b));
+  setPressed("italic", Boolean(marks.i));
+  setPressed("underline", Boolean(marks.u));
+  setPressed("strikeThrough", Boolean(marks.s));
+  setListPressed(null);
+
   if (els.linkButton) {
     els.linkButton.setAttribute("aria-pressed", marks.href ? "true" : "false");
   }
 
   const type = info.blockType || "p";
-  updateStyleState(type);
+  // The rich style menu only offers Normal, H1, H2, Quote and Code block; a
+  // stored H3/H4 keeps the old "Normal text" label there. Markdown mode reads
+  // the source line instead and does show all four heading levels.
+  updateStyleState(type === "h3" || type === "h4" ? "p" : type);
   updateAlignState(info.alignment || "left");
+}
 
-  if (info.image) {
-    state.imageEntry = info.image;
+function setListPressed(ordered) {
+  const unordered = els.formatToolbar.querySelector('[data-command="insertUnorderedList"]');
+  const orderedButton = els.formatToolbar.querySelector('[data-command="insertOrderedList"]');
+  if (unordered) {
+    unordered.setAttribute("aria-pressed", ordered === false ? "true" : "false");
+  }
+  if (orderedButton) {
+    orderedButton.setAttribute("aria-pressed", ordered === true ? "true" : "false");
   }
 }
 
@@ -771,6 +865,8 @@ const STYLE_LABELS = {
   p: "Normal text",
   h1: "Heading 1",
   h2: "Heading 2",
+  h3: "Heading 3",
+  h4: "Heading 4",
   quote: "Quote",
   code: "Code block",
 };
@@ -850,7 +946,11 @@ function handleStyleMenuClick(event) {
     return;
   }
   closeStyleMenu();
-  editor.setBlockType(choice.dataset.blockStyle);
+  if (state.markdownMode) {
+    applySourceCommand(setSourceBlockStyle, choice.dataset.blockStyle);
+  } else {
+    editor.setBlockType(choice.dataset.blockStyle);
+  }
   editor.focusEditor();
 }
 
@@ -858,7 +958,11 @@ function handleStyleMenuKeydown(event) {
   if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
     return;
   }
-  const items = Array.from(els.styleMenu.querySelectorAll("[data-block-style]"));
+  // The two extra heading levels are hidden outside Markdown mode; skip them
+  // so arrow keys cannot land on an invisible item and stop moving.
+  const items = Array.from(els.styleMenu.querySelectorAll("[data-block-style]")).filter(
+    (item) => !item.hidden,
+  );
   const index = items.indexOf(document.activeElement);
   if (index === -1) {
     return;
@@ -951,7 +1055,11 @@ function handleAlignMenuClick(event) {
   if (!alignChoice) {
     return;
   }
-  editor.setAlignment(alignChoice.dataset.alignValue);
+  if (state.markdownMode) {
+    applySourceCommand(setSourceAlign, alignChoice.dataset.alignValue);
+  } else {
+    editor.setAlignment(alignChoice.dataset.alignValue);
+  }
   closeAlignMenu();
   editor.focusEditor();
 }
@@ -984,7 +1092,9 @@ function openLinkDialog() {
   closeStyleMenu();
 
   const selection = editor.getSelection();
-  const existing = editor.linkAtCaret();
+  const existing = state.markdownMode
+    ? sourceLinkAt(editor.getDocument(), selection)
+    : editor.linkAtCaret();
   if (selection.collapsed && !existing) {
     showToast("Select a word or phrase first, then add a link.");
     return;
@@ -1046,12 +1156,21 @@ function applyLink(event) {
     return;
   }
   closeLinkDialog();
-  editor.setLink(url);
+  if (state.markdownMode) {
+    applySourceCommand(setSourceLink, url);
+  } else {
+    editor.setLink(url);
+  }
   editor.focusEditor();
 }
 
 function removeLink() {
   closeLinkDialog();
+  if (state.markdownMode) {
+    applySourceCommand(removeSourceLink);
+    editor.focusEditor();
+    return;
+  }
   const hadLink = editor.linkAtCaret();
   if (hadLink) {
     editor.removeLinkAtCaret();
@@ -1547,6 +1666,9 @@ function handleDocumentMenuAction(event) {
     case "focus":
       toggleFocusMode();
       break;
+    case "markdown":
+      toggleMarkdownMode();
+      break;
     case "delete":
       openDeleteDialog();
       break;
@@ -1642,13 +1764,208 @@ function handleFullscreenChange() {
   editor.focusEditor();
 }
 
+/* --------------------------------------------------------------------------
+   Markdown mode
+   -------------------------------------------------------------------------- */
+
+function toggleMarkdownMode() {
+  if (state.markdownMode) {
+    exitMarkdownMode();
+  } else {
+    enterMarkdownMode();
+  }
+}
+
+function enterMarkdownMode() {
+  if (state.markdownMode || !state.loaded) {
+    return;
+  }
+  closeDocumentMenu();
+  closeStyleMenu();
+  closeAlignMenu();
+  closeImageMenu();
+
+  const richBlocks = editor.getDocument();
+  const selection = editor.getSelection();
+  // The conversion also carries the caret both ways, so switching the view
+  // does not throw the writing position away.
+  const conversion = richToSource(richBlocks);
+  const caret = mapRichCaretToSource(conversion, selection.focus);
+
+  state.richSnapshot = richBlocks;
+  state.markdownConversion = conversion;
+  state.markdownMode = true;
+  state.sourceDirty = false;
+  document.body.classList.add("is-markdown-mode");
+  updateMarkdownMenuItem();
+  setSourceStyleOptions(true);
+  editor.setSourceMode(true);
+  editor.setDocument(conversion.blocks, { anchor: caret, focus: caret });
+  editor.focusEditor();
+  updateEditorPlaceholder();
+}
+
+function exitMarkdownMode() {
+  if (!state.markdownMode) {
+    return;
+  }
+
+  const sourceBlocks = editor.getDocument();
+  const sourceSelection = editor.getSelection();
+  let richBlocks = state.richSnapshot || [];
+  let lineMap = state.markdownConversion ? state.markdownConversion.lineMap : null;
+  let imageTargets = state.markdownConversion ? state.markdownConversion.imageTargets : null;
+
+  // With no source edits, put the exact rich blocks back; that makes a toggle
+  // that changed nothing a true no-op, even if a parser normalization would
+  // have altered the markup. With edits, the source is the document now.
+  if (state.sourceDirty) {
+    const conversion = sourceToRich(sourceBlocks);
+    richBlocks = conversion.blocks;
+    lineMap = conversion.lineMap;
+    imageTargets = conversion.imageTargets;
+  }
+
+  const caret = lineMap
+    ? mapSourceCaretToRich({ lineMap, imageTargets: imageTargets || [] }, sourceSelection.focus)
+    : { block: 0, offset: 0 };
+
+  state.markdownMode = false;
+  state.sourceDirty = false;
+  state.richSnapshot = null;
+  state.markdownConversion = null;
+  document.body.classList.remove("is-markdown-mode");
+  updateMarkdownMenuItem();
+  setSourceStyleOptions(false);
+  editor.setSourceMode(false);
+  editor.setDocument(richBlocks, { anchor: caret, focus: caret });
+  editor.focusEditor();
+  updateEditorPlaceholder();
+
+  // A save made while the mode was on already stored the parsed form of the
+  // change. If what the editor shows now is not what the server last saw
+  // (unsaved edits from before the toggle, or a change not saved yet), save.
+  const html = blocksContent(editor.getDocument());
+  if (html !== state.savedContent) {
+    state.dirty = true;
+  }
+  if (state.dirty) {
+    scheduleSave(300);
+  }
+}
+
+function updateMarkdownMenuItem() {
+  if (els.markdownMenuItemLabel) {
+    els.markdownMenuItemLabel.textContent = state.markdownMode ? "Exit Markdown mode" : "Markdown mode";
+  }
+}
+
+// The source dialect understands all four heading levels, so the style menu
+// offers the extra two only while Markdown mode is on. The rich editor keeps
+// its two-heading menu.
+function setSourceStyleOptions(enabled) {
+  els.styleMenu.querySelectorAll('[data-block-style="h3"], [data-block-style="h4"]').forEach((item) => {
+    // The extra menu items stay hidden outside Markdown mode. The stylesheet
+    // gives [hidden] menu items display:none because .menu-item is display:flex;
+    // an inline style would break the Content-Security-Policy.
+    item.hidden = !enabled;
+  });
+}
+
+function handleSourceFormat(key) {
+  if (!state.markdownMode) {
+    return;
+  }
+  runSourceMark(key);
+  editor.focusEditor();
+}
+
+// A collapsed mark toggle cannot insert its markers immediately: an empty
+// "****" pair would be parsed and stored as literal text. Instead it arms the
+// next typed text, exactly like the rich editor's pending marks.
+function runSourceMark(key) {
+  const result = setSourceMark(editor.getDocument(), editor.getSelection(), key);
+  if (result && result.pending) {
+    toggleSourcePendingMark(key);
+    return;
+  }
+  if (result && result.blocks) {
+    editor.commit(result.blocks, result.anchor, result.focus);
+  }
+}
+
+function toggleSourcePendingMark(key) {
+  const pending = { ...(editor.getSourcePendingMarks() || {}) };
+  if (pending[key]) {
+    delete pending[key];
+  } else {
+    pending[key] = true;
+  }
+  editor.setSourcePendingMarks(pending);
+  editor.sync();
+}
+
+// Called by the editor when text is typed with pending marks armed in Markdown
+// mode: the text arrives already wrapped in canonical markers.
+function wrapSourceTypedText(text, marks) {
+  return wrapInlineText(text, marks);
+}
+
+// Toolbar actions in Markdown mode edit the source lines directly. The action
+// returns the blocks and selection to commit, or null when it did nothing.
+function applySourceCommand(action, ...args) {
+  if (!state.markdownMode) {
+    return false;
+  }
+  const result = action(editor.getDocument(), editor.getSelection(), ...args);
+  if (!result) {
+    return false;
+  }
+  editor.commit(result.blocks, result.anchor, result.focus);
+  return true;
+}
+
+function runSourceCommand(command) {
+  switch (command) {
+    case "undo":
+      editor.undo();
+      break;
+    case "redo":
+      editor.redo();
+      break;
+    case "bold":
+      runSourceMark("b");
+      break;
+    case "italic":
+      runSourceMark("i");
+      break;
+    case "underline":
+      runSourceMark("u");
+      break;
+    case "strikeThrough":
+      runSourceMark("s");
+      break;
+    case "insertUnorderedList":
+      applySourceCommand(toggleSourceList, false);
+      break;
+    case "insertOrderedList":
+      applySourceCommand(toggleSourceList, true);
+      break;
+    case "removeFormat":
+      applySourceCommand(clearSourceFormatting);
+      break;
+    default:
+      break;
+  }
+}
+
 function exportHtml() {
   if (!state.loaded) {
     return;
   }
   const title = normalizeTitle(els.documentTitle.value);
   const escapedTitle = escapeHtml(title);
-  const blocks = editor.getDocument();
+  const blocks = documentBlocks();
   const body = serializeDocument(blocks);
   // A radius lives on one image, and the export cannot put an inline style on
   // it, so write one rule per radius this document actually uses.
@@ -1719,7 +2036,7 @@ function exportText() {
     return;
   }
   const title = normalizeTitle(els.documentTitle.value);
-  const blocks = editor.getDocument();
+  const blocks = documentBlocks();
   const parts = [];
 
   for (let index = 0; index < blocks.length; index += 1) {
@@ -1758,7 +2075,7 @@ async function exportPdf() {
 
   try {
     const title = normalizeTitle(els.documentTitle.value);
-    const pdf = await buildPdf(editor.getDocument(), title);
+    const pdf = await buildPdf(documentBlocks(), title);
     downloadFile(slugify(title) + ".pdf", pdf, "application/pdf");
     showToast("PDF download started.");
   } catch (error) {
@@ -1774,7 +2091,7 @@ function exportMarkdown() {
     return;
   }
   const title = normalizeTitle(els.documentTitle.value);
-  const blocks = editor.getDocument();
+  const blocks = documentBlocks();
   const parts = [];
 
   for (let index = 0; index < blocks.length; index += 1) {

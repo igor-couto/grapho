@@ -1488,6 +1488,495 @@ async function main() {
     );
     await evaluate(cdp, `delete document.documentElement.requestFullscreen`);
 
+    // The checks above ended on the image picker's document, which has already
+    // been removed from the library. Open the main editor document again for
+    // the Markdown mode checks.
+    await cdp.send("Page.navigate", { url: base + "/doc/" + documentId });
+    await waitForPage(cdp, base + "/doc/" + documentId, PAGE_TIMEOUT_MS);
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+
+    // Markdown mode is a view over the same document: the paper turns into
+    // editable source lines, typing Markdown is saved as the usual semantic
+    // HTML, and toggling back renders that HTML again. It is per-visit state,
+    // so it starts off after a reload.
+    const contentBeforeMarkdown = (await readSavedDocument()).content;
+
+    const enterMarkdown = async () => {
+      await evaluate(
+        cdp,
+        `(() => {
+          document.getElementById("documentMenuButton").click();
+          document.querySelector('[data-doc-action="markdown"]').click();
+          return true;
+        })()`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    };
+    const leaveMarkdown = enterMarkdown;
+
+    await enterMarkdown();
+    const markdownOn = await evaluate(
+      cdp,
+      `(() => {
+        const lines = Array.from(document.querySelectorAll(".doc-line.is-source")).map((line) => line.textContent);
+        return {
+          mode: document.body.classList.contains("is-markdown-mode"),
+          label: document.getElementById("markdownMenuItemLabel").textContent,
+          focused: document.activeElement ? document.activeElement.id : "",
+          lineCount: lines.length,
+          otherLines: document.querySelectorAll(".doc-line:not(.is-source)").length,
+          headingLine: lines.find((text) => text === "# A heading") || "",
+          listLine: lines.find((text) => text.startsWith("- one")) || "",
+          quoteLine: lines.find((text) => text.startsWith("> A quote")) || "",
+          fenceLine: lines.find((text) => text === String.fromCharCode(96).repeat(3)) || "",
+          metrics: (() => {
+            const line = document.querySelector(".doc-line.is-source");
+            if (!line) return null;
+            const style = getComputedStyle(line);
+            return {
+              fontSize: style.fontSize,
+              lineHeight: style.lineHeight,
+              paintedHeight: line.getBoundingClientRect().height,
+            };
+          })(),
+        };
+      })()`,
+    );
+    check(
+      "Markdown mode is entered from the document menu",
+      markdownOn.mode === true &&
+        markdownOn.label === "Exit Markdown mode" &&
+        markdownOn.focused === "docInput",
+      JSON.stringify(markdownOn),
+    );
+    check(
+      "Markdown source lines use the layout's mono metrics",
+      markdownOn.metrics &&
+        markdownOn.metrics.fontSize === "15px" &&
+        markdownOn.metrics.lineHeight === "25.5px" &&
+        Math.abs(markdownOn.metrics.paintedHeight - 25.5) < 0.5,
+      JSON.stringify(markdownOn.metrics),
+    );
+    check(
+      "Markdown mode paints the document as source lines",
+      markdownOn.lineCount > 5 &&
+        markdownOn.otherLines === 0 &&
+        markdownOn.headingLine === "# A heading" &&
+        markdownOn.listLine === "- one" &&
+        markdownOn.quoteLine === "> A quote" &&
+        markdownOn.fenceLine.length >= 3,
+      JSON.stringify(markdownOn),
+    );
+
+    // Type real Markdown at the end of the document. The textarea input path is
+    // the same one the browser uses for keystrokes.
+    await pressKey("End", "End", 35, 2);
+    await cdp.send("Input.insertText", {
+      text: "\n# Typed heading\nA **bold** line with [a link](https://example.com).\n- alpha\n- beta",
+    });
+    const markdownSaved = await waitForSavedContent("<h1>Typed heading</h1>");
+    check("typed Markdown is saved", markdownSaved, saved && saved.content);
+    check(
+      "Markdown typing is stored as the app's HTML",
+      saved &&
+        saved.content.includes("<b>bold</b>") &&
+        saved.content.includes("example.com") &&
+        !saved.content.includes("# Typed heading") &&
+        !saved.content.includes("**bold**"),
+      saved && saved.content,
+    );
+
+    // Every toolbar control is meant to work in Markdown mode too. A collapsed
+    // bold click arms the next typed text (an empty "****" run would be stored
+    // as literal text); typing turns it into real formatting, and undo removes
+    // both the text and its markers as one step.
+    const sourceBeforeBold = await evaluate(
+      cdp,
+      `Array.from(document.querySelectorAll(".doc-line.is-source")).map((line) => line.textContent).join("\\n")`,
+    );
+    await evaluate(
+      cdp,
+      `document.querySelector('[data-command="bold"]').click()`,
+    );
+    const boldPending = await evaluate(
+      cdp,
+      `document.querySelector('[data-command="bold"]').getAttribute("aria-pressed")`,
+    );
+    await cdp.send("Input.insertText", { text: "Q" });
+    const sourceAfterBold = await evaluate(
+      cdp,
+      `Array.from(document.querySelectorAll(".doc-line.is-source")).map((line) => line.textContent).join("\\n")`,
+    );
+    await evaluate(
+      cdp,
+      `document.querySelector('[data-command="undo"]').click()`,
+    );
+    const sourceAfterUndo = await evaluate(
+      cdp,
+      `Array.from(document.querySelectorAll(".doc-line.is-source")).map((line) => line.textContent).join("\\n")`,
+    );
+    check(
+      "the bold button formats the next typed text in the source",
+      boldPending === "true" && sourceAfterBold === sourceBeforeBold + "**Q**",
+      JSON.stringify({
+        boldPending,
+        sourceBeforeBold: sourceBeforeBold.slice(-40),
+        sourceAfterBold: sourceAfterBold.slice(-40),
+      }),
+    );
+    check(
+      "undo takes the formatted text back",
+      sourceAfterUndo === sourceBeforeBold,
+      JSON.stringify({ sourceAfterUndo: sourceAfterUndo.slice(-40) }),
+    );
+
+    await leaveMarkdown();
+    const markdownOff = await evaluate(
+      cdp,
+      `(() => {
+        const heading = Array.from(document.querySelectorAll(".doc-line.is-h1")).map((line) => line.textContent);
+        return {
+          mode: document.body.classList.contains("is-markdown-mode"),
+          label: document.getElementById("markdownMenuItemLabel").textContent,
+          headings: heading,
+          sourceLines: document.querySelectorAll(".doc-line.is-source").length,
+        };
+      })()`,
+    );
+    check(
+      "leaving Markdown mode renders the saved HTML again",
+      markdownOff.mode === false &&
+        markdownOff.label === "Markdown mode" &&
+        markdownOff.headings.includes("Typed heading") &&
+        markdownOff.sourceLines === 0,
+      JSON.stringify(markdownOff),
+    );
+
+    // A toggle with no edits must not rewrite the document, and entering again
+    // must recover the Markdown source from the stored HTML.
+    const contentAfterFirstPass = (await readSavedDocument()).content;
+    await enterMarkdown();
+    const roundTrippedSource = await evaluate(
+      cdp,
+      `Array.from(document.querySelectorAll(".doc-line.is-source")).map((line) => line.textContent).join("\\n")`,
+    );
+    await leaveMarkdown();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const contentAfterSecondPass = (await readSavedDocument()).content;
+    check(
+      "Markdown source round-trips from the stored HTML",
+      roundTrippedSource.includes("# Typed heading") &&
+        roundTrippedSource.includes("- alpha") &&
+        roundTrippedSource.includes("[a link](https://example.com"),
+      JSON.stringify(roundTrippedSource.slice(-200)),
+    );
+    check(
+      "a no-op Markdown toggle leaves the stored document alone",
+      contentAfterFirstPass === contentAfterSecondPass,
+      JSON.stringify({
+        before: contentAfterFirstPass && contentAfterFirstPass.slice(-80),
+        after: contentAfterSecondPass && contentAfterSecondPass.slice(-80),
+      }),
+    );
+    check(
+      "the earlier Markdown edits were stored",
+      contentBeforeMarkdown !== contentAfterFirstPass,
+      JSON.stringify({ before: contentBeforeMarkdown && contentBeforeMarkdown.slice(-60) }),
+    );
+
+    // The mode is not remembered: a reload comes back in the normal rich view.
+    await cdp.send("Page.navigate", { url: base + "/doc/" + documentId });
+    await waitForPage(cdp, base + "/doc/" + documentId, PAGE_TIMEOUT_MS);
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+    check(
+      "Markdown mode is off after a reload",
+      (await evaluate(cdp, `document.body.classList.contains("is-markdown-mode")`)) === false,
+    );
+
+    // Every toolbar control edits the source in Markdown mode. Work on the last
+    // line (a plain paragraph), then leave and come back to prove round-trip.
+    const readSource = () =>
+      evaluate(
+        cdp,
+        `Array.from(document.querySelectorAll(".doc-line.is-source")).map((line) => line.textContent).join("\\n")`,
+      );
+    const lastLine = (text) => text.split("\n").filter((line) => line.length).pop() || "";
+    await enterMarkdown();
+    await pressKey("End", "End", 35, 2);
+    const beforeBullet = await readSource();
+    await evaluate(cdp, `document.querySelector('[data-command="insertUnorderedList"]').click()`);
+    const toggledBullet = await readSource();
+    await evaluate(cdp, `document.querySelector('[data-command="insertUnorderedList"]').click()`);
+    const restoredBullet = await readSource();
+    check(
+      "the list button toggles a Markdown bullet",
+      lastLine(beforeBullet).startsWith("- ") !== lastLine(toggledBullet).startsWith("- ") &&
+        lastLine(restoredBullet) === lastLine(beforeBullet),
+      JSON.stringify({
+        before: lastLine(beforeBullet).slice(0, 40),
+        toggled: lastLine(toggledBullet).slice(0, 40),
+        restored: lastLine(restoredBullet).slice(0, 40),
+      }),
+    );
+
+    await evaluate(
+      cdp,
+      `(() => {
+        document.getElementById("styleButton").click();
+        document.querySelector('[data-block-style="h1"]').click();
+        return true;
+      })()`,
+    );
+    const headingSource = await readSource();
+    check(
+      "the style menu writes a Markdown heading marker",
+      lastLine(headingSource).startsWith("# "),
+      JSON.stringify(lastLine(headingSource).slice(0, 40)),
+    );
+
+    await evaluate(
+      cdp,
+      `(() => {
+        document.getElementById("alignButton").click();
+        document.querySelector('[data-align-value="center"]').click();
+        return true;
+      })()`,
+    );
+    const alignedSource = await readSource();
+    check(
+      "the align menu carries alignment as the documented HTML escape",
+      lastLine(alignedSource).startsWith('<h1 data-align="center">'),
+      JSON.stringify(lastLine(alignedSource).slice(0, 60)),
+    );
+
+    await leaveMarkdown();
+    const alignedRich = await evaluate(
+      cdp,
+      `({
+        headings: document.querySelectorAll(".doc-line.is-h1").length,
+        mode: document.body.classList.contains("is-markdown-mode")
+      })`,
+    );
+    const alignedSaved = await waitForSavedContent('data-align="center"');
+    check(
+      "Markdown toolbar changes render and save as rich HTML",
+      alignedRich.mode === false && alignedRich.headings > 0 && alignedSaved,
+      JSON.stringify({ alignedRich, alignedSaved, content: saved && saved.content && saved.content.slice(-120) }),
+    );
+    await enterMarkdown();
+    const alignedAgain = await readSource();
+    check(
+      "the aligned heading round-trips through the source",
+      lastLine(alignedAgain).includes('data-align="center"') && lastLine(alignedAgain).startsWith("<h1"),
+      JSON.stringify(lastLine(alignedAgain).slice(0, 60)),
+    );
+
+    // Markdown mode and focus mode are independent: focus hides the bar but the
+    // source keeps painting, and leaving focus does not leave Markdown mode.
+    await evaluate(
+      cdp,
+      `(() => {
+        document.getElementById("documentMenuButton").click();
+        document.querySelector('[data-doc-action="focus"]').click();
+        return true;
+      })()`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const focusedMarkdown = await evaluate(
+      cdp,
+      `({
+        focus: document.body.classList.contains("is-focus-mode"),
+        markdown: document.body.classList.contains("is-markdown-mode"),
+        toolbar: getComputedStyle(document.getElementById("formatToolbar")).display,
+        sourceLines: document.querySelectorAll(".doc-line.is-source").length
+      })`,
+    );
+    check(
+      "focus mode composes with Markdown mode",
+      focusedMarkdown.focus === true &&
+        focusedMarkdown.markdown === true &&
+        focusedMarkdown.toolbar === "none" &&
+        focusedMarkdown.sourceLines > 0,
+      JSON.stringify(focusedMarkdown),
+    );
+    await evaluate(
+      cdp,
+      `(() => {
+        document.getElementById("documentMenuButton").click();
+        document.querySelector('[data-doc-action="focus"]').click();
+        return true;
+      })()`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    check(
+      "leaving focus mode keeps Markdown mode on",
+      (await evaluate(
+        cdp,
+        `document.body.classList.contains("is-focus-mode") === false && document.body.classList.contains("is-markdown-mode") === true`,
+      )) === true,
+    );
+    await leaveMarkdown();
+
+    // A narrow viewport still paints a wrapped source view without overflow.
+    await cdp.send("Emulation.setDeviceMetricsOverride", {
+      width: 390,
+      height: 844,
+      deviceScaleFactor: 1,
+      mobile: true,
+    });
+    await enterMarkdown();
+    const narrowMarkdown = await evaluate(
+      cdp,
+      `({
+        sourceLines: document.querySelectorAll(".doc-line.is-source").length,
+        overflow: document.documentElement.scrollWidth - window.innerWidth
+      })`,
+    );
+    await leaveMarkdown();
+    await cdp.send("Emulation.clearDeviceMetricsOverride");
+    check(
+      "Markdown mode wraps without horizontal overflow on a narrow viewport",
+      narrowMarkdown.sourceLines > 0 && narrowMarkdown.overflow <= 1,
+      JSON.stringify(narrowMarkdown),
+    );
+
+    // A collapsed formatting click must not write literal marker runs: it arms
+    // the next typed text, and leaving the mode without typing changes nothing.
+    const contentBeforePending = (await readSavedDocument()).content;
+    await enterMarkdown();
+    await pressKey("Home", "Home", 36, 2);
+    await evaluate(cdp, `document.querySelector('[data-command="bold"]').click()`);
+    const pendingPressed = await evaluate(
+      cdp,
+      `document.querySelector('[data-command="bold"]').getAttribute("aria-pressed")`,
+    );
+    await leaveMarkdown();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const contentAfterPending = (await readSavedDocument()).content;
+    check(
+      "a collapsed bold click arms the next text instead of writing markers",
+      pendingPressed === "true" &&
+        contentAfterPending === contentBeforePending &&
+        !String(contentAfterPending).includes("****"),
+      JSON.stringify({
+        pendingPressed,
+        before: contentBeforePending && contentBeforePending.slice(-60),
+        after: contentAfterPending && contentAfterPending.slice(-60),
+      }),
+    );
+
+    // The armed mark wraps the next typed text: real formatting, not literal
+    // asterisks, and it is saved.
+    await enterMarkdown();
+    await pressKey("Home", "Home", 36, 2);
+    await evaluate(cdp, `document.querySelector('[data-command="bold"]').click()`);
+    await cdp.send("Input.insertText", { text: "fresh" });
+    const armedSource = await readSource();
+    const armedSaved = await waitForSavedContent("<b>fresh</b>");
+    await leaveMarkdown();
+    check(
+      "typing after a collapsed bold click saves bold text",
+      armedSource.includes("**fresh**") &&
+        armedSaved &&
+        !String(saved.content).includes("****"),
+      JSON.stringify({
+        armed: armedSource.slice(-60),
+        content: saved && saved.content && saved.content.slice(-90),
+      }),
+    );
+
+    // A whole-document selection must not wrap heading/list/quote markers into
+    // the text: the markers stay structural and the rich view keeps them.
+    await enterMarkdown();
+    await pressKey("Home", "Home", 36, 2);
+    await pressKey("a", "KeyA", 65, 2);
+    await evaluate(cdp, `document.querySelector('[data-command="bold"]').click()`);
+    const bulkSource = await readSource();
+    const bulkLines = bulkSource.split("\n").filter((line) => line.length);
+    const corruptedLines = bulkLines.filter(
+      (line) => /^\s*\*\*[#>\-]/.test(line) || /^\s*\*\*\d+\./.test(line),
+    );
+    await leaveMarkdown();
+    const bulkRich = await evaluate(
+      cdp,
+      `({
+        headings: document.querySelectorAll(".doc-line.is-h1, .doc-line.is-h2").length,
+        literalMarkerLines: Array.from(document.querySelectorAll(".doc-line")).filter((line) => /^[#>-] /.test(line.textContent)).length
+      })`,
+    );
+    check(
+      "a whole-document bold selection keeps block markers out of the marks",
+      corruptedLines.length === 0 &&
+        bulkLines.some((line) => line.startsWith("# ")) &&
+        bulkRich.headings > 0 &&
+        bulkRich.literalMarkerLines === 0,
+      JSON.stringify({
+        corrupted: corruptedLines.slice(0, 3),
+        sample: bulkLines.slice(0, 6),
+        bulkRich,
+      }),
+    );
+
+    // Images stay real image blocks while the mode is on: the source never
+    // contains their base64 bytes, and toggling leaves the picture alone.
+    const markdownImageDocumentId = await evaluate(
+      cdp,
+      `(async () => {
+        const created = await fetch("/api/documents", { method: "POST" });
+        const document = await created.json();
+        const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        const content = '<p>Before picture.</p><img alt="dot" width="1" height="1" src="' + png + '"><p>After picture.</p>';
+        await fetch("/api/documents/" + encodeURIComponent(document.id), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: "Markdown image", content, paper_width: 0 }),
+        });
+        return document.id;
+      })()`,
+    );
+    await cdp.send("Page.navigate", { url: base + "/doc/" + markdownImageDocumentId });
+    await waitForPage(cdp, base + "/doc/" + markdownImageDocumentId, PAGE_TIMEOUT_MS);
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+    await enterMarkdown();
+    const markdownImageOn = await evaluate(
+      cdp,
+      `({
+        images: document.querySelectorAll(".doc-image").length,
+        source: Array.from(document.querySelectorAll(".doc-line.is-source")).map((line) => line.textContent).join("\\n")
+      })`,
+    );
+    await leaveMarkdown();
+    const markdownImageOff = await evaluate(
+      cdp,
+      `({
+        images: document.querySelectorAll(".doc-image").length,
+        sourceLines: document.querySelectorAll(".doc-line.is-source").length
+      })`,
+    );
+    const storedMarkdownImage = await evaluate(
+      cdp,
+      `(async () => (await fetch("/api/documents/${markdownImageDocumentId}")).json())()`,
+    );
+    check(
+      "images stay rendered image blocks in Markdown mode",
+      markdownImageOn.images === 1 &&
+        markdownImageOn.source.includes("Before picture.") &&
+        markdownImageOn.source.includes("After picture.") &&
+        !markdownImageOn.source.includes("data:image") &&
+        markdownImageOff.images === 1 &&
+        markdownImageOff.sourceLines === 0,
+      JSON.stringify({ markdownImageOn: { images: markdownImageOn.images, source: markdownImageOn.source.slice(0, 120) }, markdownImageOff }),
+    );
+    check(
+      "an untouched picture survives a Markdown toggle",
+      /<img[^>]*alt="dot"/.test(String(storedMarkdownImage.content)) &&
+        String(storedMarkdownImage.content).includes("Before picture."),
+      String(storedMarkdownImage.content).slice(0, 160),
+    );
+    await evaluate(cdp, `fetch("/api/documents/${markdownImageDocumentId}", { method: "DELETE" })`).catch(
+      () => null,
+    );
+
     await evaluate(cdp, `fetch("/api/documents/${imageDocumentId}", { method: "DELETE" })`).catch(
       () => null,
     );

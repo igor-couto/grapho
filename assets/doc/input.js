@@ -54,6 +54,8 @@ export class DocEditor {
     onSave,
     onLink,
     onPasteImages,
+    onSourceFormat,
+    onSourceWrap,
   }) {
     this.root = root;
     this.textarea = textarea;
@@ -73,6 +75,13 @@ export class DocEditor {
     this.imageResize = null;
     this.focused = false;
     this.lineHint = null;
+    // Markdown mode: blocks hold source lines, so the rich-text commands must
+    // not touch them. The page sets this flag and routes formatting through
+    // onSourceFormat instead.
+    this.sourceMode = false;
+    // Pending inline marks in Markdown mode wrap the next typed text, the way
+    // pendingMarks already does for rich text.
+    this.pendingSourceMarks = null;
     this.callbacks = {
       onChange,
       onSelection,
@@ -81,6 +90,8 @@ export class DocEditor {
       onSave,
       onLink,
       onPasteImages,
+      onSourceFormat,
+      onSourceWrap,
     };
     this.bound = false;
   }
@@ -140,6 +151,7 @@ export class DocEditor {
     this.anchor = selection ? { ...selection.anchor } : { block: 0, offset: 0 };
     this.focus = selection ? { ...selection.focus } : { block: 0, offset: 0 };
     this.pendingMarks = null;
+    this.pendingSourceMarks = null;
     this.undoStack = [];
     this.redoStack = [];
     this.typing = null;
@@ -151,6 +163,25 @@ export class DocEditor {
 
   getDocument() {
     return this.blocks;
+  }
+
+  // Markdown mode switches the editor between rich blocks and plain source
+  // lines. The page owns the mode; this only gates the rich-text editing
+  // commands that would otherwise rewrite a source line as a styled block.
+  setSourceMode(enabled) {
+    this.sourceMode = Boolean(enabled);
+    this.pendingMarks = null;
+    this.pendingSourceMarks = null;
+    this.typing = null;
+  }
+
+  setSourcePendingMarks(marks) {
+    const keys = marks ? Object.keys(marks).filter((key) => marks[key]) : [];
+    this.pendingSourceMarks = keys.length ? { ...marks } : null;
+  }
+
+  getSourcePendingMarks() {
+    return this.pendingSourceMarks ? { ...this.pendingSourceMarks } : null;
   }
 
   entryFor(index) {
@@ -233,6 +264,7 @@ export class DocEditor {
     // Moving the caret or dragging a new selection ends the current typing
     // run, so the next undo does not also swallow the text typed before it.
     this.typing = null;
+    this.pendingSourceMarks = null;
     this.anchor = { ...anchor };
     this.focus = { ...focus };
     if (!(options && options.keepMarks)) {
@@ -401,6 +433,7 @@ export class DocEditor {
     }
     if (settings.keepMarks !== true) {
       this.pendingMarks = null;
+      this.pendingSourceMarks = null;
     }
 
     this.relayout();
@@ -421,6 +454,7 @@ export class DocEditor {
     this.anchor = { ...previous.anchor };
     this.focus = { ...previous.focus };
     this.typing = null;
+    this.pendingSourceMarks = null;
     this.lineHint = null;
     this.relayout();
     this.sync();
@@ -437,6 +471,7 @@ export class DocEditor {
     this.anchor = { ...next.anchor };
     this.focus = { ...next.focus };
     this.typing = null;
+    this.pendingSourceMarks = null;
     this.lineHint = null;
     this.relayout();
     this.sync();
@@ -462,6 +497,31 @@ export class DocEditor {
   insertText(text, overrideMarks) {
     if (!text) {
       return;
+    }
+
+    // In Markdown mode a pending toolbar mark wraps the next typed text in
+    // markers and leaves the caret inside the pair, so continuing to type stays
+    // formatted. A multi-line paste ignores the pending marks: each line would
+    // need its own pair, which is not what the toolbar promised.
+    if (this.sourceMode && this.pendingSourceMarks) {
+      const pending = this.pendingSourceMarks;
+      this.pendingSourceMarks = null;
+      const raw = String(text);
+      const wrapped =
+        raw && raw.indexOf("\n") === -1 && this.isCollapsed() && this.callbacks.onSourceWrap
+          ? this.callbacks.onSourceWrap(raw, pending)
+          : null;
+      if (wrapped && wrapped.text) {
+        const blockIndex = this.focus.block;
+        this.insertText(wrapped.text);
+        if (this.focus.block === blockIndex) {
+          const caret = Math.max(0, this.focus.offset - wrapped.closingLength);
+          this.setSelection({ block: blockIndex, offset: caret }, { block: blockIndex, offset: caret }, {
+            animateCaret: false,
+          });
+        }
+        return;
+      }
     }
 
     const parts = String(text).replace(/\r\n?/g, "\n").split("\n");
@@ -787,6 +847,9 @@ export class DocEditor {
      --------------------------------------------------------------------- */
 
   toggleMark(key) {
+    if (this.sourceMode) {
+      return;
+    }
     const collapsed = this.isCollapsed();
     const current = this.activeMarks();
     const nextValue = !current[key];
@@ -817,6 +880,9 @@ export class DocEditor {
   }
 
   setBlockType(type) {
+    if (this.sourceMode) {
+      return;
+    }
     const { from, to } = this.normalized();
     let blocks = this.blocks;
 
@@ -848,6 +914,9 @@ export class DocEditor {
   }
 
   toggleList(ordered) {
+    if (this.sourceMode) {
+      return;
+    }
     const { from, to } = this.normalized();
     const indices = [];
     for (let index = from.block; index <= to.block; index += 1) {
@@ -901,6 +970,9 @@ export class DocEditor {
   }
 
   setAlignment(align) {
+    if (this.sourceMode) {
+      return;
+    }
     if (!ALIGNMENT_VALUES.has(align)) {
       return;
     }
@@ -1060,6 +1132,9 @@ export class DocEditor {
   }
 
   setLink(href) {
+    if (this.sourceMode) {
+      return;
+    }
     const { from, to } = this.normalized();
     if (from.block === to.block && from.offset === to.offset) {
       this.pendingMarks = { ...this.activeMarks(), href: href || "" };
@@ -1082,6 +1157,9 @@ export class DocEditor {
   }
 
   clearFormatting() {
+    if (this.sourceMode) {
+      return;
+    }
     if (this.isCollapsed()) {
       this.pendingMarks = {};
       this.sync();
@@ -1183,6 +1261,12 @@ export class DocEditor {
       const lower = key.toLowerCase();
       if (lower === "b" || lower === "i" || lower === "u") {
         event.preventDefault();
+        if (this.sourceMode) {
+          if (this.callbacks.onSourceFormat) {
+            this.callbacks.onSourceFormat(lower === "b" ? "b" : lower === "i" ? "i" : "u");
+          }
+          return;
+        }
         this.toggleMark(lower === "b" ? "b" : lower === "i" ? "i" : "u");
         return;
       }
@@ -1239,7 +1323,9 @@ export class DocEditor {
     switch (key) {
       case "Enter":
         event.preventDefault();
-        if (shift) {
+        // A source line is one block, so Shift+Enter cannot put a line feed
+        // inside it; it starts a new Markdown line just like Enter.
+        if (shift && !this.sourceMode) {
           this.insertHardBreak();
         } else {
           this.insertParagraph();
@@ -1303,6 +1389,10 @@ export class DocEditor {
   }
 
   insertHardBreak() {
+    if (this.sourceMode) {
+      this.insertParagraph();
+      return;
+    }
     const deletion = this.selectionDeletion();
     const blocks = deletion ? deletion.blocks : this.blocks;
     const index = deletion ? deletion.caret.block : this.focus.block;
