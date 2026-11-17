@@ -30,6 +30,9 @@ const textarea = document.getElementById("docInput");
 const column = document.getElementById("editorColumn");
 
 const tests = [];
+// Test modules loaded before this one (see test/harness.html) register their
+// tests here, so the whole suite shares one browser page and one report.
+const extraTests = window.__extraTests || [];
 const notes = [];
 const uncaughtErrors = [];
 
@@ -3357,7 +3360,7 @@ async function run() {
     return;
   }
 
-  for (const item of tests) {
+  for (const item of tests.concat(extraTests)) {
     const started = performance.now();
     try {
       await item.fn();

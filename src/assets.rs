@@ -38,6 +38,8 @@ pub fn find(path: &str) -> Option<Asset> {
         "doc/image.js" => script(include_bytes!("../assets/doc/image.js")),
         "doc/input.js" => script(include_bytes!("../assets/doc/input.js")),
         "doc/layout.js" => script(include_bytes!("../assets/doc/layout.js")),
+        "doc/markdown.js" => script(include_bytes!("../assets/doc/markdown.js")),
+        "doc/markdown-edit.js" => script(include_bytes!("../assets/doc/markdown-edit.js")),
         "doc/model.js" => script(include_bytes!("../assets/doc/model.js")),
         "doc/pdf.js" => script(include_bytes!("../assets/doc/pdf.js")),
         "doc/pdf-fonts.js" => script(include_bytes!("../assets/doc/pdf-fonts.js")),

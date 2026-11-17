@@ -28,6 +28,9 @@ export function contentTop() {
 
 const STYLES = {
   p: { size: 17.5, weight: 400, italic: false, lineHeight: 1.82, before: 0, after: 18.4, tracking: 0 },
+  // One Markdown source line per block in Markdown mode. Zero spacing lets
+  // consecutive lines read as one continuous block of text.
+  source: { size: 15, weight: 400, italic: false, lineHeight: 1.7, before: 0, after: 0, tracking: 0 },
   h1: { size: 33.25, weight: 500, italic: false, lineHeight: 1.23, before: 51.5, after: 18.3, tracking: -0.03 },
   h2: { size: 26.25, weight: 500, italic: false, lineHeight: 1.23, before: 40.7, after: 14.4, tracking: -0.03 },
   h3: { size: 21.7, weight: 500, italic: false, lineHeight: 1.23, before: 33.6, after: 11.9, tracking: -0.025 },
@@ -64,6 +67,9 @@ export function notifyFontsReady() {
 }
 
 export function styleFor(block) {
+  if (block.source === true) {
+    return STYLES.source;
+  }
   return STYLES[block.type] || STYLES.p;
 }
 
@@ -73,6 +79,11 @@ export function trackingFor(block) {
 }
 
 export function fontFor(block, marks) {
+  if (block.source === true) {
+    // Markdown source is painted in the mono face at the source size, with no
+    // bold or italic: one raw line, exactly what the DOM paints.
+    return `400 ${STYLES.source.size}px ${MONO}`;
+  }
   const style = styleFor(block);
   const bold = Boolean(marks && marks.b);
   const italic = Boolean(marks && marks.i) || style.italic;
@@ -122,6 +133,9 @@ export async function ensureFonts(sample) {
   }
   faces.push(`400 13.5px ${MONO}`);
   faces.push(`700 13.5px ${MONO}`);
+  // Source lines carry their own mono size; load it so the first paint measures
+  // with the same face the DOM uses.
+  faces.push(`400 ${STYLES.source.size}px ${MONO}`);
   await Promise.all(
     Array.from(new Set(faces)).map((font) => document.fonts.load(font, text).catch(() => null)),
   );

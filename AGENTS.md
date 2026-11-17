@@ -92,6 +92,8 @@ src/disk.rs       free space for the storage page (statvfs / GetDiskFreeSpaceEx)
 src/assets.rs     embedded HTML/CSS/JS/font lookup
 assets/           browser UI; no build step (login.html is the password gate)
 assets/doc/       the editor: model, layout, view, input, images, and PDF export
+assets/doc/markdown.js      Markdown mode: rich blocks <-> editable source
+assets/doc/markdown-edit.js Markdown mode: toolbar commands edit the source
 assets/icons/     standalone SVG sources for the icons the pages inline
 assets/pretext/   vendored text layout engine (MIT); do not edit
 assets/fonts/     bundled Inter/Literata files and their licenses
@@ -318,11 +320,41 @@ unchanged.
   way out: CSS takes it out of the flow, hides the start and the toolbar, and
   lets the paper fill the viewport. Leaving fullscreen leaves focus mode, and
   Escape leaves both.
+- Markdown mode, the next item in the document menu, turns the paper into
+  editable Markdown source without adding a second editing surface. It is a
+  view over the stored document: while it is on the editor holds one paragraph
+  block per source line (blocks carry `source: true`, one unmarked run, painted
+  by the source style in `layout.js` and `.doc-line.is-source`), with image
+  blocks unchanged between the lines. Entering converts rich blocks to source;
+  leaving, saving, and exporting parse the source back with
+  `assets/doc/markdown.js`, so the JSON on disk is the same sanitized HTML as
+  always. The dialect is line-per-block: one non-empty line is one paragraph,
+  blank lines are cosmetic, `#`..`####`, `>`, list markers and fences are
+  understood, and inline marks, links, underline and hard breaks are inline
+  Markdown. Content Markdown cannot express (alignment, legacy indent, empty
+  paragraphs) rides a documented serialized-HTML escape hatch; images stay real
+  image blocks and are never written into the source as base64 or urls, and
+  only the accepted HTML shapes are parsed, so a stored document still cannot
+  reach the network. The style menu offers all four heading levels while the
+  mode is on; the rich editor keeps its two-heading menu. Toolbar actions in
+  the mode edit the source text directly
+  through `assets/doc/markdown-edit.js`; `DocEditor.setSourceMode` gates the
+  rich commands off so they can never rewrite a source line as a styled block.
+  The mode is per-visit (off after a reload) and is never stored with the
+  document. A toggle keeps the rich blocks in a snapshot, so toggling with no
+  edits restores them exactly; a toggle clears undo history.
 - Known gaps: no native spellcheck, screen readers get the painted text but not a
   text-editing surface, printing the editor prints the painted page, image and
   paper resizing need a pointer, turning an animated GIF keeps only its first
   frame, and HTML or Markdown exports put free-positioned images back into the
-  text flow.
+  text flow. Markdown mode is a view, not a Markdown file: its lines are one
+  paragraph each (blank lines are cosmetic, not Markdown's paragraph grouping),
+  and alignment, indentation, underline, hard breaks and empty paragraphs show
+  up in the source as small HTML snippets because Markdown cannot express them.
+  Its link dialog creates http, https, and mailto links; relative and fragment
+  links already stored in a document round-trip unchanged. An inline toolbar
+  toggle does nothing (rather than nesting markers) when the caret sits inside
+  an existing emphasis or code span.
 - PDF export (`assets/doc/pdf.js`) lays the document out again at an A4 content
   width, so its line breaks can differ from the paper on screen. It writes the
   file itself and uses the standard PDF fonts (Times and Courier), so do not add
@@ -339,6 +371,12 @@ These should not be casually changed:
 - Images are embedded in that HTML as base64 data URLs. The sanitizer accepts only
   PNG, JPEG, WebP, and GIF data URLs on `img src`, never remote URLs: opening a
   document must not touch the network.
+- Markdown mode is a view over the stored HTML, never a storage format. Saving
+  and exporting go through `documentBlocks()`, which parses the source back
+  before the payload is built; source lines never contain images, and the
+  source parser only accepts the documented HTML escape shapes (no `img`, no
+  remote URLs), so a document still cannot make the browser fetch anything. The
+  mode is per-visit and is never written into a document.
 - Formatting is stored as semantic tags (`<b>`, `<i>`, `<u>`, headings, lists),
   never inline styles. Paragraph alignment and indent are the one block-level
   exception: bounded `data-align` and `data-indent` attributes on the block tag,
@@ -537,7 +575,7 @@ browser. These tests need Node 22+ and a local Chrome or Chromium, but no npm
 packages:
 
 ```bash
-node test/run.mjs          # editor geometry, typing, selections, undo, PDF
+node test/run.mjs          # editor geometry, typing, Markdown source, undo, PDF
 node test/app-check.mjs    # real server: sanitizer, save, mouse, reload
 ```
 
