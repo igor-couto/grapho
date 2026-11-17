@@ -48,7 +48,9 @@ export async function transformImage(src, action) {
   }
   context.drawImage(image, -width / 2, -height / 2, width, height);
 
-  return encodeTransformed(canvas, src);
+  // A turn swaps the picture's sides; a flip only mirrors its pixels. The block
+  // that owns it needs to know which one happened to keep its rendered size.
+  return { ...encodeTransformed(canvas, src), turned: swapped };
 }
 
 export function encodeCanvas(canvas, quality) {

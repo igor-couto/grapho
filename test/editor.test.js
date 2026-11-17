@@ -1313,6 +1313,7 @@ test("images: turning and flipping rewrite the pixels, not just the layout", asy
   assertEqual((await cornersOf(source)).tl, "red", "the test picture starts red in its top-left");
 
   const turned = await transformImage(source, "rotate-90-clockwise");
+  assertEqual(turned.turned, true, "a turn reports that it swapped the picture's sides");
   assertEqual(turned.width, 20, "a turn swaps the natural width");
   assertEqual(turned.height, 40, "a turn swaps the natural height");
   const afterTurn = await cornersOf(turned.src);
@@ -1322,6 +1323,7 @@ test("images: turning and flipping rewrite the pixels, not just the layout", asy
   assertEqual(afterTurn.bl, "white", "the old bottom-right corner is the new bottom-left");
 
   const mirrored = await transformImage(source, "flip-horizontal");
+  assertEqual(mirrored.turned, false, "a flip reports that it left the sides alone");
   assertEqual(mirrored.width, 40, "a horizontal flip keeps the width");
   assertEqual(mirrored.height, 20, "a horizontal flip keeps the height");
   const afterMirror = await cornersOf(mirrored.src);
@@ -2527,6 +2529,28 @@ test("keyboard: shift-arrows select, Escape collapses, select-all replaces in on
   assertEqual(editor.getDocument().length, 1, "one block remains");
   editor.undo();
   assertEqual(blockText(editor.getDocument()[0]), "abcdef ghij", "one undo restores everything");
+});
+
+test("keyboard: shift-left paints the backwards selection", async () => {
+  await load("<p>abcdef</p>");
+  editor.collapseTo({ block: 0, offset: 5 });
+  editor.sync();
+  key("ArrowLeft", { shiftKey: true });
+  key("ArrowLeft", { shiftKey: true });
+  const selection = editor.getSelection();
+  assertEqual(selection.anchor.offset, 5, "the anchor stays put");
+  assertEqual(selection.focus.offset, 3, "the focus moves left");
+  assertEqual(editor.selectionText(), "de", "shift-left selects the text to the left");
+
+  const rects = Array.from(root.querySelectorAll(".doc-selection")).map((element) => {
+    const box = element.getBoundingClientRect();
+    const rect = rootRect();
+    return { x: box.left - rect.left, width: box.width };
+  });
+  assertEqual(rects.length, 1, "a backwards selection is painted");
+  const expected = { x: paintedOffsetX(0, 3), width: paintedOffsetX(0, 5) - paintedOffsetX(0, 3) };
+  assertClose(rects[0].x, expected.x, 1.5, "the backwards highlight starts at the focus");
+  assertClose(rects[0].width, expected.width, 1.5, "the backwards highlight spans the selected text");
 });
 
 test("writing: trailing spaces at a wrapped line edge stay visible", async () => {

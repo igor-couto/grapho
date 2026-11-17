@@ -48,6 +48,9 @@
   --accent-wash: #f5f8ff;
   --danger: #b23b2b;
   --danger-soft: #f7e3df;
+  /* Google Green 700. The version check is the app's one positive status, so
+     it gets the semantic counterpart of the danger tint. */
+  --success: #137333;
   --paper: #fffdf9;
   --paper-ink: #292c24;
   --paper-muted: #76796c;
@@ -98,6 +101,8 @@ html[data-theme="dark"] {
   --accent-wash: #1a212e;
   --danger: #f08e7d;
   --danger-soft: #3a2421;
+  /* Google Green 300 carries the same positive status on charcoal. */
+  --success: #81c995;
   --paper: #313036;
   --paper-ink: #f2f0f4;
   --paper-muted: #a3a1a6;
@@ -549,7 +554,7 @@ html[data-theme="dark"] .button-primary:hover {
   align-items: center;
   justify-content: flex-end;
   gap: 10px;
-  margin-bottom: 2px;
+  margin-bottom: 10px;
 }
 
 .library-column-label {
@@ -581,7 +586,7 @@ html[data-theme="dark"] .button-primary:hover {
 
 .documents.is-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(206px, 1fr));
   gap: 17px;
 }
 
@@ -615,6 +620,141 @@ html[data-theme="dark"] .button-primary:hover {
 
 .document-card-link:focus-visible {
   outline-offset: -3px;
+}
+
+/* The grid card leads with a miniature of the document's opening lines. The
+   preview is plain HTML laid out at the page's own proportions, so ordinary
+   browser text wrapping gives it the shape of a page without rendering an
+   image or saving anything when a document is edited. It is built only in grid
+   view, and only for cards near the viewport (home.js); list rows keep the
+   glyph instead. */
+.document-thumb {
+  display: none;
+}
+
+.document-preview {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  padding: 6.2% 10% 0;
+  background: var(--paper);
+  color: var(--paper-ink);
+  font-family: var(--font-reading);
+  /* 17.5 px on the 640 px wide page the miniature is laid out at. */
+  font-size: 6.8px;
+  font-size: 2.7344cqw;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.82;
+  overflow-wrap: break-word;
+}
+
+.document-preview > :first-child {
+  margin-top: 0;
+}
+
+.document-preview p,
+.document-preview ul,
+.document-preview ol {
+  margin: 0 0 1.05em;
+}
+
+.document-preview h1,
+.document-preview h2,
+.document-preview h3,
+.document-preview h4 {
+  margin: 1.4em 0 0.55em;
+  font-weight: 500;
+  line-height: 1.23;
+}
+
+.document-preview h1 {
+  font-size: 1.9em;
+  letter-spacing: -0.03em;
+}
+
+.document-preview h2 {
+  font-size: 1.5em;
+  letter-spacing: -0.03em;
+}
+
+.document-preview h3 {
+  font-size: 1.24em;
+  letter-spacing: -0.025em;
+}
+
+.document-preview h4 {
+  font-size: 1.08em;
+  letter-spacing: -0.02em;
+}
+
+.document-preview ul,
+.document-preview ol {
+  padding-left: 1.5em;
+}
+
+.document-preview li {
+  margin: 0 0 0.3em;
+}
+
+.document-preview li:last-child {
+  margin-bottom: 0;
+}
+
+.document-preview blockquote {
+  margin: 1.6em 0;
+  padding-left: 0.9em;
+  border-left: 1px solid var(--line-strong);
+  color: var(--ink-soft);
+  font-size: 1.1em;
+  font-style: italic;
+  line-height: 1.72;
+}
+
+.document-preview blockquote p {
+  margin: 0;
+}
+
+.document-preview pre {
+  margin: 0 0 1.05em;
+  padding: 0.55em 0.7em;
+  border-radius: 0.35em;
+  background: var(--surface-soft);
+  font-family: var(--font-mono);
+  font-size: 0.771em;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.document-preview code {
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+}
+
+.document-preview b {
+  font-weight: 700;
+}
+
+.document-preview i {
+  font-style: italic;
+}
+
+.document-preview u {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.document-preview s {
+  text-decoration: line-through;
+}
+
+.document-preview .document-thumb-image {
+  display: block;
+  width: 62%;
+  aspect-ratio: 4 / 3;
+  margin: 1.1em auto;
+  border-radius: 0.35em;
+  background: var(--bg-deep);
 }
 
 .document-glyph {
@@ -661,25 +801,6 @@ html[data-theme="dark"] .button-primary:hover {
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
-}
-
-.document-excerpt {
-  display: -webkit-box;
-  overflow: hidden;
-  min-height: 43px;
-  margin-top: 8px;
-  color: var(--muted);
-  font-size: 12.5px;
-  line-height: 1.65;
-  overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
-.document-excerpt.is-empty {
-  color: var(--faint);
-  font-family: var(--font-reading);
-  font-style: italic;
 }
 
 .document-meta {
@@ -878,6 +999,10 @@ html[data-theme="dark"] .button-primary:hover {
   animation: shimmer 1.5s ease-in-out infinite;
 }
 
+.skeleton-thumb {
+  display: none;
+}
+
 .skeleton-icon {
   width: 36px;
   height: 36px;
@@ -890,31 +1015,116 @@ html[data-theme="dark"] .button-primary:hover {
   margin-top: 23px;
 }
 
-.skeleton-line {
-  width: 91%;
-  height: 10px;
-  margin-top: 13px;
-}
-
-.skeleton-line-short {
-  width: 67%;
-  margin-top: 8px;
-}
-
 .skeleton-meta {
   width: 39%;
   height: 9px;
   margin-top: auto;
 }
 
-/* The glyph is a list-row affordance; grid cards lead with the title. */
+/* Grid: a miniature of the page above the title, the way a document shelf
+   reads. The glyph is a list-row affordance. */
+.documents.is-grid .document-card,
+.documents.is-grid .document-card-link {
+  min-height: 0;
+}
+
+.documents.is-grid .document-card {
+  display: flex;
+  flex-direction: column;
+  border-radius: 13px;
+  background: var(--surface);
+}
+
+.documents.is-grid .document-card-link {
+  flex: 1;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+  border-radius: inherit;
+}
+
 .documents.is-grid .document-glyph,
 .documents.is-grid .skeleton-icon {
   display: none;
 }
 
+.documents.is-grid .document-thumb {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 210 / 297;
+  overflow: hidden;
+  border-bottom: 1px solid var(--line);
+  background: var(--paper);
+  container-type: inline-size;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Grapho has no page breaks, so longer documents keep going past the card.
+   Fading the far edge says "more below" without cutting a line in half. */
+.documents.is-grid .document-thumb::after {
+  position: absolute;
+  inset: auto 0 0;
+  height: 9%;
+  background: linear-gradient(to bottom, transparent, var(--paper) 88%);
+  content: "";
+}
+
+.documents.is-grid .document-copy {
+  flex: 1;
+  justify-content: center;
+  gap: 2px;
+  padding: 11px 40px 13px 14px;
+}
+
+.documents.is-grid .document-card-title {
+  padding-right: 0;
+  font-size: 14.5px;
+  letter-spacing: -0.015em;
+  line-height: 1.36;
+  -webkit-line-clamp: 2;
+}
+
+.documents.is-grid .document-meta {
+  margin-top: 1px;
+  padding-top: 0;
+  font-size: 11px;
+}
+
+.documents.is-grid .card-menu-wrap {
+  top: auto;
+  right: 7px;
+  bottom: 11px;
+}
+
+.documents.is-grid .card-menu {
+  top: auto;
+  bottom: 37px;
+}
+
+.documents.is-grid .document-card-skeleton {
+  min-height: 0;
+  padding: 0;
+}
+
+.documents.is-grid .skeleton-thumb {
+  display: block;
+  width: 100%;
+  aspect-ratio: 210 / 297;
+  border-radius: 0;
+}
+
 .documents.is-grid .skeleton-title {
-  margin-top: 0;
+  width: calc(100% - 54px);
+  height: 13px;
+  margin: 13px 40px 0 14px;
+}
+
+.documents.is-grid .skeleton-meta {
+  width: 42%;
+  height: 9px;
+  margin: 9px 40px 15px 14px;
 }
 
 /* List view: a file listing, one row per document. The same card markup as the
@@ -1006,10 +1216,6 @@ html[data-theme="dark"] .button-primary:hover {
   white-space: nowrap;
 }
 
-.documents.is-list .document-excerpt {
-  display: none;
-}
-
 .documents.is-list .document-meta {
   width: 128px;
   flex: 0 0 128px;
@@ -1046,10 +1252,6 @@ html[data-theme="dark"] .button-primary:hover {
   width: min(16rem, 45%);
   height: 12px;
   margin-top: 0;
-}
-
-.documents.is-list .skeleton-line {
-  display: none;
 }
 
 .documents.is-list .skeleton-meta {
@@ -1395,8 +1597,12 @@ html[data-theme="dark"] .toast.is-error {
 }
 
 .version-update {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   margin-top: 16px;
-  color: var(--muted);
+  color: var(--ink-soft);
   font-size: 12px;
   line-height: 1.5;
   text-align: center;
@@ -1406,8 +1612,24 @@ html[data-theme="dark"] .toast.is-error {
   display: none;
 }
 
-.version-update a {
+.version-update svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.version-update.is-current {
+  color: var(--success);
+}
+
+.version-update.is-available {
   color: var(--accent);
+}
+
+.version-update a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 /* --------------------------------------------------------------------------
@@ -2756,17 +2978,25 @@ body.is-resizing-paper * {
   }
 
   .documents.is-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     gap: 12px;
   }
 
-  .documents.is-grid .document-card,
-  .documents.is-grid .document-card-link {
-    min-height: 193px;
+  .documents.is-grid .document-copy {
+    padding: 9px 30px 11px 11px;
   }
 
-  .documents.is-grid .document-card-link {
-    padding: 19px;
+  .documents.is-grid .document-card-title {
+    font-size: 13px;
+  }
+
+  .documents.is-grid .document-meta {
+    font-size: 10.5px;
+  }
+
+  .documents.is-grid .card-menu-wrap {
+    right: 3px;
+    bottom: 7px;
   }
 
   .documents.is-list .document-card-link {

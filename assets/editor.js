@@ -1398,11 +1398,12 @@ async function transformSelectedImage(action) {
     }
 
     // A turn swaps the picture's sides. Keeping the rendered height as the new
-    // rendered width holds a resized image at the size it was scaled to.
+    // rendered width holds a resized image at the size it was scaled to. A flip
+    // only mirrors the pixels, so its stored width has to stay exactly as it was.
     const displayWidth =
-      Number.isFinite(block.displayWidth) && entry.image
+      image.turned && Number.isFinite(block.displayWidth) && entry.image
         ? Math.max(48, Math.round(entry.image.height))
-        : null;
+        : block.displayWidth;
 
     // The layout's image cache is keyed by source, so the freshly encoded
     // bitmap is unknown to it until it is told the size the block now carries.

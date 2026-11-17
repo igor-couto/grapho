@@ -259,11 +259,12 @@ jobs:
             toolchain: stable
           # riscv64 musl is the one musl target whose prebuilt standard library
           # is dynamic: `rustc --print cfg --target riscv64gc-unknown-linux-musl`
-          # reports no crt-static feature, so the binary the cross image links
-          # cannot pass the static check below. It is tier 3 as well. To add it
-          # back, set
-          # CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static"
-          # for that entry and confirm the result actually runs.
+          # reports no crt-static feature, so the target-specific flag below is
+          # what lets its binary pass the static check.
+          - name: linux-riscv64
+            target: riscv64gc-unknown-linux-musl
+            toolchain: stable
+            rustflags: "-C target-feature=+crt-static"
           # The FreeBSD cross image is Ubuntu 20.04 (glibc 2.31). Builds with
           # the current stable toolchain need a newer glibc for build scripts.
           - name: freebsd-x86_64
@@ -308,6 +309,9 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
+          # Only riscv64 sets this; cross passes CARGO_* variables through to
+          # its container, so the flag reaches the build the static check reads.
+          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
           set -euo pipefail
           cross build --locked --release --target "$TARGET" --bin grapho

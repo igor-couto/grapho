@@ -3,6 +3,8 @@
 
   var state = {
     documents: [],
+    cards: new Map(),
+    previewObserver: null,
     query: "",
     view: "list",
     sort: "modified",
@@ -84,6 +86,10 @@
     els.signOutRule = document.getElementById("signOutRule");
     els.toast = document.getElementById("toast");
 
+    state.previewObserver =
+      "IntersectionObserver" in window
+        ? new IntersectionObserver(previewSeen, { rootMargin: "600px 0px" })
+        : null;
     state.view = storedChoice(VIEW_KEY, VIEWS, "list");
     state.sort = storedChoice(SORT_KEY, SORTS, "modified");
     applyView();
@@ -300,6 +306,7 @@
     els.libraryToolbar.hidden = state.documents.length === 0;
 
     if (state.documents.length === 0) {
+      forgetCards();
       els.documents.replaceChildren();
       els.documents.hidden = true;
       showEmptyState(false);
@@ -307,6 +314,7 @@
     }
 
     if (visible.length === 0) {
+      state.cards.forEach(stopObservingCard);
       els.documents.replaceChildren();
       els.documents.hidden = true;
       showEmptyState(true);
@@ -315,12 +323,44 @@
 
     els.emptyState.hidden = true;
     els.documents.hidden = false;
+    closeCardMenus();
+
+    // Cards are kept between renders so filtering by search does not rebuild
+    // them (and their previews, which are the expensive part of a card).
+    var known = new Set(
+      state.documents.map(function (document) {
+        return document.id;
+      }),
+    );
+    state.cards.forEach(function (card, id) {
+      if (!known.has(id)) {
+        stopObservingCard(card);
+        state.cards.delete(id);
+      }
+    });
 
     var fragment = document.createDocumentFragment();
     visible.forEach(function (document) {
-      fragment.appendChild(createDocumentCard(document));
+      var card = state.cards.get(document.id);
+      if (!card) {
+        card = createDocumentCard(document);
+        state.cards.set(document.id, card);
+      } else {
+        syncCard(card, document);
+      }
+      fragment.appendChild(card.element);
     });
     els.documents.replaceChildren(fragment);
+
+    // Previews are painted only for cards near the viewport, so a large
+    // library never lays out hundreds of miniature pages at once.
+    state.cards.forEach(function (card) {
+      if (state.view === "grid" && card.element.isConnected) {
+        observePreview(card);
+      } else {
+        stopObservingCard(card);
+      }
+    });
   }
 
   function showEmptyState(isSearchEmpty) {
@@ -341,40 +381,24 @@
 
   function createDocumentCard(document) {
     var fragment = els.cardTemplate.content.cloneNode(true);
-    var card = fragment.querySelector(".document-card");
-    var link = fragment.querySelector(".document-card-link");
-    var title = fragment.querySelector(".document-card-title");
-    var excerpt = fragment.querySelector(".document-excerpt");
-    var edited = fragment.querySelector(".document-edited");
-    var menuWrap = fragment.querySelector(".card-menu-wrap");
+    var card = {
+      document: document,
+      element: fragment.querySelector(".document-card"),
+      link: fragment.querySelector(".document-card-link"),
+      preview: fragment.querySelector(".document-preview"),
+      title: fragment.querySelector(".document-card-title"),
+      edited: fragment.querySelector(".document-edited"),
+      previewFilled: false,
+    };
     var menuButton = fragment.querySelector(".card-menu-button");
     var menu = fragment.querySelector(".card-menu");
     var openItem = fragment.querySelector(".card-open");
     var renameItem = fragment.querySelector(".card-rename");
     var deleteItem = fragment.querySelector(".card-delete");
 
-    card.dataset.documentId = document.id;
-    link.href = "/doc/" + encodeURIComponent(document.id);
-    link.setAttribute("aria-label", "Open " + document.title);
-
-    title.textContent = document.title;
-
-    if (document.excerpt) {
-      excerpt.textContent = document.excerpt;
-    } else {
-      excerpt.textContent = "Empty document";
-      excerpt.classList.add("is-empty");
-    }
-
-    var updated = new Date(document.updated_at);
-    var fullDate = dateTimeFormatter.format(updated);
-    edited.textContent =
-      state.view === "grid"
-        ? "Edited " + relativeTime(document.updated_at)
-        : dateFormatter.format(updated);
-    edited.title = "Edited " + fullDate;
-
-    openItem.href = link.href;
+    card.element.dataset.documentId = document.id;
+    card.openItem = openItem;
+    syncCard(card, document);
 
     menuButton.addEventListener("click", function (event) {
       event.preventDefault();
@@ -392,14 +416,14 @@
     });
 
     renameItem.addEventListener("click", function () {
-      openRenameDialog(document);
+      openRenameDialog(card.document);
     });
 
     deleteItem.addEventListener("click", function () {
-      openDeleteDialog(document);
+      openDeleteDialog(card.document);
     });
 
-    card.addEventListener("keydown", function (event) {
+    card.element.addEventListener("keydown", function (event) {
       if (event.key === "Escape" && !menu.hidden) {
         event.stopPropagation();
         closeCardMenus();
@@ -424,7 +448,69 @@
       }
     });
 
-    return fragment;
+    return card;
+  }
+
+  function syncCard(card, document) {
+    card.document = document;
+    card.link.href = "/doc/" + encodeURIComponent(document.id);
+    card.link.setAttribute("aria-label", "Open " + document.title);
+    card.title.textContent = document.title;
+    card.openItem.href = card.link.href;
+
+    var updated = new Date(document.updated_at);
+    card.edited.textContent =
+      state.view === "grid"
+        ? "Edited " + relativeTime(document.updated_at)
+        : dateFormatter.format(updated);
+    card.edited.title = "Edited " + dateTimeFormatter.format(updated);
+  }
+
+  function previewSeen(entries) {
+    entries.forEach(function (entry) {
+      if (!entry.isIntersecting) {
+        return;
+      }
+      state.previewObserver.unobserve(entry.target);
+      var card = state.cards.get(entry.target.dataset.documentId);
+      if (card) {
+        fillPreview(card);
+      }
+    });
+  }
+
+  function observePreview(card) {
+    if (card.previewFilled || state.view !== "grid" || !card.element.isConnected) {
+      return;
+    }
+    if (state.previewObserver) {
+      state.previewObserver.observe(card.element);
+    } else {
+      fillPreview(card);
+    }
+  }
+
+  function stopObservingCard(card) {
+    if (state.previewObserver) {
+      state.previewObserver.unobserve(card.element);
+    }
+  }
+
+  function fillPreview(card) {
+    if (card.previewFilled) {
+      return;
+    }
+    card.previewFilled = true;
+    // The server builds this markup from the sanitized document: block tags and
+    // inline marks only, no attributes, links, or images. It is already safe to
+    // paint, and keeping it out of the DOM until the card is near the viewport
+    // is what keeps a large library cheap to open.
+    card.preview.innerHTML = card.document.preview || "";
+  }
+
+  function forgetCards() {
+    state.cards.forEach(stopObservingCard);
+    state.cards.clear();
   }
 
   function closeCardMenus() {
@@ -570,6 +656,7 @@
             id: document.id,
             title: updated.title,
             excerpt: document.excerpt,
+            preview: document.preview,
             word_count: document.word_count,
             created_at: document.created_at,
             updated_at: updated.updated_at,

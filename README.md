@@ -4,12 +4,13 @@ Grapho is a small writing app that runs in the browser. It is one Rust binary wi
 no database, account system, or frontend build step. Documents are plain JSON
 files on disk.
 
-The home screen lists and searches documents. The editor has the formatting I use
-most, holds images that can be dragged into the text so the words flow around
-them and resized from their corners, saves as you type, and can export to HTML,
-Markdown, PDF, or plain text. Light and dark themes are included. Focus mode,
-from the editor's menu, hides the toolbar and takes the page fullscreen so only
-the writing and the menu button remain.
+The home screen lists and searches documents, showing a preview of each one in
+grid view. The editor has the formatting I use most, holds images that can be
+dragged into the text so the words flow around them and resized from their
+corners, saves as you type, and can export to HTML, Markdown, PDF, or plain
+text. Light and dark themes are included. Focus mode, from the editor's menu,
+hides the toolbar and takes the page fullscreen so only the writing and the menu
+button remain.
 
 ## Installing
 
@@ -225,11 +226,11 @@ never in the data folder. Removing the connector leaves the Drive files alone.
 ## Releases
 
 A pushed tag such as `v0.1.0` runs the release workflow and publishes Linux
-(x86_64, aarch64, and armv7), FreeBSD x86_64, macOS universal, and
+(x86_64, aarch64, armv7, and riscv64), FreeBSD x86_64, macOS universal, and
 Windows (x64 and arm64) builds. Linux x86_64 and aarch64 also get `.deb` and
 `.rpm` packages. The same tag updates the apt repository and publishes the
-container image. The tag must match `version` in `Cargo.toml`. The armv7 and
-FreeBSD builds are cross-compiled and not run in CI.
+container image. The tag must match `version` in `Cargo.toml`. The armv7,
+riscv64, and FreeBSD builds are cross-compiled and not run in CI.
 
 ```bash
 git tag -a v0.1.0 -m "Grapho 0.1.0"

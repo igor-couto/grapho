@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">
+  <!-- Up to date. Inlined in assets/version.js; the fill follows the positive
+       status colour there, so the source keeps currentColor. -->
+  <g transform="translate(-3996 -50)">
+    <path fill="currentColor" fill-rule="evenodd" d="M4005 66A7 7 0 1 0 4005 52A7 7 0 0 0 4005 66M4000.25 59.5L4001.307 58.443L4003.5 60.628L4008.693 55.435L4009.75 56.5L4003.5 62.75Z"/>
+  </g>
+</svg>

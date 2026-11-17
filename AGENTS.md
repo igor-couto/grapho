@@ -177,6 +177,22 @@ response keeps `connect-src 'self'`. The request happens once, when the page is
 opened, and never in the background: if it fails, is rate limited, or the
 browser has no network, the page says so and nothing else changes.
 
+## Library
+
+The home page shows documents as rows or as grid cards. A grid card leads with a
+miniature of the document's beginning. The miniature is not an image and is not
+stored: `store.rs`'s `preview_html` derives it from the stored HTML when the
+library is listed, so editing never renders or saves a thumbnail, and every old
+document has one before it is ever opened. It keeps the block tags and inline
+marks, drops attributes, links, and images (an image becomes a neutral block, so
+a card never carries megabytes of base64), and stops after about one page of
+text. The card uses the editor's proportions and is sized with container units,
+so ordinary browser text wrapping paints the miniature; a soft fade at the
+bottom stands in for the page break Grapho does not have. `home.js` fills a
+card's preview only when the card comes near the viewport and keeps card
+elements between renders, so search filtering never rebuilds them. List rows
+show no preview. The summary still carries the excerpt for search matching.
+
 ## Editor architecture
 
 The editor does not use `contenteditable`. `assets/doc/input.js` owns the block
@@ -217,10 +233,12 @@ unchanged.
   buttons in the image menu rewrite the embedded data URL through
   `assets/doc/image.js` and hand the block its new natural `width`/`height`. A
   turn swaps the block's stored `data-width` for the height it was rendered at,
-  so the picture keeps the scale it was resized to. Every other reader of the
-  document (view, layout, PDF, HTML export) therefore needs no transform of its
-  own, and the menu stays open because one turn is rarely the whole gesture.
-  Undo restores the previous data URL.
+  so the picture keeps the scale it was resized to; `transformImage` reports
+  `turned` so the caller knows when to do that. A flip keeps the natural size
+  and the stored `data-width` untouched, so a mirrored picture never resizes.
+  Every other reader of the document (view, layout, PDF, HTML export) therefore
+  needs no transform of its own, and the menu stays open because one turn is
+  rarely the whole gesture. Undo restores the previous data URL.
 - A corner radius is the opposite: a bounded `data-radius` on the `<img>`, not
   pixels. Images are square by default (`IMAGE_RADIUS_DEFAULT`), so only a
   different value is stored; the menu field applies it on `input` with coalesced
@@ -389,16 +407,18 @@ adds `.deb`/`.rpm` packages, and writes `SHA256SUMS.txt`. After publishing it
 also refreshes the apt repository and the container image through the reusable
 workflows in `.github/workflows/`.
 
-The `cross` job adds armv7 Linux and x86_64 FreeBSD builds using a pinned build
-of cross-rs. Those cross-compiled binaries are not executed in CI. FreeBSD uses
-Rust 1.89 because its cross image is Ubuntu 20.04 with glibc 2.31, which cannot
-run build scripts from newer toolchains.
+The `cross` job adds armv7 Linux, riscv64 Linux, and x86_64 FreeBSD builds using
+a pinned build of cross-rs. Those cross-compiled binaries are not executed in CI.
+FreeBSD uses Rust 1.89 because its cross image is Ubuntu 20.04 with glibc 2.31,
+which cannot run build scripts from newer toolchains.
 
-riscv64 was dropped from the release matrix: `riscv64gc-unknown-linux-musl` is
-the only musl target whose standard library is built for dynamic linking
-(`rustc --print cfg` reports no `crt-static` feature for it), so its binary
-fails the static check the other musl builds pass. Restoring it means forcing
-`-C target-feature=+crt-static` for that target and verifying the result runs.
+riscv64 needs `-C target-feature=+crt-static`: `riscv64gc-unknown-linux-musl` is
+the only musl target whose prebuilt standard library is built for dynamic linking
+(`rustc --print cfg` reports no `crt-static` feature for it), so without the flag
+its binary fails the static check the other musl builds pass. `release.yml` sets
+`CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS` for that one matrix entry;
+a build of it was run under qemu-riscv64 to confirm it starts and serves
+`/api/health`.
 
 Signing uses repository secrets:
 

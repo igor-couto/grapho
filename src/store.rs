@@ -16,6 +16,14 @@ use uuid::Uuid;
 const SCHEMA_VERSION: u32 = 1;
 const MAX_TITLE_CHARS: usize = 200;
 const EXCERPT_CHARS: usize = 220;
+/// How much text the home page's grid card miniature holds. The card renders
+/// this as roughly one page at thumbnail size and clips anything past it, so
+/// collecting more would only make the library listing heavier.
+const PREVIEW_TEXT_CHARS: usize = 1800;
+/// A preview never reads past this point in a document. A document that opens
+/// with a large embedded image would otherwise make every library listing read
+/// the whole image before reaching the first paragraph.
+const PREVIEW_SCAN_BYTES: usize = 64 * 1024;
 /// A document's paper width is a display preference, kept in the document file
 /// so it survives reloads. These bounds keep a hand-edited file sane.
 const MIN_PAPER_WIDTH: u32 = 320;
@@ -45,6 +53,7 @@ pub struct DocumentSummary {
     pub id: Uuid,
     pub title: String,
     pub excerpt: String,
+    pub preview: String,
     pub word_count: usize,
     pub created_at: u64,
     pub updated_at: u64,
@@ -677,10 +686,18 @@ fn is_line_break_tag(tag: &str) -> bool {
 
 fn summary_for(document: &Document) -> DocumentSummary {
     let text = html_to_text(&document.content);
+    let mut preview = preview_html(&document.content);
+    if preview.is_empty() && !text.is_empty() {
+        // The markup started with something larger than the preview's scan
+        // window (a document that opens with a big embedded image, say). The
+        // text is already here, so the card still shows the writing.
+        preview = text_preview(&text);
+    }
     DocumentSummary {
         id: document.id,
         title: document.title.clone(),
         excerpt: make_excerpt(&text),
+        preview,
         word_count: text.split_whitespace().count(),
         created_at: document.created_at,
         updated_at: document.updated_at,
@@ -700,6 +717,147 @@ fn make_excerpt(text: &str) -> String {
         .unwrap_or(candidate.len());
 
     format!("{}…", candidate[..cut].trim_end())
+}
+
+/// The fallback miniature for a document whose markup the preview scan could
+/// not get through: the plain text, escaped into one paragraph.
+fn text_preview(text: &str) -> String {
+    let end = text
+        .char_indices()
+        .nth(PREVIEW_TEXT_CHARS)
+        .map_or(text.len(), |(offset, _)| offset);
+    format!("<p>{}</p>", html_escape::encode_text(&text[..end]))
+}
+
+/// A miniature of a document's beginning, for the home page's grid cards.
+///
+/// The preview is derived from the stored HTML on demand rather than rendered
+/// and saved like an image: it is cheap because it stops after one page of
+/// text, it is never stale, and every document has one before it is opened.
+/// Block tags and inline marks survive so the miniature reads like a page;
+/// attributes, links, and images do not (an image becomes a neutral block, so
+/// a picture never pulls megabytes of base64 into a library listing).
+fn preview_html(html: &str) -> String {
+    let mut end = html.len().min(PREVIEW_SCAN_BYTES);
+    while end < html.len() && !html.is_char_boundary(end) {
+        end -= 1;
+    }
+    let html = &html[..end];
+
+    let mut output = String::with_capacity(2048);
+    let mut open: Vec<&'static str> = Vec::new();
+    let mut remaining = PREVIEW_TEXT_CHARS;
+    let mut index = 0;
+
+    while index < html.len() && remaining > 0 {
+        let rest = &html[index..];
+
+        if let Some(tag) = rest.strip_prefix('<') {
+            let Some(length) = tag.find('>') else {
+                break;
+            };
+            index += length + 2;
+            let body = tag[..length].trim();
+
+            if let Some(closing) = body.strip_prefix('/') {
+                close_preview_tag(&mut output, &mut open, closing.trim_start());
+            } else {
+                match preview_tag_name(body) {
+                    "br" => output.push_str("<br>"),
+                    "img" => output.push_str("<span class=\"document-thumb-image\"></span>"),
+                    name => {
+                        if let Some(tag) = preview_tag(name) {
+                            output.push('<');
+                            output.push_str(tag);
+                            output.push('>');
+                            open.push(tag);
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        let text_end = rest.find('<').map_or(html.len(), |stop| index + stop);
+        let decoded = html_escape::decode_html_entities(&html[index..text_end]);
+        index = text_end;
+
+        let mut taken = 0;
+        let mut cut = decoded.len();
+        for (offset, _) in decoded.char_indices() {
+            if taken == remaining {
+                cut = offset;
+                break;
+            }
+            taken += 1;
+        }
+
+        output.push_str(&html_escape::encode_text(&decoded[..cut]));
+        remaining -= taken;
+    }
+
+    while let Some(tag) = open.pop() {
+        output.push_str("</");
+        output.push_str(tag);
+        output.push('>');
+    }
+
+    output
+}
+
+/// The tags a preview keeps, normalised. Inline versus block matters for the
+/// miniature: dropping a `<div>` or an `<a>` leaves its children in place.
+fn preview_tag(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "p" | "div" => "p",
+        "h1" => "h1",
+        "h2" => "h2",
+        "h3" => "h3",
+        "h4" => "h4",
+        "ul" => "ul",
+        "ol" => "ol",
+        "li" => "li",
+        "blockquote" => "blockquote",
+        "pre" => "pre",
+        "b" | "strong" => "b",
+        "i" | "em" => "i",
+        "u" => "u",
+        "s" | "strike" | "del" => "s",
+        "code" => "code",
+        _ => return None,
+    })
+}
+
+/// The element name at the start of a tag body: `h2 class="x"` is `h2`. The two
+/// void tags the preview rewrites are matched case-insensitively; the rest are
+/// already lowercased by the sanitiser and by the editor's own serializer.
+fn preview_tag_name(body: &str) -> &str {
+    let name = body
+        .split(|character: char| character.is_whitespace() || character == '/')
+        .next()
+        .unwrap_or_default();
+    if name.eq_ignore_ascii_case("br") {
+        "br"
+    } else if name.eq_ignore_ascii_case("img") {
+        "img"
+    } else {
+        name
+    }
+}
+
+fn close_preview_tag(output: &mut String, open: &mut Vec<&'static str>, name: &str) {
+    let Some(tag) = preview_tag(name) else {
+        return;
+    };
+    let Some(position) = open.iter().rposition(|open_tag| *open_tag == tag) else {
+        return;
+    };
+    while open.len() > position {
+        let open_tag = open.pop().expect("the position was found in the stack");
+        output.push_str("</");
+        output.push_str(open_tag);
+        output.push('>');
+    }
 }
 
 pub(crate) async fn persist_document(
@@ -928,6 +1086,82 @@ mod tests {
         assert!(!excerpt.contains("  "));
     }
 
+    #[test]
+    fn a_preview_keeps_the_shape_of_a_page() {
+        let html = concat!(
+            "<h1>Field notes</h1>",
+            "<p data-align=\"center\">One <b>bold</b> <i>italic</i> <u>under</u> ",
+            "<s>struck</s> <code>inline</code> <a href=\"https://example.com\">linked</a></p>",
+            "<ul><li>first</li><li>second</li></ul>",
+            "<blockquote><p>A quote.</p></blockquote>",
+            "<pre>let x = 1;\nlet y = 2;</pre>",
+            "<p>After a <br>break &amp; an entity.</p>",
+        );
+
+        assert_eq!(
+            preview_html(html),
+            concat!(
+                "<h1>Field notes</h1>",
+                "<p>One <b>bold</b> <i>italic</i> <u>under</u> ",
+                "<s>struck</s> <code>inline</code> linked</p>",
+                "<ul><li>first</li><li>second</li></ul>",
+                "<blockquote><p>A quote.</p></blockquote>",
+                "<pre>let x = 1;\nlet y = 2;</pre>",
+                "<p>After a <br>break &amp; an entity.</p>",
+            )
+        );
+    }
+
+    #[test]
+    fn a_preview_replaces_images_and_never_carries_their_bytes() {
+        let bytes = "A".repeat(4096);
+        let html = format!("<p>Before</p><img src=\"data:image/png;base64,{bytes}\"><p>After</p>");
+
+        assert_eq!(
+            preview_html(&html),
+            "<p>Before</p><span class=\"document-thumb-image\"></span><p>After</p>"
+        );
+    }
+
+    #[test]
+    fn a_preview_stops_after_one_page_of_text_with_closed_tags() {
+        let html = format!(
+            "<h2>Title</h2><p>{}</p><p>After the first page</p>",
+            "word ".repeat(1000)
+        );
+        let preview = preview_html(&html);
+
+        assert!(preview.starts_with("<h2>Title</h2><p>"));
+        assert!(preview.ends_with("</p>"), "open tags are closed: {preview}");
+        assert!(
+            !preview.contains("After the first page"),
+            "the preview stops at its text budget"
+        );
+        assert!(
+            preview.len() < PREVIEW_TEXT_CHARS + 128,
+            "the preview stays near its budget: {} bytes",
+            preview.len()
+        );
+    }
+
+    #[test]
+    fn a_preview_does_not_read_a_document_far_past_its_scan_limit() {
+        let huge = "A".repeat(PREVIEW_SCAN_BYTES * 2);
+        let preview = preview_html(&format!("<img src=\"data:image/png;base64,{huge}\">"));
+
+        assert_eq!(preview, "");
+    }
+
+    #[test]
+    fn a_preview_escapes_text_and_closes_unclosed_tags() {
+        assert_eq!(
+            preview_html("<p>5 &lt; 6 &amp; 7 &gt; 6</p>"),
+            "<p>5 &lt; 6 &amp; 7 &gt; 6</p>"
+        );
+        assert_eq!(preview_html("<p>open <b>bold"), "<p>open <b>bold</b></p>");
+        assert_eq!(preview_html(""), "");
+    }
+
     #[tokio::test]
     async fn documents_round_trip_through_disk() {
         let directory = std::env::temp_dir().join(format!("grapho-test-{}", Uuid::new_v4()));
@@ -955,6 +1189,7 @@ mod tests {
         let summary = store.list().await.remove(0);
         assert_eq!(summary.word_count, 2);
         assert_eq!(summary.excerpt, "Hello there");
+        assert_eq!(summary.preview, "<p>Hello <b>there</b></p>");
 
         drop(store);
         let reloaded = Store::load(directory.clone()).await.expect("store reloads");
@@ -978,6 +1213,33 @@ mod tests {
 
     fn temp_directory(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("grapho-{label}-{}", Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn a_summary_falls_back_to_text_when_the_markup_starts_too_large() {
+        let directory = temp_directory("huge-image-preview");
+        let store = Store::load(directory.clone()).await.expect("store loads");
+        let document = store.create().await.expect("document is created");
+
+        let image = format!(
+            "<img src=\"data:image/png;base64,{}\">",
+            "A".repeat(PREVIEW_SCAN_BYTES * 2)
+        );
+        store
+            .update(
+                document.id,
+                None,
+                Some(format!("{image}<p>After the picture</p>")),
+                None,
+            )
+            .await
+            .expect("update succeeds");
+
+        let summary = store.list().await.remove(0);
+        assert_eq!(summary.preview, "<p>After the picture</p>");
+
+        drop(store);
+        let _ = fs::remove_dir_all(directory).await;
     }
 
     #[tokio::test]

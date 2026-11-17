@@ -222,8 +222,13 @@ export class EditorView {
     const { anchor, focus } = selection;
     const startBlock = Math.min(anchor.block, focus.block);
     const endBlock = Math.max(anchor.block, focus.block);
-    const from = anchor.block <= focus.block ? anchor : focus;
-    const to = anchor.block <= focus.block ? focus : anchor;
+    // A backwards selection can end in the block it started in, so the offset
+    // decides the order whenever both ends share a block.
+    const startsFirst =
+      anchor.block < focus.block ||
+      (anchor.block === focus.block && anchor.offset <= focus.offset);
+    const from = startsFirst ? anchor : focus;
+    const to = startsFirst ? focus : anchor;
 
     for (let index = startBlock; index <= endBlock; index += 1) {
       const entry = this.layout.blocks[index];

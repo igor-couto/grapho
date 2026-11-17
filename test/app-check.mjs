@@ -922,6 +922,32 @@ async function main() {
       JSON.stringify(centred),
     );
 
+    // A flip mirrors the pixels; it is not a turn, so the picture has to keep the
+    // width it was painted at and the stored data-width must not move.
+    const flipState = async (action) => {
+      const before = await storedImageTag();
+      const point = await evaluate(
+        cdp,
+        `(() => {
+          const box = document.querySelector('[data-image-transform="${action}"]').getBoundingClientRect();
+          return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+        })()`,
+      );
+      await clickAt(point);
+      const tag = await waitForImageTag((candidate) => candidate !== before);
+      return { tag, box: await placementState() };
+    };
+
+    for (const action of ["flip-horizontal", "flip-vertical"]) {
+      const flipped = await flipState(action);
+      check(
+        `a ${action} keeps the picture at the width it had`,
+        Math.round(flipped.box.width) === wrappedWidth &&
+          flipped.tag.includes(`data-width="${wrappedWidth}"`),
+        JSON.stringify(flipped),
+      );
+    }
+
     await clickPlacement("right");
     const rightTag = await waitForImageTag((tag) => /class="wrap-right"/.test(tag));
     check("the right placement wraps the picture on the right", /class="wrap-right"/.test(rightTag), rightTag);
