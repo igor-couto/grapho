@@ -1,6 +1,7 @@
 // The standard page menu: the theme choice and the pages that manage this
-// Grapho install. Every page except the editor gets this menu; the editor has
-// its own with document actions.
+// Grapho install. The library, storage, version, and not-found pages get this
+// menu; the editor has its own with document actions, and the password gate
+// has no menu at all.
 (function () {
   "use strict";
 
