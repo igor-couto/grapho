@@ -1,10 +1,11 @@
 use std::fmt;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
@@ -986,6 +987,7 @@ struct LoginRequest {
 /// Exchange the password for a session cookie.
 async fn open_session(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> Response {
@@ -993,30 +995,28 @@ async fn open_session(
         return ApiError::bad_request("Grapho has no password set.").into_response();
     };
 
-    if let Some(retry_after) = auth.retry_after() {
+    // The address of the connection itself, never a forwarded header: a client
+    // cannot pick a new address per guess, so its attempts share one pause.
+    let peer = peer.ip();
+
+    // `check_password` checks the pause again under the verification permit,
+    // where a burst of attempts cannot race it. This first check only saves an
+    // already-paused client from queueing behind those attempts.
+    if let Some(retry_after) = auth.retry_after(peer) {
         return too_many_attempts(retry_after);
     }
 
-    // An empty or oversized password cannot be right, and hashing it would only
-    // waste the one verification slot.
-    if payload.password.is_empty() || payload.password.len() > auth::MAX_PASSWORD_BYTES {
-        auth.record_failure();
-        return ApiError::unauthorized("That password is not correct.").into_response();
-    }
-
-    match auth.check_password(payload.password).await {
-        Ok(true) => {}
-        Ok(false) => {
-            auth.record_failure();
-            return ApiError::unauthorized("That password is not correct.").into_response();
+    match auth.check_password(payload.password, peer).await {
+        Ok(auth::Verdict::Accepted) => {}
+        Ok(auth::Verdict::Rejected) => {
+            return ApiError::unauthorized("That password is not correct.").into_response()
         }
+        Ok(auth::Verdict::Paused(retry_after)) => return too_many_attempts(retry_after),
         Err(error) => {
             eprintln!("login error: {error}");
             return ApiError::server_error("Grapho couldn't check that password.").into_response();
         }
     }
-
-    auth.record_success();
 
     // A browser that logs in again gets a fresh token, and the old one goes away.
     if let Some(previous) = auth::session_token(&headers) {
@@ -1335,7 +1335,7 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
     use argon2::password_hash::PasswordHasher;
-    use argon2::Argon2;
+    use argon2::{Algorithm, Argon2, Params, Version};
     use std::path::PathBuf;
     use tower::ServiceExt;
 
@@ -1343,7 +1343,10 @@ mod tests {
     use crate::store::Store;
 
     fn test_hash(password: &str) -> String {
-        Argon2::default()
+        // Cheap parameters: these tests exercise the gate's bookkeeping, not
+        // Argon2's cost, and the real defaults are covered in `auth`'s tests.
+        let params = Params::new(8, 1, 1, None).expect("cheap argon2 parameters");
+        Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
             .hash_password(password.as_bytes())
             .expect("test password hashes")
             .to_string()
@@ -1393,8 +1396,18 @@ mod tests {
             .expect("valid test request")
     }
 
+    /// The address the test requests claim to come from. Login is throttled per
+    /// address, so every request to `/api/session` carries one.
+    fn test_peer() -> SocketAddr {
+        SocketAddr::from(([203, 0, 113, 9], 51515))
+    }
+
     fn login_request(password: &str) -> Request {
-        Request::builder()
+        login_request_from(password, test_peer())
+    }
+
+    fn login_request_from(password: &str, peer: SocketAddr) -> Request {
+        let mut request = Request::builder()
             .method("POST")
             .uri("/api/session")
             .header(header::HOST, "127.0.0.1:25265")
@@ -1402,7 +1415,9 @@ mod tests {
             .body(Body::from(
                 serde_json::json!({ "password": password }).to_string(),
             ))
-            .expect("valid test request")
+            .expect("valid test request");
+        request.extensions_mut().insert(ConnectInfo(peer));
+        request
     }
 
     fn logout_request(cookie: &str) -> Request {
@@ -1623,6 +1638,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_wrong_passwords_pause_logins() {
+        let (app, directory) = test_app(Some("a password long enough")).await;
+
+        for attempt in 0..auth::MAX_FAILED_LOGINS {
+            let response = app
+                .clone()
+                .oneshot(login_request("not the password"))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "attempt {attempt}"
+            );
+        }
+
+        let response = app
+            .clone()
+            .oneshot(login_request("not the password"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after: u64 = response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .expect("a Retry-After header")
+            .to_str()
+            .unwrap()
+            .parse()
+            .expect("whole seconds");
+        assert!((1..=auth::LOGIN_WINDOW.as_secs()).contains(&retry_after));
+
+        // The pause covers the right password too: nothing is verified while it
+        // lasts, so no session starts.
+        let response = app
+            .oneshot(login_request("a password long enough"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+
+        let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+
+    #[tokio::test]
+    async fn one_address_cannot_pause_another() {
+        let (app, directory) = test_app(Some("a password long enough")).await;
+        let attacker = SocketAddr::from(([203, 0, 113, 9], 40000));
+        let owner = SocketAddr::from(([203, 0, 113, 10], 40001));
+
+        for _ in 0..auth::MAX_FAILED_LOGINS {
+            let response = app
+                .clone()
+                .oneshot(login_request_from("not the password", attacker))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        // Guessing pauses only the address it came from, so the owner signing in
+        // from somewhere else still works.
+        let response = app
+            .clone()
+            .oneshot(login_request_from("not the password", attacker))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let response = app
+            .clone()
+            .oneshot(login_request_from("a password long enough", owner))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(response.headers().get(header::SET_COOKIE).is_some());
+
+        // The pause still covers the attacker's own correct password.
+        let response = app
+            .oneshot(login_request_from("a password long enough", attacker))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+
+        let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+
+    #[tokio::test]
     async fn a_cross_site_login_attempt_is_refused() {
         let (app, directory) = test_app(Some("a password long enough")).await;
 
@@ -1642,7 +1745,7 @@ mod tests {
     async fn a_login_body_cannot_be_large() {
         let (app, directory) = test_app(Some("a password long enough")).await;
 
-        let request = Request::builder()
+        let mut request = Request::builder()
             .method("POST")
             .uri("/api/session")
             .header(header::HOST, "127.0.0.1:25265")
@@ -1652,6 +1755,7 @@ mod tests {
                 "a".repeat(LOGIN_BODY_LIMIT_BYTES * 2)
             )))
             .expect("valid test request");
+        request.extensions_mut().insert(ConnectInfo(test_peer()));
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);

@@ -134,8 +134,13 @@ restart.
 
 Sessions are random tokens kept in memory and sent in an `HttpOnly`,
 `SameSite=Strict` cookie. A session lasts 30 days from its last use, and
-restarting Grapho signs everyone out. Ten wrong passwords in fifteen minutes pause
-logins until that window ends (restarting clears the pause).
+restarting Grapho signs everyone out. Ten wrong passwords from one address in
+fifteen minutes pause that address until the window ends, so a client guessing
+cannot lock the owner out (restarting clears the pause).
+
+The address is the one the connection came from, never `X-Forwarded-For`, which a
+client can write. Behind a reverse proxy every request arrives from the proxy, so
+all clients there share one pause.
 
 There is still no TLS. Do not expose Grapho directly: terminate HTTPS in front of
 it (Caddy, nginx, Traefik) or reach it through a VPN such as Tailscale or
@@ -275,7 +280,8 @@ and working notes.
 
 Single user. No sharing, real-time collaboration, comments, tables, or version
 history. The optional password signs one person in: there are no accounts, no TLS,
-and failed logins pause globally rather than per address. PDF downloads use A4
+and failed logins pause per address, so behind a reverse proxy they share the
+proxy's address and one pause. PDF downloads use A4
 pages and PDF's standard fonts; characters outside WinAnsi are replaced with
 question marks. Backups mirror to a folder, an SSH server, or Google Drive; there
 are no native OneDrive or Dropbox connectors, so use their synced folders. SSH

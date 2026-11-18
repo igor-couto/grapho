@@ -409,9 +409,20 @@ These should not be casually changed:
   `SameSite=Strict` cookie is not sent on a redirect from accounts.google.com;
   its single-use `state` value is the credential.
 - Argon2 runs on a blocking thread behind a single permit, failed logins are
-  throttled, and authenticated responses are `no-store` with `Vary: Cookie`. Keep
-  all three when touching the login code. Sessions and the failure counter are
-  in memory on purpose: a restart signs everyone out and clears a login pause.
+  throttled per client address, and authenticated responses are `no-store` with
+  `Vary: Cookie`. Keep all three when touching the login code. The pause is
+  checked, the password verified, and the failure recorded under that one permit,
+  so a burst of concurrent attempts cannot outrun the window; an earlier check may
+  answer a paused client sooner, but must never let anything be verified. The
+  address is the connection's peer, never `X-Forwarded-For`, which a client can
+  write with a new value on every guess; the router is therefore served with
+  connect info. Pauses are per address so one client cannot lock out the owner,
+  which means a distributed attacker, or one presenting many IPv6 addresses, is
+  bounded per address rather than overall: that is why the 12-character minimum
+  stays. The address table is capped, so a
+  server reachable from many addresses cannot grow it without bound. Sessions and
+  the failure counter are in memory on purpose: a restart signs everyone out and
+  clears a login pause.
 - Login redirects carry the destination in `next` as one encoded query value. The
   browser only follows it when it is a path on this server (`/login.js`
   `nextPath()`); do not turn it into an open redirect.

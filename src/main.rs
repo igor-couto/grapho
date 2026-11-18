@@ -131,9 +131,14 @@ async fn run() -> Result<(), BoxError> {
 
     print_banner(address, &config.data_dir, has_password);
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // The peer address is what the login throttle counts failures per, so the
+    // router is served with connect info rather than bare.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     // A copy queued by the last save should normally make it out too, but a
     // backup folder that has gone away must not hold up the exit.

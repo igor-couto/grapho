@@ -11,6 +11,7 @@ use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, IsTerminal};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
@@ -36,11 +37,19 @@ const MAX_SESSIONS: usize = 32;
 pub const MAX_PASSWORD_BYTES: usize = 1024;
 
 /// The window in which repeated failures are counted.
-const LOGIN_WINDOW: Duration = Duration::from_secs(15 * 60);
+pub(crate) const LOGIN_WINDOW: Duration = Duration::from_secs(15 * 60);
 
-/// Failed logins allowed per window before logins pause. Argon2 already makes
-/// guessing expensive; this keeps a determined client from tying up the process.
-const MAX_FAILED_LOGINS: u32 = 10;
+/// Failed logins allowed from one address per window before that address
+/// pauses. Argon2 already makes guessing expensive; this keeps a determined
+/// client from tying up the process. The count is read and raised under the
+/// verification permit, so a burst of concurrent attempts cannot spend more
+/// than this many checks on one window.
+pub(crate) const MAX_FAILED_LOGINS: u32 = 10;
+
+/// Addresses whose failures are remembered at once. One person has one or two;
+/// the cap keeps a server reachable from many addresses from growing the table
+/// without bound.
+const MAX_TRACKED_ADDRESSES: usize = 1024;
 
 const TOKEN_BYTES: usize = 32;
 const MIN_PASSWORD_CHARS: usize = 12;
@@ -62,8 +71,20 @@ pub struct Auth {
     sessions: RwLock<HashMap<String, Instant>>,
     throttle: Mutex<Throttle>,
     /// Argon2 is deliberately slow and memory hungry. One check at a time keeps a
-    /// burst of login attempts from multiplying that cost.
+    /// burst of login attempts from multiplying that cost, and the throttle's
+    /// count is kept under the same permit so a burst cannot outrun it either.
     verify_slot: Arc<Semaphore>,
+}
+
+/// What one password check decided.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// The password matched, so the caller may start a session.
+    Accepted,
+    /// The password did not match. The failure is already counted.
+    Rejected,
+    /// Too many failures recently, so nothing was checked. The client waits.
+    Paused(Duration),
 }
 
 impl Auth {
@@ -110,10 +131,17 @@ impl Auth {
 
     /// Verify a password without blocking the async runtime.
     ///
-    /// The blocking task owns the single verification permit until it finishes,
-    /// so concurrent login attempts queue instead of each allocating Argon2's
-    /// memory.
-    pub async fn check_password(self: &Arc<Self>, password: String) -> Result<bool, String> {
+    /// The permit is held for the whole decision: whether this address is
+    /// paused, whether the password matches, and what that does to its failure
+    /// count. Re-checking the pause under the permit is what keeps the throttle
+    /// from being raced. A first check before the permit (in `api.rs`) only
+    /// answers an already-paused client sooner; it never lets anything be
+    /// verified.
+    pub async fn check_password(
+        self: &Arc<Self>,
+        password: String,
+        peer: IpAddr,
+    ) -> Result<Verdict, String> {
         let slot = Arc::clone(&self.verify_slot);
         let permit = slot
             .acquire_owned()
@@ -123,10 +151,32 @@ impl Auth {
 
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            auth.password_matches(&password)
+            auth.check_and_record(&password, peer)
         })
         .await
         .map_err(|error| format!("the password check could not finish: {error}"))
+    }
+
+    /// The decision itself, made on the blocking thread that holds the permit.
+    fn check_and_record(&self, password: &str, peer: IpAddr) -> Verdict {
+        if let Some(retry_after) = self.retry_after(peer) {
+            return Verdict::Paused(retry_after);
+        }
+
+        // An empty or oversized password cannot be right, and hashing it would
+        // only waste the one verification slot.
+        if password.is_empty() || password.len() > MAX_PASSWORD_BYTES {
+            self.record_failure(peer);
+            return Verdict::Rejected;
+        }
+
+        if self.password_matches(password) {
+            self.record_success(peer);
+            Verdict::Accepted
+        } else {
+            self.record_failure(peer);
+            Verdict::Rejected
+        }
     }
 
     fn password_matches(&self, password: &str) -> bool {
@@ -195,41 +245,96 @@ impl Auth {
         write_lock(&self.sessions).remove(token);
     }
 
-    /// How long the client should wait before trying another password, when too
-    /// many attempts have failed recently.
-    pub fn retry_after(&self) -> Option<Duration> {
-        mutex_lock(&self.throttle).retry_after(Instant::now())
+    /// How long the client at `peer` should wait before trying another
+    /// password, when too many attempts from there have failed recently.
+    pub fn retry_after(&self, peer: IpAddr) -> Option<Duration> {
+        mutex_lock(&self.throttle).retry_after(Instant::now(), peer)
     }
 
-    pub fn record_failure(&self) {
-        mutex_lock(&self.throttle).record_failure(Instant::now());
+    fn record_failure(&self, peer: IpAddr) {
+        mutex_lock(&self.throttle).record_failure(Instant::now(), peer);
     }
 
-    pub fn record_success(&self) {
-        mutex_lock(&self.throttle).clear();
+    fn record_success(&self, peer: IpAddr) {
+        mutex_lock(&self.throttle).record_success(peer);
     }
 }
 
-/// Failed logins are counted globally, not per address: behind a reverse proxy
-/// every request arrives from the same address, and Grapho has only one password
-/// to protect.
+/// Failed logins are counted per address, so one client cannot pause logins for
+/// the person who owns the server. The address is the peer of the connection and
+/// never a forwarded header: a client can write anything into a header, and a
+/// fresh value on every guess would mean never being paused.
+///
+/// Behind a reverse proxy every request carries the proxy's own address, so the
+/// clients there share one bucket and one pause. That is the direction to fail
+/// in: trusting a header instead would be no throttle at all.
+#[derive(Default)]
 struct Throttle {
+    addresses: HashMap<IpAddr, Bucket>,
+}
+
+impl Throttle {
+    fn retry_after(&self, now: Instant, peer: IpAddr) -> Option<Duration> {
+        self.addresses
+            .get(&peer)
+            .and_then(|bucket| bucket.retry_after(now))
+    }
+
+    fn record_failure(&mut self, now: Instant, peer: IpAddr) {
+        self.make_room(now, peer);
+        self.addresses
+            .entry(peer)
+            .or_insert_with(|| Bucket::at(now))
+            .record_failure(now);
+    }
+
+    /// A good password forgets that address's failures and nothing else.
+    fn record_success(&mut self, peer: IpAddr) {
+        self.addresses.remove(&peer);
+    }
+
+    /// Keep the table bounded, without forgetting a bucket that is still
+    /// counting failures or still paused.
+    fn make_room(&mut self, now: Instant, peer: IpAddr) {
+        if self.addresses.contains_key(&peer) || self.addresses.len() < MAX_TRACKED_ADDRESSES {
+            return;
+        }
+
+        self.addresses.retain(|_, bucket| !bucket.is_idle(now));
+        if self.addresses.len() < MAX_TRACKED_ADDRESSES {
+            return;
+        }
+
+        // Still full of live buckets. Drop the one that runs out first, so the
+        // longest pauses keep their place for the longest.
+        let soonest = self
+            .addresses
+            .iter()
+            .min_by_key(|(_, bucket)| bucket.expires_at())
+            .map(|(address, _)| *address);
+        if let Some(address) = soonest {
+            self.addresses.remove(&address);
+        }
+    }
+}
+
+/// One address's failed logins: how many, in which window, and until when a
+/// pause holds.
+struct Bucket {
     failures: u32,
     window_start: Instant,
     blocked_until: Option<Instant>,
 }
 
-impl Default for Throttle {
-    fn default() -> Self {
+impl Bucket {
+    fn at(now: Instant) -> Self {
         Self {
             failures: 0,
-            window_start: Instant::now(),
+            window_start: now,
             blocked_until: None,
         }
     }
-}
 
-impl Throttle {
     fn retry_after(&self, now: Instant) -> Option<Duration> {
         self.blocked_until
             .filter(|blocked| now < *blocked)
@@ -247,14 +352,20 @@ impl Throttle {
         }
     }
 
-    fn clear(&mut self) {
-        self.clear_at(Instant::now());
-    }
-
     fn clear_at(&mut self, now: Instant) {
         self.failures = 0;
         self.window_start = now;
         self.blocked_until = None;
+    }
+
+    /// When the window ends, and this bucket stops constraining anything.
+    fn expires_at(&self) -> Instant {
+        self.window_start + LOGIN_WINDOW
+    }
+
+    /// Whether forgetting this bucket would change nothing.
+    fn is_idle(&self, now: Instant) -> bool {
+        now >= self.expires_at()
     }
 }
 
@@ -466,9 +577,21 @@ fn mutex_lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use argon2::{Algorithm, Version};
 
     fn hash_for(password: &str) -> String {
         Argon2::default()
+            .hash_password(password.as_bytes())
+            .expect("test password hashes")
+            .to_string()
+    }
+
+    /// Cheap parameters for the tests that only care about the counter, so
+    /// hundreds of attempts do not turn into hundreds of real hashes. The gate
+    /// reads the parameters out of the hash, so this is still the real path.
+    fn cheap_hash_for(password: &str) -> String {
+        let params = Params::new(8, 1, 1, None).expect("cheap argon2 parameters");
+        Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
             .hash_password(password.as_bytes())
             .expect("test password hashes")
             .to_string()
@@ -569,41 +692,169 @@ mod tests {
         assert!(auth.session_is_valid(tokens.last().expect("a token")));
     }
 
-    #[test]
-    fn repeated_failures_pause_logins() {
-        let mut throttle = Throttle::default();
-        let start = throttle.window_start;
-
-        for attempt in 0..MAX_FAILED_LOGINS {
-            assert_eq!(throttle.retry_after(start), None, "attempt {attempt}");
-            throttle.record_failure(start + Duration::from_secs(1));
-        }
-
-        let pause = throttle
-            .retry_after(start + Duration::from_secs(2))
-            .expect("logins pause");
-        assert!(pause > Duration::from_secs(0));
-        assert!(pause <= LOGIN_WINDOW);
-
-        // The pause ends with the window, and a fresh window starts over.
-        let after_window = start + LOGIN_WINDOW + Duration::from_secs(1);
-        assert_eq!(throttle.retry_after(after_window), None);
-        throttle.record_failure(after_window);
-        assert_eq!(throttle.retry_after(after_window), None);
+    fn peer(last: u8) -> IpAddr {
+        IpAddr::from([203, 0, 113, last])
     }
 
     #[test]
-    fn a_good_password_clears_the_failure_count() {
+    fn repeated_failures_pause_that_address() {
         let mut throttle = Throttle::default();
-        let now = throttle.window_start;
+        let start = Instant::now();
+        let attacker = peer(9);
+        let owner = peer(10);
 
-        for _ in 0..MAX_FAILED_LOGINS - 1 {
-            throttle.record_failure(now);
+        for attempt in 0..MAX_FAILED_LOGINS {
+            assert_eq!(
+                throttle.retry_after(start, attacker),
+                None,
+                "attempt {attempt}"
+            );
+            throttle.record_failure(start + Duration::from_secs(1), attacker);
         }
-        throttle.clear();
-        throttle.record_failure(now);
 
-        assert_eq!(throttle.retry_after(now), None);
+        let pause = throttle
+            .retry_after(start + Duration::from_secs(2), attacker)
+            .expect("that address pauses");
+        assert!(pause > Duration::from_secs(0));
+        assert!(pause <= LOGIN_WINDOW);
+        assert_eq!(
+            throttle.retry_after(start + Duration::from_secs(2), owner),
+            None,
+            "another address is not paused by it"
+        );
+
+        // The pause ends with the window, and a fresh window starts over.
+        let after_window = start + LOGIN_WINDOW + Duration::from_secs(1);
+        assert_eq!(throttle.retry_after(after_window, attacker), None);
+        throttle.record_failure(after_window, attacker);
+        assert_eq!(throttle.retry_after(after_window, attacker), None);
+    }
+
+    #[test]
+    fn a_good_password_clears_that_address_only() {
+        let mut throttle = Throttle::default();
+        let now = Instant::now();
+        let owner = peer(10);
+
+        for _ in 0..MAX_FAILED_LOGINS {
+            throttle.record_failure(now, owner);
+        }
+        assert!(throttle.retry_after(now, owner).is_some());
+
+        throttle.record_success(owner);
+        assert_eq!(throttle.retry_after(now, owner), None);
+
+        // The count starts over, so the next nine failures do not pause it.
+        for _ in 0..MAX_FAILED_LOGINS - 1 {
+            throttle.record_failure(now, owner);
+        }
+        assert_eq!(throttle.retry_after(now, owner), None);
+    }
+
+    #[test]
+    fn the_address_table_stays_bounded() {
+        let mut throttle = Throttle::default();
+        let now = Instant::now();
+
+        for host in 0..=MAX_TRACKED_ADDRESSES {
+            let address = IpAddr::from([10, 0, (host / 256) as u8, (host % 256) as u8]);
+            throttle.record_failure(now, address);
+        }
+
+        assert!(
+            throttle.addresses.len() <= MAX_TRACKED_ADDRESSES,
+            "{} addresses kept",
+            throttle.addresses.len()
+        );
+    }
+
+    /// A client can start more logins at once than the window allows checks. All
+    /// of them wait on the verification permit, so the check has to happen there
+    /// too: otherwise every one reads "not paused" before any failure is
+    /// recorded, and the window lets through as many guesses as were queued.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_burst_of_attempts_cannot_exceed_the_window() {
+        let auth = Arc::new(Auth::new(cheap_hash_for("a long enough password")).expect("hash"));
+        let attacker = peer(9);
+        let attempts = MAX_FAILED_LOGINS as usize * 3;
+
+        let mut tasks = Vec::new();
+        for _ in 0..attempts {
+            let auth = Arc::clone(&auth);
+            tasks.push(tokio::spawn(async move {
+                auth.check_password("not the password".to_owned(), attacker)
+                    .await
+                    .expect("the check runs")
+            }));
+        }
+
+        let mut rejected = 0;
+        let mut paused = 0;
+        for task in tasks {
+            match task.await.expect("the check finishes") {
+                Verdict::Rejected => rejected += 1,
+                Verdict::Paused(wait) => {
+                    assert!(wait > Duration::ZERO);
+                    paused += 1;
+                }
+                Verdict::Accepted => panic!("a wrong password was accepted"),
+            }
+        }
+
+        assert_eq!(
+            rejected, MAX_FAILED_LOGINS as usize,
+            "only the attempts inside the window may be checked against the hash"
+        );
+        assert_eq!(paused, attempts - MAX_FAILED_LOGINS as usize);
+    }
+
+    #[tokio::test]
+    async fn a_paused_gate_does_not_check_a_correct_password() {
+        let auth = Arc::new(Auth::new(cheap_hash_for("a long enough password")).expect("hash"));
+        let attacker = peer(9);
+
+        for _ in 0..MAX_FAILED_LOGINS {
+            assert_eq!(
+                auth.check_password("not the password".to_owned(), attacker)
+                    .await
+                    .expect("the check runs"),
+                Verdict::Rejected
+            );
+        }
+
+        assert!(matches!(
+            auth.check_password("a long enough password".to_owned(), attacker)
+                .await
+                .expect("the check runs"),
+            Verdict::Paused(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn one_address_cannot_pause_another() {
+        let auth = Arc::new(Auth::new(cheap_hash_for("a long enough password")).expect("hash"));
+        let attacker = peer(9);
+        let owner = peer(10);
+
+        for _ in 0..MAX_FAILED_LOGINS {
+            auth.check_password("not the password".to_owned(), attacker)
+                .await
+                .expect("the check runs");
+        }
+
+        // The attacker has locked only itself out; the owner still signs in.
+        assert!(matches!(
+            auth.check_password("a long enough password".to_owned(), attacker)
+                .await
+                .expect("the check runs"),
+            Verdict::Paused(_)
+        ));
+        assert_eq!(
+            auth.check_password("a long enough password".to_owned(), owner)
+                .await
+                .expect("the check runs"),
+            Verdict::Accepted
+        );
     }
 
     #[test]
