@@ -1819,6 +1819,63 @@ test("lists: Enter, Tab, and markers follow the list structure", async () => {
   assertEqual(editor.getDocument()[2].type, "p", "Enter on an empty item leaves the list");
 });
 
+test("headings: Enter breaks the line with a normal paragraph", async () => {
+  await load("<h2>A heading</h2>");
+  editor.collapseTo({ block: 0, offset: blockLength(editor.getDocument()[0]) });
+  editor.sync();
+  key("Enter");
+
+  let blocks = editor.getDocument();
+  assertEqual(blocks.length, 2, "Enter breaks the heading line");
+  assertEqual(blocks[0].type, "h2", "the text before the break keeps the heading style");
+  assertEqual(blockText(blocks[0]), "A heading", "the heading text stays");
+  assertEqual(blocks[1].type, "p", "the new line is a normal paragraph");
+  assertEqual(blockText(blocks[1]), "", "the new line starts empty");
+  assertEqual(editor.getSelection().focus.block, 1, "the caret lands on the new line");
+  assertEqual(editor.activeBlockType(), "p", "the toolbar reports Normal text");
+
+  typeText("Body text");
+  blocks = editor.getDocument();
+  assertEqual(blocks[1].type, "p", "typing after the break stays normal");
+  assertEqual(blockText(blocks[1]), "Body text", "the typed text lands after the break");
+
+  editor.undo();
+  assertEqual(blockText(editor.getDocument()[1]), "", "undo takes back the typed text");
+  editor.undo();
+  blocks = editor.getDocument();
+  assertEqual(blocks.length, 1, "one more undo takes back the break");
+  assertEqual(blocks[0].type, "h2", "the heading comes back whole");
+  assertEqual(blockText(blocks[0]), "A heading", "with its text");
+});
+
+test("headings: only a heading starts a normal paragraph at the break", async () => {
+  await load("<h1>One two</h1>");
+  editor.collapseTo({ block: 0, offset: 3 });
+  editor.sync();
+  key("Enter");
+  let blocks = editor.getDocument();
+  assertEqual(blocks[0].type, "h1", "the text before a mid-heading break keeps the heading style");
+  assertEqual(blockText(blocks[0]), "One", "the heading keeps the text before the caret");
+  assertEqual(blocks[1].type, "p", "the text after a mid-heading break is normal");
+  assertEqual(blockText(blocks[1]), " two", "the text after the caret moves to the new paragraph");
+
+  await load("<h1>Title</h1>");
+  editor.collapseTo({ block: 0, offset: 5 });
+  editor.sync();
+  key("Enter", { shiftKey: true });
+  blocks = editor.getDocument();
+  assertEqual(blocks.length, 1, "Shift+Enter does not split the block");
+  assertEqual(blocks[0].type, "h1", "a hard break stays inside the heading");
+  assertEqual(blockText(blocks[0]), "Title\n", "the hard break is stored");
+
+  await load("<blockquote>A quote</blockquote>");
+  editor.collapseTo({ block: 0, offset: 7 });
+  editor.sync();
+  key("Enter");
+  blocks = editor.getDocument();
+  assertEqual(blocks[1].type, "quote", "another block style is unchanged by Enter");
+});
+
 test("lists: ordered markers number consecutive items", async () => {
   await load("<p>alpha</p><p>beta</p><p>gamma</p>");
   editor.setSelection({ block: 0, offset: 0 }, { block: 2, offset: 5 });

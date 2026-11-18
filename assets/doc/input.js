@@ -38,6 +38,7 @@ const LIST_DEPTH_LIMIT = 5;
 const TYPING_COALESCE_MS = 700;
 const UNDO_LIMIT = 120;
 const ALIGNMENT_VALUES = new Set(ALIGNMENTS);
+const HEADING_TYPES = new Set(["h1", "h2", "h3"]);
 // Tab types four spaces at the caret in a paragraph. A selection gets one tab
 // stop at the start of every line it touches instead, the way a code editor
 // indents a block of text.
@@ -836,8 +837,14 @@ export class DocEditor {
     }
 
     const [first, second] = splitBlockModel(block, offset);
+    // Enter ends a heading: the text before the break keeps the heading style,
+    // and the line the caret lands on is an ordinary paragraph, so writing a
+    // title does not continue in heading style. A heading is rich-text only;
+    // Markdown source lines stay plain blocks and keep their own markers.
+    const continuation =
+      !this.sourceMode && HEADING_TYPES.has(block.type) ? { ...second, type: "p" } : second;
     const next = blocks.slice();
-    next.splice(index, 1, first, second);
+    next.splice(index, 1, first, continuation);
     const caret = { block: index + 1, offset: 0 };
     this.commit(next, caret, caret);
   }

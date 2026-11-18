@@ -282,6 +282,11 @@ unchanged.
   list; it never deletes the selected text. A selection that ends exactly at
   the start of a line leaves that line alone. The Align popover sets only
   alignment. Code blocks and images are outside paragraph alignment.
+- Enter inside a heading ends the heading: the text before the break keeps its
+  heading style, and the line the caret lands on is an ordinary paragraph, so
+  writing a title continues in Normal text instead of another heading.
+  `Shift+Enter` is still a hard break inside the heading. This is rich-text
+  behavior only; Markdown source lines are plain blocks and keep their markers.
 - Paper width belongs to the document, not the HTML: `paper_width` (pixels) in
   the document JSON, applied before the first layout. Dragging either border
   resizes both edges around the centre; the workspace bounds the drag and leaves
