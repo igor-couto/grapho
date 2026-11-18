@@ -8,6 +8,7 @@ pub const EDITOR_HTML: &str = include_str!("../assets/editor.html");
 pub const LOGIN_HTML: &str = include_str!("../assets/login.html");
 pub const NOT_FOUND_HTML: &str = include_str!("../assets/not-found.html");
 pub const STORAGE_HTML: &str = include_str!("../assets/storage.html");
+pub const SHORTCUTS_HTML: &str = include_str!("../assets/shortcuts.html");
 pub const VERSION_HTML: &str = include_str!("../assets/version.html");
 
 pub fn find(path: &str) -> Option<Asset> {
@@ -33,8 +34,10 @@ pub fn find(path: &str) -> Option<Asset> {
             content_type: "text/javascript; charset=utf-8",
         },
         "menu.js" => script(include_bytes!("../assets/menu.js")),
+        "quick-open.js" => script(include_bytes!("../assets/quick-open.js")),
         "storage.js" => script(include_bytes!("../assets/storage.js")),
         "version.js" => script(include_bytes!("../assets/version.js")),
+        "doc/clipboard.js" => script(include_bytes!("../assets/doc/clipboard.js")),
         "doc/image.js" => script(include_bytes!("../assets/doc/image.js")),
         "doc/input.js" => script(include_bytes!("../assets/doc/input.js")),
         "doc/layout.js" => script(include_bytes!("../assets/doc/layout.js")),

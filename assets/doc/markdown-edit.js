@@ -272,6 +272,11 @@ function validHref(value) {
   if (!href) {
     return false;
   }
+  // The link dialog creates web addresses, mailto targets, and root-relative
+  // links to other Grapho pages; the dialect can carry all three.
+  if (href.startsWith("/") && !href.startsWith("//")) {
+    return !/[\u0000-\u0020\u007f\\]/.test(href);
+  }
   try {
     const url = new URL(href);
     if (url.protocol === "http:" || url.protocol === "https:") {
@@ -286,7 +291,7 @@ function validHref(value) {
 // The dialect's own href rule, for finding existing links exactly the way the
 // parser does (setLink() gets an already-normalized url from the page). Stored
 // documents can also carry relative and fragment links, so those are found and
-// editable even though the link dialog only creates absolute ones.
+// editable even though the link dialog only creates root-relative ones.
 function isDialectHref(value) {
   const href = String(value || "").trim();
   if (!href || /[\u0000-\u0020\u007f]/.test(href) || href.includes("\\")) {

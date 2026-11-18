@@ -333,17 +333,26 @@ test("markdown-edit links: removeLink keeps the label and drops the wrapper", ()
   assertEqual(linkAt(sourceBlocks("plain"), collapsed(0, 2)), null, "no link outside a link");
 });
 
-test("markdown-edit links: only http, https, and mailto urls are accepted", () => {
+test("markdown-edit links: web addresses and page paths are accepted", () => {
   const blocks = sourceBlocks("text");
   const span = selection(0, 0, 0, 4);
   assertEqual(setLink(blocks, span, "javascript:alert(1)"), null, "javascript: is refused");
-  assertEqual(setLink(blocks, span, "example.com"), null, "a relative url is refused");
+  assertEqual(setLink(blocks, span, "example.com"), null, "a bare relative url is refused");
+  assertEqual(setLink(blocks, span, "//example.com/doc"), null, "a protocol-relative url is refused");
+  assertEqual(setLink(blocks, span, "/doc/two words"), null, "a path with a space is refused");
   assertEqual(setLink(blocks, span, "ftp://example.com"), null, "ftp: is refused");
   assertEqual(setLink(blocks, span, ""), null, "an empty url is refused");
   const secure = setLink(blocks, span, "https://example.com/a?b=1");
   assert(secure, "https is accepted");
   const mail = setLink(blocks, span, "mailto:someone@example.com");
   assert(mail, "mailto is accepted");
+  const page = setLink(blocks, span, "/doc/6f1c2f7a-58f7-4b1e-9f6d-8f1c2f7a58f7");
+  expectSingleLine(page, "[text](/doc/6f1c2f7a-58f7-4b1e-9f6d-8f1c2f7a58f7)", "a Grapho page path is accepted");
+  assertEqual(
+    linkAt(page.blocks, collapsed(0, 2)).href,
+    "/doc/6f1c2f7a-58f7-4b1e-9f6d-8f1c2f7a58f7",
+    "the page path is found as a link",
+  );
 });
 
 test("markdown-edit links: a selection spanning lines links each line", () => {

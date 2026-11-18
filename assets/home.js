@@ -8,6 +8,7 @@
     query: "",
     view: "list",
     sort: "modified",
+    loaded: false,
     creating: false,
     busy: false,
     pending: null,
@@ -260,10 +261,12 @@
     els.retryLoad.hidden = true;
     els.retryLoad.disabled = true;
     els.searchDocuments.disabled = true;
+    showLibrarySkeleton();
 
     try {
       var payload = await request("/api/documents");
       state.documents = Array.isArray(payload.documents) ? payload.documents : [];
+      state.loaded = true;
       els.signOut.hidden = !payload.auth_required;
       els.signOutRule.hidden = !payload.auth_required;
       applySort();
@@ -277,8 +280,52 @@
     }
   }
 
+  // The page ships a few placeholder rows so the very first paint is never an
+  // empty library; this rebuilds the set to cover the first screen in the
+  // current view. It also runs again on a retry, because the placeholders stay
+  // in the DOM through the failed load.
+  function showLibrarySkeleton() {
+    var skeleton = els.documents.querySelector(".document-card-skeleton");
+    if (!skeleton) {
+      return;
+    }
+
+    els.documents.hidden = false;
+    els.libraryToolbar.hidden = false;
+    els.emptyState.hidden = true;
+
+    var count = skeletonCardCount(skeleton);
+    var fragment = document.createDocumentFragment();
+    for (var index = 0; index < count; index += 1) {
+      fragment.appendChild(skeleton.cloneNode(true));
+    }
+    els.documents.replaceChildren(fragment);
+  }
+
+  // One placeholder per list row, one per grid cell: enough to reach the bottom
+  // of the first screen without waiting for the listing to say how many
+  // documents there are. The row height and gap come from the placeholder
+  // itself, so the count follows the view and the stylesheet.
+  function skeletonCardCount(skeleton) {
+    var style = window.getComputedStyle(els.documents);
+    var room = window.innerHeight - els.documents.getBoundingClientRect().top;
+    var height =
+      skeleton.getBoundingClientRect().height + (parseFloat(style.rowGap) || 0);
+    if (!(room > 0) || !(height > 0)) {
+      return 3;
+    }
+
+    var perRow = 1;
+    if (state.view === "grid") {
+      perRow = style.gridTemplateColumns.split(" ").filter(Boolean).length || 1;
+    }
+
+    return Math.max(3, Math.ceil(room / height) * perRow);
+  }
+
   function showLoadError(error) {
-    els.documents.replaceChildren();
+    // The placeholders stay in the DOM (only the container is hidden) so the
+    // retry button has something to show while it waits.
     els.documents.hidden = true;
     els.libraryToolbar.hidden = true;
     els.emptyState.hidden = true;
@@ -292,6 +339,12 @@
   }
 
   function renderDocuments() {
+    if (!state.loaded) {
+      // A view or sort change arrived before the first listing did; the
+      // placeholders stay until the documents arrive.
+      return;
+    }
+
     var query = state.query.toLocaleLowerCase();
     var visible = state.documents.filter(function (document) {
       if (!query) {
@@ -741,7 +794,11 @@
     state.view = state.view === "grid" ? "list" : "grid";
     rememberChoice(VIEW_KEY, state.view);
     applyView();
-    renderDocuments();
+    if (state.loaded) {
+      renderDocuments();
+    } else {
+      showLibrarySkeleton();
+    }
   }
 
   function applyView() {

@@ -1177,6 +1177,24 @@ mod tests {
     }
 
     #[test]
+    fn grapho_page_links_stay_relative() {
+        // The editor stores a link to another document root-relative, so it
+        // works on any host and port the library is served from.
+        let clean = sanitize_content(
+            "<p>See <a href=\"/doc/6f1c2f7a-58f7-4b1e-9f6d-8f1c2f7a58f7\">the plan</a>.</p>",
+        );
+
+        assert!(
+            clean.contains("href=\"/doc/6f1c2f7a-58f7-4b1e-9f6d-8f1c2f7a58f7\""),
+            "a root-relative page link survives: {clean}"
+        );
+        assert!(
+            clean.contains("rel=\"noopener noreferrer\""),
+            "the link still gets its hardening relation: {clean}"
+        );
+    }
+
+    #[test]
     fn excerpts_end_on_words() {
         let text = "word ".repeat(100);
         let excerpt = make_excerpt(text.trim());

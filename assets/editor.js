@@ -63,8 +63,39 @@ const state = {
 const els = {};
 let editor = null;
 
+// The link dialog's page search. The listing is read when the dialog opens,
+// once per opening like Ctrl+O, and filtered locally as the writer types: no
+// request per keystroke. Choosing a result links the selected text to that
+// Grapho page instead of a web address.
+const linkPicker = {
+  documents: null,
+  requestId: 0,
+  visible: [],
+  options: [],
+  selected: -1,
+};
+
+const LINK_RESULT_LIMIT = 50;
+const LINK_PAGE_ICON =
+  '<svg viewBox="0 0 32 32" fill="none"><path d="M8 4.5h11.2L25 10.3v17.2H8V4.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M19 4.5v6h6" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M12.2 16h8.6M12.2 20h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+const linkShortDate = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "numeric",
+});
+const linkLongDate = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+});
+
 const IMAGE_MAX_EDGE = 1600;
 const IMAGE_PASSTHROUGH_BYTES = 600 * 1024;
+const IMAGE_DOWNLOAD_EXTENSIONS = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp",
+  "image/gif": "gif",
+};
 const PAPER_MIN_WIDTH = 360;
 const PAPER_DEFAULT_WIDTH = 900; // Keep in sync with .editor-column in app.css.
 const PAPER_EDGE_GAP = 18;
@@ -76,6 +107,7 @@ document.addEventListener("DOMContentLoaded", init);
 async function init() {
   els.saveStatus = document.getElementById("saveStatus");
   els.backToLibrary = document.getElementById("backToLibrary");
+  els.shortcutsLink = document.getElementById("shortcutsLink");
   els.documentMenuButton = document.getElementById("documentMenuButton");
   els.documentMenu = document.getElementById("documentMenu");
   els.focusMenuItemLabel = document.getElementById("focusMenuItemLabel");
@@ -102,12 +134,14 @@ async function init() {
   els.linkDialog = document.getElementById("linkDialog");
   els.linkForm = document.getElementById("linkForm");
   els.linkTitle = document.getElementById("linkTitle");
-  els.linkDescription = document.getElementById("linkDescription");
   els.linkInput = document.getElementById("linkInput");
   els.linkError = document.getElementById("linkError");
   els.linkApply = document.getElementById("linkApply");
   els.linkRemove = document.getElementById("linkRemove");
   els.linkCancel = document.getElementById("linkCancel");
+  els.linkResults = document.getElementById("linkResults");
+  els.linkResultsLabel = document.getElementById("linkResultsLabel");
+  els.linkResultsList = document.getElementById("linkResultsList");
 
   els.deleteDialog = document.getElementById("deleteDialog");
   els.deleteForm = document.getElementById("deleteForm");
@@ -417,7 +451,10 @@ async function flushBeforeLeaving() {
   return !state.dirty && !state.saving;
 }
 
-function handleHomeLink(event) {
+function handlePageLink(event) {
+  // The link navigates away from the document, so wait until the latest edit
+  // is on disk. Modified clicks keep the browser's new-tab behavior.
+  const target = event.currentTarget.href;
   if (
     !state.loaded ||
     event.defaultPrevented ||
@@ -436,7 +473,7 @@ function handleHomeLink(event) {
   event.preventDefault();
   flushBeforeLeaving().then((saved) => {
     if (saved) {
-      window.location.assign("/");
+      window.location.assign(target);
     } else {
       showToast("Your latest changes couldn't be saved. Try once more before leaving.", true);
     }
@@ -519,6 +556,15 @@ function bindEvents() {
   els.formatToolbar.addEventListener("scroll", closeStyleMenu, { passive: true });
 
   els.linkButton.addEventListener("click", openLinkDialog);
+  els.linkInput.addEventListener("input", handleLinkInput);
+  els.linkInput.addEventListener("keydown", handleLinkInputKeydown);
+  els.linkResultsList.addEventListener("mousedown", (event) => event.preventDefault());
+  els.linkResultsList.addEventListener("mousemove", handleLinkResultHover);
+  els.linkResultsList.addEventListener("click", handleLinkResultClick);
+  els.linkDialog.addEventListener("close", () => {
+    resetLinkPicker();
+    restoreEditorFocus();
+  });
   els.imageButton.addEventListener("click", openImagePicker);
   els.imageInput.addEventListener("change", handleImagePicked);
   els.imageRadiusInput.addEventListener("input", handleImageRadiusInput);
@@ -604,7 +650,8 @@ function bindEvents() {
   els.documentMenu.addEventListener("click", handleDocumentMenuAction);
   document.addEventListener("fullscreenchange", handleFullscreenChange);
 
-  els.backToLibrary.addEventListener("click", handleHomeLink);
+  els.backToLibrary.addEventListener("click", handlePageLink);
+  els.shortcutsLink.addEventListener("click", handlePageLink);
 
   els.linkForm.addEventListener("submit", applyLink);
   els.linkCancel.addEventListener("click", () => {
@@ -618,6 +665,7 @@ function bindEvents() {
     deleteDocument();
   });
   els.deleteCancel.addEventListener("click", closeDeleteDialog);
+  els.deleteDialog.addEventListener("close", restoreEditorFocus);
 
   document.addEventListener("keydown", handleGlobalKeydown);
   window.addEventListener("beforeunload", persistBeforeLeaving);
@@ -1094,20 +1142,20 @@ function openLinkDialog() {
 
   els.linkInput.value = existing ? existing.href : "";
   els.linkTitle.textContent = existing ? "Edit link" : "Add a link";
-  els.linkDescription.textContent = existing
-    ? "Change where this link points, or remove it entirely."
-    : "Link the selected text to a web address.";
   els.linkApply.textContent = existing ? "Update link" : "Add link";
   els.linkRemove.hidden = !existing;
   els.linkError.hidden = true;
+  resetLinkPicker();
 
   if (!els.linkDialog.open) {
     els.linkDialog.showModal();
   }
+  renderLinkResults();
   window.requestAnimationFrame(() => {
     els.linkInput.focus();
     els.linkInput.select();
   });
+  loadLinkDocuments();
 }
 
 function closeLinkDialog() {
@@ -1116,10 +1164,21 @@ function closeLinkDialog() {
   }
 }
 
+// A link to another Grapho page is stored root-relative, so it keeps working
+// on any host or port the library is served from.
+function documentLinkHref(id) {
+  return "/doc/" + encodeURIComponent(id);
+}
+
 function normalizeLink(raw) {
   const value = String(raw || "").trim();
   if (!value) {
     return null;
+  }
+  // Root-relative targets are how a Grapho page link is stored, and older
+  // documents can carry relative links too; editing one keeps its target.
+  if (value.startsWith("/") && !value.startsWith("//")) {
+    return /[\s\\\u0000-\u001f\u007f]/.test(value) ? null : value;
   }
   const candidate = /^[a-z][a-z0-9+.-]*:/i.test(value) ? value : "https://" + value;
   try {
@@ -1136,9 +1195,26 @@ function normalizeLink(raw) {
   }
 }
 
+function insertLink(href) {
+  closeLinkDialog();
+  if (state.markdownMode) {
+    applySourceCommand(setSourceLink, href);
+  } else {
+    editor.setLink(href);
+  }
+  editor.focusEditor();
+}
+
 function applyLink(event) {
   event.preventDefault();
   if (!state.loaded) {
+    return;
+  }
+  // The primary action follows the row the writer picked (the keyboard can
+  // pick one with the arrow keys); with no row picked, the field is the target.
+  const picked = linkPicker.visible[linkPicker.selected];
+  if (picked) {
+    insertLink(documentLinkHref(picked.id));
     return;
   }
   const url = normalizeLink(els.linkInput.value);
@@ -1147,13 +1223,7 @@ function applyLink(event) {
     els.linkInput.focus();
     return;
   }
-  closeLinkDialog();
-  if (state.markdownMode) {
-    applySourceCommand(setSourceLink, url);
-  } else {
-    editor.setLink(url);
-  }
-  editor.focusEditor();
+  insertLink(url);
 }
 
 function removeLink() {
@@ -1170,6 +1240,316 @@ function removeLink() {
     editor.setLink(null);
   }
   editor.focusEditor();
+}
+
+/* --------------------------------------------------------------------------
+   Link dialog: search over the library
+   -------------------------------------------------------------------------- */
+
+// The listing is read when the dialog opens and then filtered locally, so the
+// editor makes no request per keystroke. It quietly steps aside when it cannot
+// be read: the field still adds a web address.
+async function loadLinkDocuments() {
+  const requestId = (linkPicker.requestId += 1);
+  try {
+    const response = await fetch("/api/documents", {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (requestId !== linkPicker.requestId) {
+      return;
+    }
+    if (!response.ok) {
+      throw new Error("The document listing failed");
+    }
+    const payload = await response.json();
+    if (requestId !== linkPicker.requestId) {
+      return;
+    }
+    linkPicker.documents = Array.isArray(payload.documents) ? payload.documents : [];
+  } catch (error) {
+    if (requestId !== linkPicker.requestId) {
+      return;
+    }
+    linkPicker.documents = null;
+  }
+  renderLinkResults();
+}
+
+// The dialog is closed (or reopened) while a listing is still arriving: drop
+// it instead of painting it into a dialog the writer is no longer looking at.
+function resetLinkPicker() {
+  linkPicker.requestId += 1;
+  linkPicker.visible = [];
+  linkPicker.options = [];
+  linkPicker.selected = -1;
+  els.linkResults.hidden = true;
+  els.linkResultsList.replaceChildren();
+  els.linkInput.setAttribute("aria-expanded", "false");
+  els.linkInput.removeAttribute("aria-activedescendant");
+}
+
+function handleLinkInput() {
+  els.linkError.hidden = true;
+  renderLinkResults();
+}
+
+function handleLinkInputKeydown(event) {
+  if (event.defaultPrevented || event.isComposing || els.linkResults.hidden) {
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    moveLinkSelection(event.key === "ArrowDown" ? 1 : -1);
+  }
+}
+
+function handleLinkResultHover(event) {
+  const option = event.target.closest ? event.target.closest(".link-result") : null;
+  if (!option) {
+    return;
+  }
+  const index = Number(option.getAttribute("data-index"));
+  if (!Number.isFinite(index) || index === linkPicker.selected) {
+    return;
+  }
+  selectLinkResult(index, false);
+}
+
+function handleLinkResultClick(event) {
+  const option = event.target.closest ? event.target.closest(".link-result") : null;
+  if (!option) {
+    return;
+  }
+  const picked = linkPicker.visible[Number(option.getAttribute("data-index"))];
+  if (picked) {
+    insertLink(documentLinkHref(picked.id));
+  }
+}
+
+// A typed web address is not also a search: URLs, mailto targets, and internal
+// paths keep the dialog behaving exactly as before the page list existed. The
+// scheme must be one the dialog accepts, so a title such as "Q3: planning"
+// still searches the library.
+function linkInputIsAddress(value) {
+  return /^(?:https?|mailto):/i.test(value) || value.startsWith("/") || /^www\./i.test(value);
+}
+
+function renderLinkResults() {
+  if (!els.linkDialog || !els.linkDialog.open) {
+    return;
+  }
+  linkPicker.selected = -1;
+  linkPicker.visible = [];
+  linkPicker.options = [];
+
+  const query = els.linkInput.value.trim();
+  if (!linkPicker.documents || linkInputIsAddress(query)) {
+    hideLinkResults();
+    return;
+  }
+
+  const { documents, terms } = matchLinkDocuments(query);
+  const visible = documents.slice(0, LINK_RESULT_LIMIT);
+  if (!visible.length) {
+    hideLinkResults();
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  const options = [];
+  visible.forEach((documentSummary, index) => {
+    const option = createLinkResult(documentSummary, index, terms);
+    options.push(option);
+    fragment.appendChild(option);
+  });
+  els.linkResultsList.replaceChildren(fragment);
+  els.linkResultsLabel.textContent = query ? "Documents" : "Recent documents";
+  els.linkResults.hidden = false;
+  els.linkInput.setAttribute("aria-expanded", "true");
+  linkPicker.visible = visible;
+  linkPicker.options = options;
+  // Typing narrows the list to a search, so the best match is offered as the
+  // Enter target. The recent list itself starts with nothing picked: opening
+  // the dialog and pressing Enter must not link the latest document by accident.
+  if (query) {
+    selectLinkResult(0, false);
+  }
+}
+
+function hideLinkResults() {
+  els.linkResults.hidden = true;
+  els.linkResultsList.replaceChildren();
+  els.linkInput.setAttribute("aria-expanded", "false");
+  els.linkInput.removeAttribute("aria-activedescendant");
+  linkPicker.visible = [];
+  linkPicker.options = [];
+  linkPicker.selected = -1;
+}
+
+function matchLinkDocuments(query) {
+  const terms = linkSearchTerms(query);
+  const documents = (linkPicker.documents || []).filter(
+    (documentSummary) => documentSummary.id !== state.documentId,
+  );
+  if (!terms.length) {
+    return { documents: documents.sort(compareLinkDocuments), terms };
+  }
+
+  const matches = [];
+  for (const documentSummary of documents) {
+    const title = String(documentSummary.title || "").toLocaleLowerCase();
+    let score = 0;
+    let matched = true;
+    for (const term of terms) {
+      const at = title.indexOf(term);
+      if (at === -1) {
+        matched = false;
+        break;
+      }
+      if (at > 0) {
+        score += linkStartsWord(title, at) ? 1 : 2;
+      }
+    }
+    if (matched) {
+      matches.push({ document: documentSummary, score });
+    }
+  }
+  matches.sort(
+    (left, right) =>
+      left.score - right.score || compareLinkDocuments(left.document, right.document),
+  );
+  return {
+    documents: matches.map((match) => match.document),
+    terms,
+  };
+}
+
+function compareLinkDocuments(left, right) {
+  return (
+    right.updated_at - left.updated_at ||
+    String(left.title).localeCompare(String(right.title))
+  );
+}
+
+function linkSearchTerms(query) {
+  const seen = Object.create(null);
+  return query
+    .toLocaleLowerCase()
+    .split(/\s+/)
+    .filter((term) => {
+      if (!term || seen[term]) {
+        return false;
+      }
+      seen[term] = true;
+      return true;
+    })
+    .sort((left, right) => right.length - left.length);
+}
+
+function linkStartsWord(title, index) {
+  return !/[\p{L}\p{N}]/u.test(title.charAt(index - 1));
+}
+
+function createLinkResult(documentSummary, index, terms) {
+  const option = document.createElement("li");
+  option.className = "link-result";
+  option.id = "linkResultOption" + index;
+  option.setAttribute("role", "option");
+  option.setAttribute("aria-selected", "false");
+  option.setAttribute("data-index", String(index));
+
+  const glyph = document.createElement("span");
+  glyph.className = "link-result-glyph";
+  glyph.setAttribute("aria-hidden", "true");
+  glyph.innerHTML = LINK_PAGE_ICON;
+
+  const title = document.createElement("span");
+  title.className = "link-result-title";
+  const label = String(documentSummary.title || "Untitled document");
+  appendLinkHighlight(title, label, terms);
+  title.title = label;
+
+  const meta = document.createElement("span");
+  meta.className = "link-result-meta";
+  meta.textContent = linkEditedLabel(documentSummary.updated_at);
+
+  option.appendChild(glyph);
+  option.appendChild(title);
+  option.appendChild(meta);
+  return option;
+}
+
+function appendLinkHighlight(container, text, terms) {
+  if (!terms.length) {
+    container.appendChild(document.createTextNode(text));
+    return;
+  }
+
+  const pattern = new RegExp(
+    terms.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"),
+    "gi",
+  );
+  let position = 0;
+  let match = pattern.exec(text);
+  while (match) {
+    if (match.index > position) {
+      container.appendChild(document.createTextNode(text.slice(position, match.index)));
+    }
+    const mark = document.createElement("mark");
+    mark.className = "link-result-match";
+    mark.textContent = match[0];
+    container.appendChild(mark);
+    position = match.index + match[0].length;
+    match = pattern.exec(text);
+  }
+  if (position < text.length) {
+    container.appendChild(document.createTextNode(text.slice(position)));
+  }
+}
+
+function linkEditedLabel(timestamp) {
+  const date = new Date(timestamp);
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) {
+    return "Edited today";
+  }
+  const formatter = date.getFullYear() === today.getFullYear() ? linkShortDate : linkLongDate;
+  return "Edited " + formatter.format(date);
+}
+
+function selectLinkResult(index, scroll) {
+  if (index < 0 || index >= linkPicker.options.length) {
+    return;
+  }
+  linkPicker.selected = index;
+  linkPicker.options.forEach((option, optionIndex) => {
+    option.setAttribute("aria-selected", optionIndex === index ? "true" : "false");
+  });
+  const selected = linkPicker.options[index];
+  els.linkInput.setAttribute("aria-activedescendant", selected.id);
+  if (scroll) {
+    revealLinkResult(selected);
+  }
+}
+
+function revealLinkResult(option) {
+  const listBox = els.linkResultsList.getBoundingClientRect();
+  const optionBox = option.getBoundingClientRect();
+  if (optionBox.top < listBox.top) {
+    els.linkResultsList.scrollTop -= listBox.top - optionBox.top;
+  } else if (optionBox.bottom > listBox.bottom) {
+    els.linkResultsList.scrollTop += optionBox.bottom - listBox.bottom;
+  }
+}
+
+function moveLinkSelection(delta) {
+  const count = linkPicker.options.length;
+  if (!count) {
+    return;
+  }
+  const start = linkPicker.selected < 0 ? (delta > 0 ? -1 : 0) : linkPicker.selected;
+  selectLinkResult((((start + delta) % count) + count) % count, true);
 }
 
 /* --------------------------------------------------------------------------
@@ -1429,6 +1809,16 @@ function handleImageMenuClick(event) {
     return;
   }
 
+  if (button.dataset.imageAction === "download") {
+    // The menu closes on a whole-image action; keep the picture's data before
+    // that clears the entry the menu works from.
+    const block = state.imageEntry.block;
+    closeImageMenu();
+    downloadImage(block);
+    editor.focusEditor();
+    return;
+  }
+
   if (button.dataset.imageAction === "remove") {
     closeImageMenu();
     editor.deleteBlockAt(index);
@@ -1552,9 +1942,13 @@ async function transformSelectedImage(action) {
 }
 
 function setImageToolsBusy(busy) {
-  els.imageMenu.querySelectorAll("[data-image-transform]").forEach((button) => {
-    button.disabled = busy;
-  });
+  // The download reads the stored data URL, so it waits with the transform
+  // buttons rather than handing over the pixels the transform is replacing.
+  els.imageMenu
+    .querySelectorAll('[data-image-transform], [data-image-action="download"]')
+    .forEach((button) => {
+      button.disabled = busy;
+    });
 }
 
 function handleImageRadiusInput() {
@@ -1583,6 +1977,45 @@ function handleImageRadiusBlur() {
   if (entry && entry.block) {
     els.imageRadiusInput.value = String(imageRadius(entry.block));
   }
+}
+
+function downloadImage(block) {
+  const src = String((block && block.src) || "");
+  const match = /^data:(image\/(?:png|jpeg|webp|gif));base64,(.*)$/.exec(src);
+  if (!match) {
+    showToast("That image can't be downloaded.", true);
+    return;
+  }
+
+  const type = match[1];
+  let bytes;
+  try {
+    // The stored data URL is the image itself; hand its bytes over untouched,
+    // not a render or a fresh encode of the picture on the page.
+    const binary = window.atob(match[2]);
+    bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+  } catch (error) {
+    showToast("That image can't be downloaded.", true);
+    return;
+  }
+
+  const name = imageDownloadName(block) + "." + IMAGE_DOWNLOAD_EXTENSIONS[type];
+  downloadBlob(name, new Blob([bytes], { type }));
+  showToast("Image download started.");
+}
+
+function imageDownloadName(block) {
+  // The alt text starts life as the file's own name, so it is the closest thing
+  // to the name the picture came in with. A missing or generic one falls back to
+  // the document's title.
+  const alt = String((block && block.alt) || "").trim();
+  if (alt && !/^image$/i.test(alt)) {
+    return slugify(alt);
+  }
+  return slugify(normalizeTitle(els.documentTitle.value));
 }
 
 function handleDocumentPointer(event) {
@@ -2200,7 +2633,10 @@ function slugify(value) {
 }
 
 function downloadFile(filename, content, type) {
-  const blob = new Blob([content], { type });
+  downloadBlob(filename, new Blob([content], { type }));
+}
+
+function downloadBlob(filename, blob) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -2240,6 +2676,29 @@ function closeDeleteDialog() {
   if (els.deleteDialog.open) {
     els.deleteDialog.close();
   }
+}
+
+// Both dialogs are opened from the editor, so closing one has to leave the
+// writer writing. The browser's own focus restoration is not enough: closing
+// from a click on one of the dialog's own buttons can drop focus on the page
+// body, or leave the editor's hidden textarea active but ignoring typed text,
+// and the browser may finish that after the dialog's own close event. One task
+// later the page has settled, so the editor takes its place back. Focus is
+// only taken from those two places: a control the writer picked (the title
+// field, a menu) keeps it.
+function restoreEditorFocus() {
+  if (!state.loaded) {
+    return;
+  }
+  window.setTimeout(() => {
+    if (!state.loaded || els.linkDialog.open || els.deleteDialog.open) {
+      return;
+    }
+    if (document.activeElement !== document.body && document.activeElement !== editor.textarea) {
+      return;
+    }
+    editor.focusEditor();
+  }, 0);
 }
 
 async function deleteDocument() {
@@ -2311,13 +2770,33 @@ function handleGlobalKeydown(event) {
     return;
   }
 
-  // Ctrl+M switches between the Markdown source and the normal rendered view,
-  // the same as the document menu item. It is deliberately Ctrl-only rather
-  // than Ctrl-or-Cmd: on macOS Cmd+M minimizes the window, so that stays with
-  // the system. Repeated keydowns from a held key must not flip the view back
-  // and forth, an open dialog owns the keyboard until it closes, and a picture
-  // gesture in flight is not interrupted by rebuilding the view under it.
-  if (event.ctrlKey && !event.shiftKey && event.key.toLocaleLowerCase() === "m") {
+  // Ctrl+Shift+F toggles focus mode, the same as the document menu item. It is
+  // Ctrl-only rather than Ctrl-or-Cmd so the binding is the same on macOS as
+  // everywhere else. Repeated keydowns from a held key must not flip the mode
+  // back and forth, an open dialog owns the keyboard until it closes, and a
+  // picture gesture in flight is not interrupted by hiding its toolbar.
+  if (event.ctrlKey && event.shiftKey && event.key.toLocaleLowerCase() === "f") {
+    event.preventDefault();
+    if (event.repeat || event.isComposing) {
+      return;
+    }
+    if (editor.imageDrag || editor.imageResize) {
+      return;
+    }
+    if (!els.linkDialog.open && !els.deleteDialog.open) {
+      toggleFocusMode();
+    }
+    return;
+  }
+
+  // Ctrl+Shift+M switches between the Markdown source and the normal rendered
+  // view, the same as the document menu item. It is deliberately Ctrl-only
+  // rather than Ctrl-or-Cmd, so the binding is the same on macOS as everywhere
+  // else; plain Ctrl+M stays unbound. Repeated keydowns from a held key must not
+  // flip the view back and forth, an open dialog owns the keyboard until it
+  // closes, and a picture gesture in flight is not interrupted by rebuilding
+  // the view under it.
+  if (event.ctrlKey && event.shiftKey && event.key.toLocaleLowerCase() === "m") {
     event.preventDefault();
     if (event.repeat || event.isComposing) {
       return;

@@ -954,6 +954,15 @@ html[data-theme="dark"] .new-document-button:hover:not(:disabled) {
   color: var(--ink);
 }
 
+.menu-item[aria-current="page"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.menu-item[aria-current="page"] svg {
+  color: currentColor;
+}
+
 .menu-item-danger {
   color: var(--danger);
 }
@@ -1045,6 +1054,34 @@ html[data-theme="dark"] .new-document-button:hover:not(:disabled) {
   background: linear-gradient(90deg, var(--bg-deep) 25%, var(--surface-soft) 38%, var(--bg-deep) 52%);
   background-size: 300% 100%;
   animation: shimmer 1.5s ease-in-out infinite;
+}
+
+/* On charcoal the light theme's tones would sink into the desk, so the bars
+   take the raised surfaces instead: still quiet, but a loading row reads as a
+   row rather than as a dark smear. */
+html[data-theme="dark"] .skeleton {
+  background: linear-gradient(90deg, var(--surface-soft) 25%, var(--line-strong) 38%, var(--surface-soft) 52%);
+  background-size: 300% 100%;
+}
+
+/* The loading placeholder's highlight travels across the bar, which is what
+   tells the eye the library is on its way. These keyframes were lost when the
+   editor rewrite replaced the old motion section, leaving `.skeleton` static
+   and a slow listing looking like a page with nothing on it. */
+@keyframes shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+  }
 }
 
 .skeleton-thumb {
@@ -1475,6 +1512,118 @@ html[data-theme="dark"] .new-document-button:hover:not(:disabled) {
   flex: 1;
 }
 
+/* --------------------------------------------------------------------------
+   Link dialog: a web address or a search over the library
+   -------------------------------------------------------------------------- */
+
+/* Wider than the app's other modals: the page list needs room for titles and
+   their edited dates. The panel scrolls on short screens instead of spilling
+   past the viewport. */
+.link-dialog {
+  width: min(560px, calc(100vw - 32px));
+}
+
+.link-dialog .modal-panel {
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.link-field {
+  margin-top: 19px;
+}
+
+.link-field .field {
+  margin-top: 0;
+}
+
+.link-results {
+  margin-top: 9px;
+}
+
+.link-results-label {
+  padding: 0 2px 6px;
+  color: var(--faint);
+  font-size: 9.5px;
+  font-weight: 650;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.link-results-list {
+  max-height: 252px;
+  margin: 0;
+  padding: 3px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-soft);
+  list-style: none;
+}
+
+.link-result {
+  display: flex;
+  min-height: 35px;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.link-result[aria-selected="true"] {
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+.link-result-glyph {
+  display: grid;
+  width: 19px;
+  height: 19px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--muted);
+}
+
+.link-result-glyph svg {
+  width: 15px;
+  height: 15px;
+}
+
+.link-result[aria-selected="true"] .link-result-glyph {
+  color: var(--accent);
+}
+
+.link-result-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+}
+
+.link-result-meta {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.link-result[aria-selected="true"] .link-result-meta {
+  color: var(--muted);
+}
+
+.link-result-match {
+  background: transparent;
+  color: var(--accent-strong);
+  font-weight: 650;
+}
+
 .toast {
   position: fixed;
   z-index: 80;
@@ -1514,6 +1663,226 @@ html[data-theme="dark"] .toast {
 html[data-theme="dark"] .toast.is-error {
   background: var(--danger);
   color: #24110d;
+}
+
+/* --------------------------------------------------------------------------
+   Document search (Ctrl+O)
+   -------------------------------------------------------------------------- */
+
+/* The palette is shared by every page, so it borrows the modal's surface,
+   backdrop, and shadow rather than starting a second overlay style. */
+.quick-open {
+  width: min(600px, calc(100vw - 32px));
+  max-height: min(560px, calc(100vh - 48px));
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  box-shadow: var(--shadow-overlay);
+}
+
+.quick-open::backdrop {
+  background: rgba(20, 18, 23, 0.45);
+  backdrop-filter: blur(3px);
+}
+
+.quick-open[open] {
+  display: flex;
+  flex-direction: column;
+  animation: quick-open-in 160ms ease;
+}
+
+.quick-open[open]::backdrop {
+  animation: quick-open-backdrop-in 160ms ease;
+}
+
+@keyframes quick-open-in {
+  from {
+    opacity: 0;
+    transform: translateY(-7px) scale(0.992);
+  }
+}
+
+@keyframes quick-open-backdrop-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quick-open[open],
+  .quick-open[open]::backdrop {
+    animation: none;
+  }
+}
+
+.quick-open-search {
+  display: flex;
+  flex: 0 0 auto;
+  height: 52px;
+  align-items: center;
+  gap: 11px;
+  padding: 0 15px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  transition: border-color 160ms ease;
+}
+
+.quick-open:focus-within .quick-open-search {
+  border-bottom-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
+.quick-open-search svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.quick-open-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.quick-open-list {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+}
+
+.quick-open-option {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.quick-open-option[aria-selected="true"] {
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+.quick-open-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+}
+
+.quick-open-match {
+  background: transparent;
+  color: var(--accent-strong);
+  font-weight: 650;
+}
+
+.quick-open-meta {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.quick-open-option[aria-selected="true"] .quick-open-meta {
+  color: var(--muted);
+}
+
+.quick-open-message {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 20px 16px 22px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.quick-open-footer {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 14px;
+  padding: 8px 13px;
+  border-top: 1px solid var(--line);
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.quick-open-count {
+  min-height: 18px;
+}
+
+.quick-open-hints {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  /* The hints fade away after a few seconds (quick-open.js sets the timer) but
+     keep their space, so the footer and the centred palette never jump. */
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 240ms ease, transform 240ms ease, visibility 0s linear;
+}
+
+.quick-open-hints.is-gone {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(4px);
+  transition: opacity 240ms ease, transform 240ms ease, visibility 0s linear 240ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quick-open-hints,
+  .quick-open-hints.is-gone {
+    transition: none;
+  }
+}
+
+.quick-open-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.quick-open-hint kbd {
+  display: inline-grid;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--bg-soft);
+  color: var(--ink-soft);
+  font-family: var(--font-ui);
+  font-size: 9.5px;
+  font-weight: 550;
+  line-height: 1;
 }
 
 /* --------------------------------------------------------------------------
@@ -2009,6 +2378,135 @@ html[data-theme="dark"] .toast.is-error {
 @media (prefers-reduced-motion: reduce) {
   .storage-bar span {
     transition: none;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Shortcuts page
+   -------------------------------------------------------------------------- */
+
+.shortcuts-page {
+  display: flex;
+  min-height: 100vh;
+  flex-direction: column;
+}
+
+.shortcuts-main {
+  display: grid;
+  flex: 1;
+  align-content: start;
+  padding: 34px 0 72px;
+  justify-items: center;
+}
+
+.shortcuts-card {
+  width: min(620px, 100%);
+  padding: 30px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-paper);
+}
+
+.shortcuts-card h1 {
+  font-family: var(--font-reading);
+  font-size: 27px;
+  font-weight: 560;
+  letter-spacing: -0.035em;
+  line-height: 1.2;
+}
+
+.shortcuts-intro {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.shortcuts-section {
+  margin-top: 28px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+}
+
+.shortcuts-card > .shortcuts-section:first-of-type {
+  margin-top: 26px;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.shortcuts-section h2 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+}
+
+.shortcut-list {
+  margin: 10px 0 0;
+}
+
+.shortcut-row {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 20px;
+  align-items: baseline;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.shortcut-row:last-child {
+  border-bottom: 0;
+}
+
+.shortcut-row dt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.shortcut-row dd {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.shortcut-row kbd {
+  display: inline-grid;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 7px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  background: var(--bg-soft);
+  color: var(--ink-soft);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 550;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.shortcut-join {
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+@media (max-width: 640px) {
+  .shortcuts-main {
+    padding: 24px 0 56px;
+  }
+
+  .shortcuts-card {
+    padding: 23px;
+  }
+
+  .shortcut-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 5px;
   }
 }
 
@@ -2572,10 +3070,14 @@ html[data-theme="dark"] .toast.is-error {
 }
 
 .paper {
+  /* The loading ghost is positioned inside the sheet, so it shares these two
+     paddings instead of repeating the clamp() values. */
+  --paper-pad-top: clamp(24px, 2.7vw, 32px);
+  --paper-pad-x: clamp(28px, 7.2vw, 90px);
   position: relative;
   width: 100%;
   min-height: calc(100vh - 245px);
-  padding: clamp(42px, 5.2vw, 56px) clamp(28px, 7.2vw, 90px) 26px;
+  padding: var(--paper-pad-top) var(--paper-pad-x) 26px;
   border: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
   background: var(--paper);
   box-shadow: var(--shadow-paper);
@@ -2658,7 +3160,76 @@ body.is-resizing-paper * {
 
 .paper[aria-busy="true"] .document-title,
 .paper[aria-busy="true"] .prose {
-  opacity: 0.45;
+  /* The page has no document text yet, and its "Start writing…" placeholder
+     would claim the document is empty. The ghost below stands in for it. */
+  visibility: hidden;
+}
+
+/* A ghost of the first page while the editor fetches and lays out the
+   document, which on a large document (or a slow connection) is long enough
+   to look like an empty sheet. It stays invisible for a moment so an ordinary
+   fast open does not flash, then fades in when the wait is worth showing. */
+.paper-loading {
+  position: absolute;
+  top: var(--paper-pad-top);
+  right: var(--paper-pad-x);
+  left: var(--paper-pad-x);
+  display: none;
+  /* A cue only: the sheet underneath should behave as if the ghost were not
+     there while the editor is still loading. */
+  pointer-events: none;
+  animation: paper-loading-in 120ms ease 150ms both;
+}
+
+.paper[aria-busy="true"] .paper-loading {
+  display: block;
+}
+
+.paper-skeleton-title {
+  width: 54%;
+  height: 34px;
+  margin: 18px 0 30px;
+  border-radius: 9px;
+}
+
+.paper-skeleton-line {
+  width: 96%;
+  height: 13px;
+  margin-bottom: 19px;
+  border-radius: 7px;
+}
+
+.paper-skeleton-line:nth-child(3n) {
+  width: 92%;
+}
+
+.paper-skeleton-line:nth-child(3n + 1) {
+  width: 98%;
+}
+
+.paper-skeleton-line:nth-child(4n) {
+  width: 86%;
+}
+
+.paper-skeleton-line:last-child {
+  width: 43%;
+}
+
+@keyframes paper-loading-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .paper-loading {
+    /* Keep the delay that avoids the flash, but drop the fade. */
+    animation-duration: 0.01ms;
+  }
 }
 
 .paper-head {
@@ -2668,8 +3239,9 @@ body.is-resizing-paper * {
 .document-title {
   width: 100%;
   /* The title field clips ink outside its line box, so the leading has to
-     clear Literata's descenders. The margins offset the taller box. */
-  margin: 19px 0 13px;
+     clear Literata's descenders. The margins offset the taller box, and the
+     small top one keeps the title close to the top of the page. */
+  margin: 6px 0 13px;
   padding: 0;
   border: 0;
   outline: 0;
@@ -3182,11 +3754,11 @@ body.is-resizing-paper * {
 
   .paper {
     min-height: calc(100vh - 210px);
-    padding: 31px 21px 22px;
+    padding: 24px 21px 22px;
   }
 
   .document-title {
-    margin: 15px 0 11px;
+    margin: 6px 0 11px;
     font-size: 33px;
     letter-spacing: -0.04em;
   }

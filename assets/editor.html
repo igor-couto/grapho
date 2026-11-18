@@ -11,6 +11,7 @@
   <link rel="preload" href="/assets/fonts/literata-latin.woff2" as="font" type="font/woff2" crossorigin>
   <script src="/assets/theme.js"></script>
   <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/quick-open.js" defer></script>
   <script type="module" src="/assets/editor.js"></script>
 </head>
 <body class="editor-page">
@@ -135,14 +136,21 @@
             PDF
           </button>
           <div class="menu-rule" role="separator"></div>
-          <button class="menu-item" type="button" role="menuitem" data-doc-action="focus">
+          <button class="menu-item" type="button" role="menuitem" data-doc-action="focus" aria-keyshortcuts="Control+Shift+F" title="Focus mode (Ctrl+Shift+F)">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4.5 9V4.5H9M15 4.5h4.5V9M4.5 15v4.5H9M19.5 15v4.5H15" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
             <span id="focusMenuItemLabel">Focus mode</span>
           </button>
-          <button class="menu-item" type="button" role="menuitem" data-doc-action="markdown" aria-keyshortcuts="Control+M" title="Markdown mode (Ctrl+M)">
+          <button class="menu-item" type="button" role="menuitem" data-doc-action="markdown" aria-keyshortcuts="Control+Shift+M" title="Markdown mode (Ctrl+Shift+M)">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9.5 4 7.5 20M16.5 4l-2 16M4 9h16M4 15h16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
             <span id="markdownMenuItemLabel">Markdown mode</span>
           </button>
+          <a class="menu-item" role="menuitem" id="shortcutsLink" href="/shortcuts">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <rect x="2.8" y="6" width="18.4" height="12" rx="2.4" stroke="currentColor" stroke-width="1.6"/>
+              <path d="M6.4 9.8h.01M9.4 9.8h.01M12.4 9.8h.01M15.4 9.8h.01M18.4 9.8h.01M6.4 12.8h.01M9.4 12.8h.01M12.4 12.8h.01M15.4 12.8h.01M18.4 12.8h.01M7.6 15.4h8.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+            </svg>
+            Shortcuts
+          </a>
           <div class="menu-rule" role="separator"></div>
           <button class="menu-item menu-item-danger" type="button" role="menuitem" data-doc-action="delete">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 7h14M9 7V4.8h6V7M7 7l.8 12.2h8.4L17 7M10 11v4.5M14 11v4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -184,6 +192,19 @@
       <article class="paper" id="paper" aria-busy="true">
         <span class="paper-grip" data-paper-grip="left" aria-hidden="true"></span>
         <span class="paper-grip" data-paper-grip="right" aria-hidden="true"></span>
+
+        <div class="paper-loading" aria-hidden="true">
+          <div class="skeleton paper-skeleton-title"></div>
+          <span class="skeleton paper-skeleton-line"></span>
+          <span class="skeleton paper-skeleton-line"></span>
+          <span class="skeleton paper-skeleton-line"></span>
+          <span class="skeleton paper-skeleton-line"></span>
+          <span class="skeleton paper-skeleton-line"></span>
+          <span class="skeleton paper-skeleton-line"></span>
+          <span class="skeleton paper-skeleton-line"></span>
+          <span class="skeleton paper-skeleton-line"></span>
+          <span class="skeleton paper-skeleton-line"></span>
+        </div>
 
         <header class="paper-head">
           <input class="document-title" id="documentTitle" type="text" placeholder="Untitled document" maxlength="200" autocomplete="off" spellcheck="false" aria-label="Document title" disabled>
@@ -263,18 +284,24 @@
       <input class="image-radius-input" id="imageRadiusInput" type="number" inputmode="numeric" min="0" max="200" step="2" aria-labelledby="imageRadiusLabel">
     </label>
     <div class="menu-rule" role="separator"></div>
+    <button class="menu-item" type="button" role="menuitem" data-image-action="download">Download image</button>
     <button class="menu-item menu-item-danger" type="button" role="menuitem" data-image-action="remove">Remove image</button>
   </div>
 
-  <dialog class="modal modal-small" id="linkDialog" aria-labelledby="linkTitle">
+  <dialog class="modal link-dialog" id="linkDialog" aria-labelledby="linkTitle">
     <form class="modal-panel" id="linkForm" novalidate>
       <h2 id="linkTitle">Add a link</h2>
-      <p class="modal-description" id="linkDescription">Link the selected text to a web address.</p>
-      <label class="field">
-        <span>Web address</span>
-        <input id="linkInput" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://example.com">
-      </label>
-      <p class="field-error" id="linkError" role="alert" hidden>Enter a valid http, https, or mailto address.</p>
+      <div class="link-field">
+        <label class="field" for="linkInput">
+          <span>Web address or search Grapho page</span>
+          <input id="linkInput" type="text" autocomplete="off" spellcheck="false" placeholder="Search documents or paste a web address" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="linkResultsList">
+        </label>
+        <div class="link-results" id="linkResults" hidden>
+          <p class="link-results-label" id="linkResultsLabel">Recent documents</p>
+          <ul class="link-results-list" id="linkResultsList" role="listbox" aria-labelledby="linkResultsLabel"></ul>
+        </div>
+      </div>
+      <p class="field-error" id="linkError" role="alert" hidden>Enter a web address, or choose a Grapho page.</p>
       <div class="modal-actions">
         <button class="button button-quiet" type="button" id="linkRemove" hidden>Remove link</button>
         <span class="modal-actions-spacer"></span>

@@ -225,6 +225,39 @@ async function paintedBlocks(cdp) {
   );
 }
 
+async function waitForExpression(cdp, expression, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      if (await evaluate(cdp, expression)) {
+        return true;
+      }
+    } catch (error) {
+      // The page is navigating; try again while the deadline lasts.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+}
+
+async function waitForNewPage(devtoolsPort, url, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const targets = await fetch(`http://127.0.0.1:${devtoolsPort}/json/list`)
+      .then((response) => response.json())
+      .catch(() => []);
+    const found = targets.find(
+      (target) => target.type === "page" && target.url.startsWith(url),
+    );
+    if (found) {
+      return found;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return null;
+}
+
+
 async function main() {
   const binary = await findBinary();
   const chromeCandidates = findChrome();
@@ -352,6 +385,43 @@ async function main() {
     await cdp.send("Page.navigate", { url: base + "/doc/" + documentId });
     await waitForPage(cdp, base + "/doc/" + documentId, PAGE_TIMEOUT_MS);
     await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+
+    // The paper starts empty until the editor paints it, so it carries a
+    // loading ghost while aria-busy is true and drops it once the text is up.
+    const loadingGhost = await evaluate(
+      cdp,
+      `(() => {
+        const paper = document.getElementById("paper");
+        const ghost = document.querySelector(".paper-loading");
+        const prose = document.getElementById("editor");
+        if (!ghost) return null;
+        const whileLoaded = {
+          display: getComputedStyle(ghost).display,
+          prose: getComputedStyle(prose).visibility,
+        };
+        paper.setAttribute("aria-busy", "true");
+        const whileBusy = {
+          display: getComputedStyle(ghost).display,
+          prose: getComputedStyle(prose).visibility,
+        };
+        paper.setAttribute("aria-busy", "false");
+        return { whileLoaded, whileBusy };
+      })()`,
+    );
+    check(
+      "the loading ghost is gone once the document is painted",
+      Boolean(loadingGhost) &&
+        loadingGhost.whileLoaded.display === "none" &&
+        loadingGhost.whileLoaded.prose === "visible",
+      JSON.stringify(loadingGhost),
+    );
+    check(
+      "the loading ghost stands in while the paper is busy",
+      Boolean(loadingGhost) &&
+        loadingGhost.whileBusy.display !== "none" &&
+        loadingGhost.whileBusy.prose === "hidden",
+      JSON.stringify(loadingGhost),
+    );
 
     let blocks = await paintedBlocks(cdp);
     equal("editor paints every stored block", blocks.length, 11);
@@ -886,7 +956,7 @@ async function main() {
         return canvas.toDataURL("image/png");
       })()`,
     );
-    const imageContent = '<p>Picture below.</p><img width="800" height="500" src="' + imageSource + '">';
+    const imageContent = '<p>Picture below.</p><img alt="Diagram" width="800" height="500" src="' + imageSource + '">';
     const imageDocumentId = await evaluate(
       cdp,
       `(async () => {
@@ -1240,6 +1310,75 @@ async function main() {
     const backTag = await waitForImageTag((tag) => !/class=/.test(tag));
     check("the middle brings it back to its own line", !/class=/.test(backTag), backTag);
 
+    // Download image hands over the stored bits themselves, under a name taken
+    // from the picture's alt text. Capture the blob in the page instead of
+    // letting the browser write a real file, then compare its bytes with the
+    // data URL that is saved in the document.
+    const storedBeforeDownload = await storedImageTag();
+    const storedPayload =
+      (storedBeforeDownload.match(/src="data:image\/png;base64,([^"]+)"/) || [])[1] || "";
+    const expectedBytes = Buffer.from(storedPayload, "base64");
+    await evaluate(
+      cdp,
+      `(() => {
+        window.__graphoDownload = null;
+        window.__graphoCreateObjectURL = URL.createObjectURL;
+        URL.createObjectURL = function (blob) {
+          window.__graphoDownload = { blob, type: blob.type, size: blob.size };
+          return window.__graphoCreateObjectURL.call(URL, blob);
+        };
+        window.__graphoAnchorClick = HTMLAnchorElement.prototype.click;
+        HTMLAnchorElement.prototype.click = function () {
+          if (this.download && window.__graphoDownload) {
+            window.__graphoDownload.filename = this.download;
+            return;
+          }
+          return window.__graphoAnchorClick.call(this);
+        };
+        return true;
+      })()`,
+    );
+    const downloadPoint = await evaluate(
+      cdp,
+      `(() => {
+        const box = document.querySelector('[data-image-action="download"]').getBoundingClientRect();
+        return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      })()`,
+    );
+    await clickAt(downloadPoint);
+    const downloaded = await evaluate(
+      cdp,
+      `(async () => {
+        const capture = window.__graphoDownload;
+        URL.createObjectURL = window.__graphoCreateObjectURL;
+        HTMLAnchorElement.prototype.click = window.__graphoAnchorClick;
+        if (!capture) return null;
+        const bytes = new Uint8Array(await capture.blob.arrayBuffer());
+        return {
+          filename: capture.filename,
+          type: capture.type,
+          size: capture.size,
+          signature: Array.from(bytes.slice(0, 8)),
+          menuOpen: !document.getElementById("imageMenu").hidden,
+          images: document.querySelectorAll(".doc-image").length,
+        };
+      })()`,
+    );
+    check(
+      "the image menu downloads the stored bitmap as a file",
+      Boolean(downloaded) &&
+        downloaded.filename === "diagram.png" &&
+        downloaded.type === "image/png" &&
+        downloaded.size === expectedBytes.length &&
+        downloaded.signature.join(",") === "137,80,78,71,13,10,26,10",
+      JSON.stringify({ ...downloaded, expectedSize: expectedBytes.length }),
+    );
+    check(
+      "downloading an image closes its menu and leaves the picture in place",
+      Boolean(downloaded) && downloaded.menuOpen === false && downloaded.images === 1,
+      JSON.stringify(downloaded),
+    );
+
     await cdp.send("Page.navigate", { url: base + "/doc/" + imageDocumentId });
     await waitForPage(cdp, base + "/doc/" + imageDocumentId, PAGE_TIMEOUT_MS);
     await waitForEditor(cdp, PAGE_TIMEOUT_MS);
@@ -1478,6 +1617,30 @@ async function main() {
       JSON.stringify(focusOff),
     );
 
+    // The keyboard shortcut toggles focus mode without opening the menu.
+    await evaluate(cdp, `window.__focusFullscreenRequests = 0`);
+    await pressKey("F", "KeyF", 70, 10);
+    const focusKeyOn = await evaluate(
+      cdp,
+      `({
+        mode: document.body.classList.contains("is-focus-mode"),
+        label: document.getElementById("focusMenuItemLabel").textContent,
+        requests: window.__focusFullscreenRequests,
+      })`,
+    );
+    check(
+      "Ctrl+Shift+F enters focus mode without the menu",
+      focusKeyOn.mode === true &&
+        focusKeyOn.label === "Exit focus mode" &&
+        focusKeyOn.requests === 1,
+      JSON.stringify(focusKeyOn),
+    );
+    await pressKey("F", "KeyF", 70, 10);
+    check(
+      "Ctrl+Shift+F leaves focus mode",
+      (await evaluate(cdp, `!document.body.classList.contains("is-focus-mode")`)) === true,
+    );
+
     await evaluate(
       cdp,
       `(() => {
@@ -1708,7 +1871,7 @@ async function main() {
     );
 
     // The keyboard shortcut toggles the view without opening the menu.
-    await pressKey("m", "KeyM", 77, 2);
+    await pressKey("M", "KeyM", 77, 10);
     await new Promise((resolve) => setTimeout(resolve, 300));
     const shortcutOn = await evaluate(
       cdp,
@@ -1718,7 +1881,7 @@ async function main() {
         sourceLines: document.querySelectorAll(".doc-line.is-source").length
       })`,
     );
-    await pressKey("m", "KeyM", 77, 2);
+    await pressKey("M", "KeyM", 77, 10);
     await new Promise((resolve) => setTimeout(resolve, 300));
     const shortcutOff = await evaluate(
       cdp,
@@ -1729,7 +1892,7 @@ async function main() {
       })`,
     );
     check(
-      "Ctrl+M toggles Markdown mode without the menu",
+      "Ctrl+Shift+M toggles Markdown mode without the menu",
       shortcutOn.mode === true &&
         shortcutOn.label === "Exit Markdown mode" &&
         shortcutOn.sourceLines > 0 &&
@@ -2056,6 +2219,555 @@ async function main() {
       () => null,
     );
 
+    // The link dialog can point at another Grapho page: it reads the library
+    // when it opens, lists recent documents, filters them locally as the writer
+    // types, and inserts a root-relative target. A typed web address keeps the
+    // behavior it always had.
+    const linkPages = await evaluate(
+      cdp,
+      `(async () => {
+        const create = async (title, content) => {
+          const response = await fetch("/api/documents", { method: "POST" });
+          if (!response.ok) throw new Error("create failed: " + response.status);
+          const document = await response.json();
+          const saved = await fetch("/api/documents/" + encodeURIComponent(document.id), {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title, content, paper_width: 0 }),
+          });
+          if (!saved.ok) throw new Error("save failed: " + saved.status);
+          return document.id;
+        };
+        return {
+          target: await create("Link target page", "<p>Target body.</p>"),
+          source: await create("Link dialog source", "<p>Link this phrase now.</p>"),
+          markdown: await create("Markdown link source", "<p>Go to the page now.</p>"),
+        };
+      })()`,
+    );
+    const targetHref = "/doc/" + linkPages.target;
+    check("the link dialog test documents were created", Boolean(linkPages.target));
+
+    async function clickFirstLine() {
+      const point = await evaluate(
+        cdp,
+        `(() => {
+          const line = document.querySelector(".doc-content > .doc-block .doc-line");
+          const box = line.getBoundingClientRect();
+          return { x: box.left + 5, y: box.top + box.height / 2 };
+        })()`,
+      );
+      await clickAt(point);
+    }
+
+    async function selectWholeDocument() {
+      await clickFirstLine();
+      await pressKey("a", "KeyA", 65, 2);
+    }
+
+    async function openLinkDialogForTest() {
+      await evaluate(cdp, `document.getElementById("linkButton").click()`);
+      return waitForExpression(
+        cdp,
+        `Boolean(document.getElementById("linkDialog").open)`,
+        PAGE_TIMEOUT_MS,
+      );
+    }
+
+    async function waitForLinkResults() {
+      return waitForExpression(
+        cdp,
+        `(() => {
+          const results = document.getElementById("linkResults");
+          return Boolean(
+            results &&
+            !results.hidden &&
+            document.querySelectorAll("#linkResultsList .link-result").length > 0
+          );
+        })()`,
+        PAGE_TIMEOUT_MS,
+      );
+    }
+
+    async function savedLinkDocument(id) {
+      return evaluate(
+        cdp,
+        `(async () => (await fetch(${JSON.stringify("/api/documents/" + id)})).json())()`,
+      );
+    }
+
+    async function waitForSavedLinkContent(id, probe) {
+      for (let attempt = 0; attempt < 80; attempt += 1) {
+        const stored = await savedLinkDocument(id);
+        if (stored && stored.content && stored.content.includes(probe)) {
+          return true;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      return false;
+    }
+
+    async function paintedLink() {
+      return evaluate(
+        cdp,
+        `(() => {
+          const link = document.querySelector(".m-link");
+          return link ? { href: link.getAttribute("data-href"), text: link.textContent } : null;
+        })()`,
+      );
+    }
+
+    async function clickLinkResult(title) {
+      return evaluate(
+        cdp,
+        `(() => {
+          const row = Array.from(document.querySelectorAll("#linkResultsList .link-result")).find(
+            (candidate) =>
+              candidate.querySelector(".link-result-title").textContent === ${JSON.stringify(title)},
+          );
+          if (!row) return false;
+          row.click();
+          return true;
+        })()`,
+      );
+    }
+
+    async function pressEnter() {
+      await cdp.send("Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: "Enter",
+        code: "Enter",
+        text: "\r",
+        unmodifiedText: "\r",
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+      });
+      await cdp.send("Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: "Enter",
+        code: "Enter",
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+      });
+    }
+
+    await cdp.send("Page.navigate", { url: base + "/doc/" + linkPages.source });
+    await waitForPage(cdp, base + "/doc/" + linkPages.source, PAGE_TIMEOUT_MS);
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+
+    await selectWholeDocument();
+    check("the link dialog opens", await openLinkDialogForTest());
+    check("the link dialog lists recent documents", await waitForLinkResults());
+    const linkPicker = await evaluate(
+      cdp,
+      `(() => {
+        const rows = Array.from(document.querySelectorAll("#linkResultsList .link-result"));
+        return {
+          field: document.querySelector("#linkDialog .field > span").textContent,
+          placeholder: document.getElementById("linkInput").placeholder,
+          combobox: document.getElementById("linkInput").getAttribute("role"),
+          expanded: document.getElementById("linkInput").getAttribute("aria-expanded"),
+          listRole: document.getElementById("linkResultsList").getAttribute("role"),
+          listLabel: document.getElementById("linkResultsLabel").textContent,
+          rows: rows.map((row) => ({
+            title: row.querySelector(".link-result-title").textContent,
+            meta: row.querySelector(".link-result-meta").textContent,
+            selected: row.getAttribute("aria-selected"),
+          })),
+        };
+      })()`,
+    );
+    check(
+      "the link field offers a web address or a page search",
+      linkPicker.field === "Web address or search Grapho page" &&
+        linkPicker.placeholder.includes("web address") &&
+        linkPicker.combobox === "combobox" &&
+        linkPicker.expanded === "true" &&
+        linkPicker.listRole === "listbox",
+      JSON.stringify(linkPicker),
+    );
+    check(
+      "the page list starts with recent documents and leaves the current page out",
+      linkPicker.listLabel === "Recent documents" &&
+        linkPicker.rows.length > 0 &&
+        linkPicker.rows.some((row) => row.title === "Link target page") &&
+        linkPicker.rows.some((row) => row.title === "Markdown link source") &&
+        linkPicker.rows.every((row) => row.title !== "Link dialog source") &&
+        linkPicker.rows.every((row) => row.meta.startsWith("Edited ")) &&
+        linkPicker.rows.every((row) => row.selected === "false"),
+      JSON.stringify(linkPicker.rows),
+    );
+
+    check(
+      "choosing a recent document puts that page in the link",
+      await clickLinkResult("Link target page"),
+    );
+    const pageLink = await paintedLink();
+    check(
+      "choosing a recent document links the selected text to that page",
+      pageLink && pageLink.href === targetHref && pageLink.text === "Link this phrase now.",
+      JSON.stringify(pageLink),
+    );
+    check(
+      "the page link is saved as a root-relative target",
+      await waitForSavedLinkContent(linkPages.source, 'href="' + targetHref + '"'),
+    );
+
+    // The dialog still adds a web address: pasting one hides the page list and
+    // Enter applies it to the selection.
+    await pressKey("z", "KeyZ", 90, 2);
+    await selectWholeDocument();
+    check("the link dialog reopens for a web address", await openLinkDialogForTest());
+    const fieldFocused = await waitForExpression(
+      cdp,
+      `document.activeElement && document.activeElement.id === "linkInput"`,
+      PAGE_TIMEOUT_MS,
+    );
+    await cdp.send("Input.insertText", { text: "https://example.com/page" });
+    check(
+      "a typed web address is not searched as a page",
+      fieldFocused &&
+        (await waitForExpression(
+          cdp,
+          `document.getElementById("linkResults").hidden`,
+          PAGE_TIMEOUT_MS,
+        )),
+    );
+    await pressEnter();
+    const addressLink = await paintedLink();
+    check(
+      "a typed web address still becomes the link",
+      addressLink && addressLink.href === "https://example.com/page",
+      JSON.stringify(addressLink),
+    );
+    check(
+      "the typed web address is saved",
+      await waitForSavedLinkContent(linkPages.source, 'href="https://example.com/page"'),
+    );
+
+    // Typing narrows the list to a search: the best match is offered, and
+    // Enter links it without a click.
+    await pressKey("z", "KeyZ", 90, 2);
+    await selectWholeDocument();
+    check("the link dialog reopens for a page search", await openLinkDialogForTest());
+    await waitForExpression(
+      cdp,
+      `document.activeElement && document.activeElement.id === "linkInput"`,
+      PAGE_TIMEOUT_MS,
+    );
+    await cdp.send("Input.insertText", { text: "target" });
+    const pickedBySearch = await waitForExpression(
+      cdp,
+      `(() => {
+        const rows = Array.from(document.querySelectorAll("#linkResultsList .link-result"));
+        const selected = rows.filter((row) => row.getAttribute("aria-selected") === "true");
+        return (
+          rows.length === 1 &&
+          selected.length === 1 &&
+          selected[0].querySelector(".link-result-title").textContent === "Link target page"
+        );
+      })()`,
+      PAGE_TIMEOUT_MS,
+    );
+    check("typing a page title filters the list and selects the match", pickedBySearch);
+    await pressEnter();
+    const keyboardLink = await paintedLink();
+    check(
+      "Enter on a matching page links it",
+      keyboardLink && keyboardLink.href === targetHref,
+      JSON.stringify(keyboardLink),
+    );
+    check(
+      "the page link chosen with the keyboard is saved",
+      await waitForSavedLinkContent(linkPages.source, 'href="' + targetHref + '"'),
+    );
+
+    // A caret inside a link opens the dialog in its edit state; the new target
+    // replaces the old one instead of arming the marks for the next keystroke.
+    await clickFirstLine();
+    await pressKey("k", "KeyK", 75, 2);
+    check(
+      "a caret inside a page link opens the dialog in edit mode",
+      await waitForExpression(
+        cdp,
+        `Boolean(
+          document.getElementById("linkDialog").open &&
+          document.getElementById("linkTitle").textContent === "Edit link" &&
+          document.getElementById("linkInput").value === ${JSON.stringify(targetHref)}
+        )`,
+        PAGE_TIMEOUT_MS,
+      ),
+    );
+    await waitForExpression(
+      cdp,
+      `(() => {
+        const input = document.getElementById("linkInput");
+        return (
+          document.activeElement === input &&
+          input.value.length > 0 &&
+          input.selectionStart === 0 &&
+          input.selectionEnd === input.value.length
+        );
+      })()`,
+      PAGE_TIMEOUT_MS,
+    );
+    await cdp.send("Input.insertText", { text: "https://example.org/edited" });
+    await pressEnter();
+    const editedLink = await paintedLink();
+    check(
+      "editing a link from a collapsed caret replaces its target",
+      editedLink && editedLink.href === "https://example.org/edited",
+      JSON.stringify(editedLink),
+    );
+    check(
+      "the edited link is saved",
+      await waitForSavedLinkContent(linkPages.source, 'href="https://example.org/edited"'),
+    );
+
+    // Markdown mode gets the same page picker: the link is written into the
+    // source and parses back to the usual stored anchor.
+    await cdp.send("Page.navigate", { url: base + "/doc/" + linkPages.markdown });
+    await waitForPage(cdp, base + "/doc/" + linkPages.markdown, PAGE_TIMEOUT_MS);
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+    await enterMarkdown();
+    await selectWholeDocument();
+    check("the link dialog opens in Markdown mode", await openLinkDialogForTest());
+    check("the page list is available in Markdown mode", await waitForLinkResults());
+    check(
+      "choosing a page in Markdown mode inserts its link",
+      await clickLinkResult("Link target page"),
+    );
+    const markdownSourceLine = await evaluate(
+      cdp,
+      `Array.from(document.querySelectorAll(".doc-line.is-source")).map((line) => line.textContent).join("\\n")`,
+    );
+    check(
+      "the page picker writes a Markdown link into the source",
+      markdownSourceLine.includes("](" + targetHref + ")"),
+      markdownSourceLine,
+    );
+    await leaveMarkdown();
+    const markdownRichLink = await paintedLink();
+    check(
+      "the Markdown page link renders as a link",
+      markdownRichLink && markdownRichLink.href === targetHref,
+      JSON.stringify(markdownRichLink),
+    );
+    check(
+      "the Markdown page link saves as the usual anchor",
+      await waitForSavedLinkContent(linkPages.markdown, 'href="' + targetHref + '"'),
+    );
+
+    // On a phone-sized viewport the taller dialog has to stay inside the
+    // screen instead of spilling past it.
+    await cdp.send("Emulation.setDeviceMetricsOverride", {
+      width: 390,
+      height: 650,
+      deviceScaleFactor: 1,
+      mobile: true,
+    });
+    await cdp.send("Page.navigate", { url: base + "/doc/" + linkPages.target });
+    await waitForPage(cdp, base + "/doc/" + linkPages.target, PAGE_TIMEOUT_MS);
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+    await selectWholeDocument();
+    await openLinkDialogForTest();
+    await waitForLinkResults();
+    const narrowDialog = await evaluate(
+      cdp,
+      `(() => {
+        const box = document.getElementById("linkDialog").getBoundingClientRect();
+        return {
+          top: box.top,
+          bottom: box.bottom,
+          height: box.height,
+          viewport: window.innerHeight,
+          overflow: document.documentElement.scrollWidth - window.innerWidth,
+        };
+      })()`,
+    );
+    await evaluate(cdp, `document.getElementById("linkCancel").click()`);
+    await cdp.send("Emulation.clearDeviceMetricsOverride");
+    check(
+      "the link dialog fits a narrow viewport",
+      narrowDialog.height > 0 &&
+        narrowDialog.top >= 0 &&
+        narrowDialog.bottom <= narrowDialog.viewport &&
+        narrowDialog.overflow <= 1,
+      JSON.stringify(narrowDialog),
+    );
+
+    // Closing a dialog has to leave the writer writing. Chrome restores focus
+    // when a modal dialog closes without restoring the editing state, and can
+    // drop it on the page body, so without the editor taking focus back the
+    // keys arrive and nothing is typed until the page is reloaded. The typing
+    // here is real key events on purpose: Input.insertText bypasses the path
+    // the browser broke.
+    async function typeCharacter(character) {
+      const code = "Key" + character.toUpperCase();
+      const virtualKeyCode = character.toUpperCase().charCodeAt(0);
+      await cdp.send("Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: character,
+        code,
+        windowsVirtualKeyCode: virtualKeyCode,
+        nativeVirtualKeyCode: virtualKeyCode,
+        text: character,
+        unmodifiedText: character,
+      });
+      await cdp.send("Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: character,
+        code,
+        windowsVirtualKeyCode: virtualKeyCode,
+        nativeVirtualKeyCode: virtualKeyCode,
+      });
+    }
+
+    async function clickSelector(selector) {
+      const point = await evaluate(
+        cdp,
+        `(() => {
+          const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+          return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+        })()`,
+      );
+      await clickAt(point);
+    }
+
+    const dialogTypingId = await evaluate(
+      cdp,
+      `(async () => {
+        const created = await fetch("/api/documents", { method: "POST" });
+        if (!created.ok) throw new Error("create failed: " + created.status);
+        const document = await created.json();
+        const saved = await fetch("/api/documents/" + encodeURIComponent(document.id), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: "Typing after a dialog",
+            content: "<p>Close the dialog and keep typing.</p>",
+          }),
+        });
+        if (!saved.ok) throw new Error("save failed: " + saved.status);
+        return document.id;
+      })()`,
+    );
+
+    // The whole line is selected before the dialog opens, so one typed letter
+    // replaces it and the check can read the letter back from the paper.
+    async function typesAfterDialog(close) {
+      await cdp.send("Page.navigate", { url: base + "/doc/" + dialogTypingId });
+      await waitForPage(cdp, base + "/doc/" + dialogTypingId, PAGE_TIMEOUT_MS);
+      await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+      await clickFirstLine();
+      await pressKey("a", "KeyA", 65, 2);
+      await clickSelector("#linkButton");
+      const opened = await waitForExpression(
+        cdp,
+        `Boolean(document.getElementById("linkDialog").open)`,
+        PAGE_TIMEOUT_MS,
+      );
+      // The dialog focuses its field after the frame that opens it, so a click
+      // that arrives first is still a real click on a real button.
+      await waitForExpression(
+        cdp,
+        `document.activeElement === document.getElementById("linkInput")`,
+        PAGE_TIMEOUT_MS,
+      );
+      await close();
+      const closed = await waitForExpression(
+        cdp,
+        `!document.getElementById("linkDialog").open`,
+        PAGE_TIMEOUT_MS,
+      );
+      await typeCharacter("q");
+      const blocks = await paintedBlocks(cdp);
+      return {
+        opened,
+        closed,
+        text: blocks.map((block) => block.text).join("|"),
+        active: await evaluate(
+          cdp,
+          `document.activeElement ? document.activeElement.id || document.activeElement.tagName : ""`,
+        ),
+      };
+    }
+
+    function dialogTypingCheck(name, result) {
+      check(
+        name,
+        result.opened && result.closed && result.text === "q",
+        JSON.stringify(result),
+      );
+    }
+
+    dialogTypingCheck(
+      "typing works after the link dialog is cancelled",
+      await typesAfterDialog(async () => {
+        await clickSelector("#linkCancel");
+      }),
+    );
+    dialogTypingCheck(
+      "typing works after the link dialog adds a link",
+      await typesAfterDialog(async () => {
+        await cdp.send("Input.insertText", { text: "https://example.com/after-dialog" });
+        await clickSelector("#linkApply");
+      }),
+    );
+    dialogTypingCheck(
+      "typing works after the link dialog is dismissed with Escape",
+      await typesAfterDialog(async () => {
+        await pressKey("Escape", "Escape", 27, 0);
+      }),
+    );
+    dialogTypingCheck(
+      "typing works after the link dialog is submitted with Enter",
+      await typesAfterDialog(async () => {
+        await cdp.send("Input.insertText", { text: "https://example.com/after-dialog" });
+        await pressEnter();
+      }),
+    );
+
+    // The delete dialog is opened from the same editor and its Cancel button
+    // is the same kind of exit.
+    const deleteCancelTyping = await (async () => {
+      await cdp.send("Page.navigate", { url: base + "/doc/" + dialogTypingId });
+      await waitForPage(cdp, base + "/doc/" + dialogTypingId, PAGE_TIMEOUT_MS);
+      await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+      await clickFirstLine();
+      await pressKey("a", "KeyA", 65, 2);
+      await evaluate(
+        cdp,
+        `(() => {
+          document.getElementById("documentMenuButton").click();
+          document.querySelector('[data-doc-action="delete"]').click();
+        })()`,
+      );
+      const opened = await waitForExpression(
+        cdp,
+        `Boolean(document.getElementById("deleteDialog").open)`,
+        PAGE_TIMEOUT_MS,
+      );
+      await clickSelector("#deleteCancel");
+      const closed = await waitForExpression(
+        cdp,
+        `!document.getElementById("deleteDialog").open`,
+        PAGE_TIMEOUT_MS,
+      );
+      await typeCharacter("q");
+      const blocks = await paintedBlocks(cdp);
+      return {
+        opened,
+        closed,
+        text: blocks.map((block) => block.text).join("|"),
+        active: await evaluate(
+          cdp,
+          `document.activeElement ? document.activeElement.id || document.activeElement.tagName : ""`,
+        ),
+      };
+    })();
+    dialogTypingCheck("typing works after the delete dialog is cancelled", deleteCancelTyping);
+
     const consoleErrors = cdp.events
       .filter((event) => event.method === "Runtime.consoleAPICalled" && event.params.type === "error")
       .map((event) => event.params.args.map((arg) => arg.value || arg.description).join(" "));
@@ -2069,9 +2781,10 @@ async function main() {
     await waitForPage(cdp, base + "/", PAGE_TIMEOUT_MS);
     let libraryCards = 0;
     for (let attempt = 0; attempt < 60 && libraryCards === 0; attempt += 1) {
+      // The loading placeholders are cards too; wait for the real ones.
       libraryCards = await evaluate(
         cdp,
-        `document.querySelectorAll(".document-card").length`,
+        `document.querySelectorAll(".document-card:not(.document-card-skeleton)").length`,
       );
       if (libraryCards === 0) {
         await new Promise((resolve) => setTimeout(resolve, 100));
@@ -2136,7 +2849,7 @@ async function main() {
     for (let attempt = 0; attempt < 60 && layeringCards < 3; attempt += 1) {
       layeringCards = await evaluate(
         cdp,
-        `document.querySelectorAll(".document-card").length`,
+        `document.querySelectorAll(".document-card:not(.document-card-skeleton)").length`,
       );
       if (layeringCards < 3) {
         await new Promise((resolve) => setTimeout(resolve, 100));
@@ -2218,6 +2931,820 @@ async function main() {
         `fetch("/api/documents/${layeringId}", { method: "DELETE" })`,
       ).catch(() => null);
     }
+
+    // Rich clipboard HTML is untrusted input from another program. Dispatch a
+    // real paste event on the editor's hidden textarea so the event binding, the
+    // clipboard reducer, the sanitizer, the debounced save, and a reload all run
+    // end to end, then check the stored HTML and what the reload paints.
+    const pasteHtml =
+      "<h2>Pasted heading</h2>" +
+      "<ul><li>one</li><li>Two <b>bold</b></li></ul>" +
+      '<p>a <span style="font-style:italic">slanted</span> word</p>';
+    const pasteText = "Pasted heading\none\nTwo bold\na slanted word";
+    let pasteDocumentId = null;
+    try {
+      pasteDocumentId = await evaluate(
+        cdp,
+        `(async () => {
+          const created = await fetch("/api/documents", { method: "POST" });
+          if (!created.ok) throw new Error("create failed: " + created.status);
+          const document = await created.json();
+          const saved = await fetch("/api/documents/" + encodeURIComponent(document.id), {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: "Paste check", content: "<p></p>", paper_width: 0 }),
+          });
+          if (!saved.ok) throw new Error("save failed: " + saved.status);
+          return document.id;
+        })()`,
+      );
+      check("a paste document is created through the API", Boolean(pasteDocumentId));
+
+      await cdp.send("Page.navigate", { url: base + "/doc/" + pasteDocumentId });
+      await waitForPage(cdp, base + "/doc/" + pasteDocumentId, PAGE_TIMEOUT_MS);
+      await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+
+      const pasteEvent = await evaluate(
+        cdp,
+        `(() => {
+          const clipboard = new DataTransfer();
+          clipboard.setData("text/html", ${JSON.stringify(pasteHtml)});
+          clipboard.setData("text/plain", ${JSON.stringify(pasteText)});
+          const input = document.getElementById("docInput");
+          const event = new ClipboardEvent("paste", {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: clipboard,
+          });
+          return {
+            input: Boolean(input),
+            handled: input ? input.dispatchEvent(event) === false : false,
+            html: clipboard.getData("text/html"),
+          };
+        })()`,
+      );
+      check(
+        "the editor handles a real paste event dispatched on its textarea",
+        pasteEvent.input && pasteEvent.handled && pasteEvent.html.includes("Pasted heading"),
+        JSON.stringify(pasteEvent),
+      );
+
+      // The save is debounced, so read the API until it carries the paste.
+      let pastedContent = "";
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const stored = await evaluate(
+          cdp,
+          `(async () => (await fetch("/api/documents/${pasteDocumentId}")).json())()`,
+        );
+        pastedContent = String((stored && stored.content) || "");
+        if (pastedContent.includes("Pasted heading")) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      check(
+        "the rich paste is saved as the document's semantic HTML",
+        pastedContent.includes("<h2>Pasted heading</h2>") &&
+          pastedContent.includes("<ul><li>one</li><li>Two <b>bold</b></li></ul>"),
+        pastedContent,
+      );
+      check(
+        "the pasted marks are stored as tags, not inline styles",
+        pastedContent.includes("<b>bold</b>") && pastedContent.includes("<i>slanted</i>"),
+        pastedContent,
+      );
+      check(
+        "the paste drops the span wrapper and its style before saving",
+        !pastedContent.includes("style=") && !pastedContent.includes("<span"),
+        pastedContent,
+      );
+
+      await cdp.send("Page.navigate", { url: base + "/doc/" + pasteDocumentId });
+      await waitForPage(cdp, base + "/doc/" + pasteDocumentId, PAGE_TIMEOUT_MS);
+      await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+      const pastedBlocks = await paintedBlocks(cdp);
+      const pastedTexts = pastedBlocks.map((block) => block.text);
+      equal("a reload paints the pasted heading first", pastedTexts[0], "Pasted heading");
+      check(
+        "a reload paints the pasted list items with bullets",
+        pastedBlocks.length === 4 &&
+          pastedBlocks[1].marker === "\u2022" &&
+          pastedBlocks[2].marker === "\u2022" &&
+          pastedTexts[1] === "one" &&
+          pastedTexts[2] === "Two bold",
+        JSON.stringify(pastedBlocks),
+      );
+      equal("a reload paints the pasted italic paragraph last", pastedTexts[3], "a slanted word");
+    } finally {
+      if (pasteDocumentId) {
+        await evaluate(
+          cdp,
+          `fetch("/api/documents/${pasteDocumentId}", { method: "DELETE" })`,
+        ).catch(() => null);
+      }
+    }
+
+    // Markdown line shortcuts in the rendered editor go through the real
+    // keyboard path: "- " starts a bullet and "# " starts a heading, both with
+    // the marker consumed and the result saved as the app's HTML.
+    let shortcutDocumentId = null;
+    try {
+      shortcutDocumentId = await evaluate(
+        cdp,
+        `(async () => {
+          const created = await fetch("/api/documents", { method: "POST" });
+          if (!created.ok) throw new Error("create failed: " + created.status);
+          const document = await created.json();
+          const saved = await fetch("/api/documents/" + encodeURIComponent(document.id), {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: "Shortcut check", content: "<p></p>", paper_width: 0 }),
+          });
+          if (!saved.ok) throw new Error("save failed: " + saved.status);
+          return document.id;
+        })()`,
+      );
+      await cdp.send("Page.navigate", { url: base + "/doc/" + shortcutDocumentId });
+      await waitForPage(cdp, base + "/doc/" + shortcutDocumentId, PAGE_TIMEOUT_MS);
+      await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+
+      const waitForShortcutContent = async (probe) => {
+        for (let attempt = 0; attempt < 80; attempt += 1) {
+          const content = await evaluate(
+            cdp,
+            `(async () => {
+              const response = await fetch("/api/documents/${shortcutDocumentId}");
+              const document = await response.json();
+              return document.content || "";
+            })()`,
+          );
+          if (content && content.includes(probe)) {
+            return content;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        return "";
+      };
+      const typeChar = async (key, code, virtualKeyCode, text) => {
+        await cdp.send("Input.dispatchKeyEvent", {
+          type: "keyDown",
+          key,
+          code,
+          text,
+          unmodifiedText: text,
+          windowsVirtualKeyCode: virtualKeyCode,
+          nativeVirtualKeyCode: virtualKeyCode,
+        });
+        await cdp.send("Input.dispatchKeyEvent", {
+          type: "keyUp",
+          key,
+          code,
+          windowsVirtualKeyCode: virtualKeyCode,
+          nativeVirtualKeyCode: virtualKeyCode,
+        });
+      };
+
+      const emptyLinePoint = await evaluate(
+        cdp,
+        `(() => {
+          const line = document.querySelector(".doc-content > .doc-block .doc-line");
+          const box = line.getBoundingClientRect();
+          return { x: box.left + 40, y: box.top + box.height / 2 };
+        })()`,
+      );
+      await clickAt(emptyLinePoint);
+
+      await typeChar("-", "Minus", 189, "-");
+      await typeChar(" ", "Space", 32, " ");
+      await cdp.send("Input.insertText", { text: "item" });
+      const bulletContent = await waitForShortcutContent("<ul><li>item</li></ul>");
+      check(
+        "typing - and a space saves a bullet list",
+        Boolean(bulletContent),
+        bulletContent,
+      );
+      const bulletBlocks = await paintedBlocks(cdp);
+      check(
+        "the shortcut paints a bullet item",
+        bulletBlocks.length === 1 &&
+          bulletBlocks[0].text === "item" &&
+          bulletBlocks[0].marker === "\u2022",
+        JSON.stringify(bulletBlocks),
+      );
+
+      await pressKey("Enter", "Enter", 13, 0);
+      await typeChar("#", "Digit3", 51, "#");
+      await typeChar(" ", "Space", 32, " ");
+      await cdp.send("Input.insertText", { text: "Title" });
+      const headingContent = await waitForShortcutContent("<h1>Title</h1>");
+      check(
+        "typing # and a space saves a Heading 1",
+        Boolean(headingContent),
+        headingContent,
+      );
+      check(
+        "the heading marker is not left in the saved HTML",
+        !headingContent.includes("#Title") && !headingContent.includes("# Title"),
+        headingContent,
+      );
+      const headingPaint = await evaluate(
+        cdp,
+        `document.querySelector(".doc-block .doc-line.is-h1")?.textContent || ""`,
+      );
+      equal("the shortcut paints Heading 1", headingPaint, "Title");
+
+      await cdp.send("Page.navigate", { url: base + "/doc/" + shortcutDocumentId });
+      await waitForPage(cdp, base + "/doc/" + shortcutDocumentId, PAGE_TIMEOUT_MS);
+      await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+      const reloadedShortcut = await paintedBlocks(cdp);
+      const reloadedHeading = await evaluate(
+        cdp,
+        `document.querySelector(".doc-block .doc-line.is-h1")?.textContent || ""`,
+      );
+      check(
+        "the shortcut document reloads as a bullet list and a heading",
+        reloadedShortcut.length === 2 &&
+          reloadedShortcut[0].marker === "\u2022" &&
+          reloadedShortcut[0].text === "item" &&
+          reloadedHeading === "Title",
+        JSON.stringify({ reloadedShortcut, reloadedHeading }),
+      );
+    } finally {
+      if (shortcutDocumentId) {
+        await evaluate(
+          cdp,
+          `fetch("/api/documents/${shortcutDocumentId}", { method: "DELETE" })`,
+        ).catch(() => null);
+      }
+    }
+
+    // The shortcuts page is one static page behind every top-right menu. Check
+    // both sections, the links that reach it, and the narrow layout.
+    await cdp.send("Page.navigate", { url: base + "/shortcuts" });
+    await waitForPage(cdp, base + "/shortcuts", PAGE_TIMEOUT_MS);
+    const shortcutsPage = await evaluate(
+      cdp,
+      `(() => {
+        const link = document.querySelector('#pageMenu a[href="/shortcuts"]');
+        return {
+          path: location.pathname,
+          headings: Array.from(document.querySelectorAll(".shortcuts-section h2")).map(
+            (heading) => heading.textContent,
+          ),
+          rows: document.querySelectorAll(".shortcut-row").length,
+          saveKey: Array.from(document.querySelectorAll(".shortcut-row kbd")).some(
+            (key) => key.textContent === "Ctrl+S",
+          ),
+          menuLink: Boolean(link),
+          current: link ? link.getAttribute("aria-current") : null,
+        };
+      })()`,
+    );
+    equal("the shortcuts page is served", shortcutsPage.path, "/shortcuts");
+    check(
+      "the shortcuts page has an editor section and an other section",
+      shortcutsPage.headings[0] === "In the editor" &&
+        shortcutsPage.headings[1] === "Outside the editor",
+      JSON.stringify(shortcutsPage.headings),
+    );
+    check(
+      "the shortcuts page lists the keys",
+      shortcutsPage.rows >= 20 && shortcutsPage.saveKey,
+      JSON.stringify(shortcutsPage),
+    );
+    check(
+      "the page menu links to the shortcuts page and marks it current",
+      shortcutsPage.menuLink && shortcutsPage.current === "page",
+      JSON.stringify(shortcutsPage),
+    );
+
+    await cdp.send("Page.navigate", { url: base + "/" });
+    await waitForPage(cdp, base + "/", PAGE_TIMEOUT_MS);
+    const libraryMenuShortcuts = await evaluate(
+      cdp,
+      `Boolean(document.querySelector('#libraryMenu a[href="/shortcuts"]'))`,
+    );
+    check("the library menu links to the shortcuts page", libraryMenuShortcuts);
+
+    // Opening the page from the editor has to save a pending edit first.
+    await cdp.send("Page.navigate", { url: base + "/doc/" + documentId });
+    await waitForPage(cdp, base + "/doc/" + documentId, PAGE_TIMEOUT_MS);
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+    const documentMenuShortcuts = await evaluate(
+      cdp,
+      `Boolean(document.querySelector('#documentMenu a[href="/shortcuts"]'))`,
+    );
+    check("the document menu links to the shortcuts page", documentMenuShortcuts);
+
+    const firstLinePoint = await evaluate(
+      cdp,
+      `(() => {
+        const line = document.querySelector(".doc-content > .doc-block .doc-line");
+        const box = line.getBoundingClientRect();
+        return { x: box.left + 40, y: box.top + box.height / 2 };
+      })()`,
+    );
+    await clickAt(firstLinePoint);
+    await pressKey("End", "End", 35, 0);
+    await cdp.send("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: "Z",
+      code: "KeyZ",
+      text: "Z",
+      unmodifiedText: "Z",
+      windowsVirtualKeyCode: 90,
+      nativeVirtualKeyCode: 90,
+    });
+    await cdp.send("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "Z",
+      code: "KeyZ",
+      windowsVirtualKeyCode: 90,
+      nativeVirtualKeyCode: 90,
+    });
+    await evaluate(cdp, `document.getElementById("shortcutsLink").click()`);
+    await waitForPage(cdp, base + "/shortcuts", PAGE_TIMEOUT_MS);
+    const savedBeforeLeaving = await evaluate(
+      cdp,
+      `(async () => (await fetch("/api/documents/${documentId}")).json())()`,
+    );
+    check(
+      "opening the shortcuts page from the editor saves the pending edit first",
+      Boolean(
+        savedBeforeLeaving &&
+          savedBeforeLeaving.content &&
+          savedBeforeLeaving.content.includes("spaces.Z"),
+      ),
+      savedBeforeLeaving && savedBeforeLeaving.content,
+    );
+
+    // The narrow page wraps the key and the description instead of overflowing
+    // the viewport.
+    await cdp.send("Emulation.setDeviceMetricsOverride", {
+      width: 390,
+      height: 844,
+      deviceScaleFactor: 1,
+      mobile: true,
+    });
+    await cdp.send("Page.navigate", { url: base + "/shortcuts" });
+    await waitForPage(cdp, base + "/shortcuts", PAGE_TIMEOUT_MS);
+    const shortcutsMobile = await evaluate(
+      cdp,
+      `({
+        innerWidth: window.innerWidth,
+        scrollWidth: document.documentElement.scrollWidth,
+        rows: document.querySelectorAll(".shortcut-row").length,
+      })`,
+    );
+    check(
+      "the shortcuts page has no horizontal overflow at 390px",
+      shortcutsMobile.scrollWidth <= shortcutsMobile.innerWidth + 1,
+      `innerWidth ${shortcutsMobile.innerWidth}, scrollWidth ${shortcutsMobile.scrollWidth}`,
+    );
+    equal(
+      "the shortcuts page keeps its rows on a narrow viewport",
+      shortcutsMobile.rows,
+      shortcutsPage.rows,
+    );
+    await cdp.send("Emulation.clearDeviceMetricsOverride");
+
+    // Ctrl+O searches the library from any page except the password gate. It
+    // lists the real documents, filters as you type, and opens the selected
+    // one in this tab or in another one.
+    const paletteDocuments = await evaluate(
+      cdp,
+      `(async () => {
+        const created = [];
+        for (const title of ["Palette Alpha", "Palette Beta"]) {
+          const response = await fetch("/api/documents", { method: "POST" });
+          if (!response.ok) throw new Error("create failed: " + response.status);
+          const document = await response.json();
+          await fetch("/api/documents/" + encodeURIComponent(document.id), {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title, content: "<p>" + title + "</p>", paper_width: 0 }),
+          });
+          created.push({ id: document.id, title });
+        }
+        return created;
+      })()`,
+    );
+    const paletteIds = new Map(paletteDocuments.map((entry) => [entry.title, entry.id]));
+
+    await cdp.send("Page.navigate", { url: base + "/" });
+    await waitForPage(cdp, base + "/", PAGE_TIMEOUT_MS);
+    const lazyPalette = await evaluate(
+      cdp,
+      `Boolean(document.querySelector("dialog.quick-open"))`,
+    );
+    check("the document search is not built before it is opened", lazyPalette === false);
+
+    await pressKey("o", "KeyO", 79, 2);
+    const paletteOpened = await waitForExpression(
+      cdp,
+      `(() => {
+        const dialog = document.querySelector("dialog.quick-open[open]");
+        const input = document.getElementById("quickOpenInput");
+        return Boolean(dialog && input && document.activeElement === input);
+      })()`,
+      PAGE_TIMEOUT_MS,
+    );
+    check("Ctrl+O opens the document search on the library", paletteOpened);
+
+    const listedPaletteDocuments = await waitForExpression(
+      cdp,
+      `Array.from(document.querySelectorAll(".quick-open-title")).some(
+        (title) => title.textContent === "Palette Beta",
+      )`,
+      5000,
+    );
+    const paletteSnapshot = await evaluate(
+      cdp,
+      `(() => {
+        const input = document.getElementById("quickOpenInput");
+        const list = document.getElementById("quickOpenList");
+        return {
+          titles: Array.from(document.querySelectorAll(".quick-open-title")).map(
+            (title) => title.textContent,
+          ),
+          combobox: input ? input.getAttribute("role") : null,
+          controls: input ? input.getAttribute("aria-controls") : null,
+          expanded: input ? input.getAttribute("aria-expanded") : null,
+          listRole: list ? list.getAttribute("role") : null,
+        };
+      })()`,
+    );
+    check(
+      "the document search lists the library and exposes it as a combobox",
+      listedPaletteDocuments &&
+        paletteSnapshot.titles.includes("Palette Alpha") &&
+        paletteSnapshot.titles.includes("Palette Beta") &&
+        paletteSnapshot.combobox === "combobox" &&
+        paletteSnapshot.controls === "quickOpenList" &&
+        paletteSnapshot.expanded === "true" &&
+        paletteSnapshot.listRole === "listbox",
+      JSON.stringify(paletteSnapshot),
+    );
+
+    // Let the dialog's opening animation finish so the height check below is
+    // not comparing a mid-animation transform with the settled layout.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const hintsAtOpen = await evaluate(
+      cdp,
+      `(() => {
+        const hints = document.querySelector(".quick-open-hints");
+        return {
+          visibility: getComputedStyle(hints).visibility,
+          opacity: getComputedStyle(hints).opacity,
+          transition: getComputedStyle(hints).transitionDuration,
+          footerHeight: document.querySelector(".quick-open-footer").getBoundingClientRect().height,
+          dialogHeight: document.querySelector("dialog.quick-open[open]").getBoundingClientRect().height,
+        };
+      })()`,
+    );
+    check(
+      "the shortcut hints start visible with a fade transition",
+      hintsAtOpen.visibility === "visible" &&
+        hintsAtOpen.opacity === "1" &&
+        hintsAtOpen.transition.includes("0.24s"),
+      JSON.stringify(hintsAtOpen),
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 3600));
+    const hintsAfterTimeout = await evaluate(
+      cdp,
+      `(() => {
+        const hints = document.querySelector(".quick-open-hints");
+        return {
+          visibility: getComputedStyle(hints).visibility,
+          opacity: getComputedStyle(hints).opacity,
+          hidden: hints.getAttribute("aria-hidden"),
+          footerHeight: document.querySelector(".quick-open-footer").getBoundingClientRect().height,
+          dialogHeight: document.querySelector("dialog.quick-open[open]").getBoundingClientRect().height,
+        };
+      })()`,
+    );
+    check(
+      "the shortcut hints fade out after three seconds without moving the palette",
+      hintsAfterTimeout.visibility === "hidden" &&
+        hintsAfterTimeout.opacity === "0" &&
+        hintsAfterTimeout.hidden === "true" &&
+        Math.abs(hintsAfterTimeout.footerHeight - hintsAtOpen.footerHeight) < 0.5 &&
+        Math.abs(hintsAfterTimeout.dialogHeight - hintsAtOpen.dialogHeight) < 0.5,
+      JSON.stringify({ hintsAtOpen, hintsAfterTimeout }),
+    );
+
+    await cdp.send("Input.insertText", { text: "palette" });
+    const filteredPalette = await waitForExpression(
+      cdp,
+      `document.querySelectorAll(".quick-open-option").length === 2`,
+      5000,
+    );
+    const filteredSnapshot = await evaluate(
+      cdp,
+      `({
+        titles: Array.from(document.querySelectorAll(".quick-open-title")).map(
+          (title) => title.textContent,
+        ),
+        marks: document.querySelectorAll(".quick-open-match").length,
+        count: document.querySelector(".quick-open-count").textContent,
+      })`,
+    );
+    check(
+      "typing filters the document search and highlights the match",
+      filteredPalette &&
+        filteredSnapshot.titles.every((title) => title.startsWith("Palette ")) &&
+        filteredSnapshot.marks >= 2 &&
+        /\d+ of \d+/.test(filteredSnapshot.count),
+      JSON.stringify(filteredSnapshot),
+    );
+
+    await cdp.send("Input.insertText", { text: "zzzz" });
+    const emptyPalette = await waitForExpression(
+      cdp,
+      `(() => {
+        const message = document.getElementById("quickOpenMessage");
+        return Boolean(
+          message &&
+          !message.hidden &&
+          message.textContent.includes("No documents match"),
+        );
+      })()`,
+      5000,
+    );
+    check("a search with no title match says so", emptyPalette);
+
+    await evaluate(
+      cdp,
+      `(() => {
+        const input = document.getElementById("quickOpenInput");
+        input.value = "palette";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      })()`,
+    );
+    await waitForExpression(
+      cdp,
+      `document.querySelectorAll(".quick-open-option").length === 2`,
+      5000,
+    );
+    const selectedBefore = await evaluate(
+      cdp,
+      `document.querySelector('.quick-open-option[aria-selected="true"] .quick-open-title').textContent`,
+    );
+    await pressKey("ArrowDown", "ArrowDown", 40, 0);
+    const selectedAfter = await evaluate(
+      cdp,
+      `document.querySelector('.quick-open-option[aria-selected="true"] .quick-open-title').textContent`,
+    );
+    check(
+      "the arrow keys move the selected document",
+      Boolean(selectedBefore) &&
+        Boolean(selectedAfter) &&
+        selectedBefore !== selectedAfter &&
+        selectedBefore.startsWith("Palette ") &&
+        selectedAfter.startsWith("Palette "),
+      JSON.stringify({ selectedBefore, selectedAfter }),
+    );
+
+    const chosenId = paletteIds.get(selectedAfter);
+    await pressKey("Enter", "Enter", 13, 0);
+    await waitForPage(cdp, base + "/doc/" + chosenId, PAGE_TIMEOUT_MS);
+    equal(
+      "Enter opens the selected document",
+      await evaluate(cdp, `location.pathname`),
+      "/doc/" + chosenId,
+    );
+
+    await cdp.send("Page.navigate", { url: base + "/" });
+    await waitForPage(cdp, base + "/", PAGE_TIMEOUT_MS);
+    await pressKey("o", "KeyO", 79, 2);
+    await waitForExpression(
+      cdp,
+      `Boolean(
+        document.querySelector("dialog.quick-open[open]") &&
+        document.getElementById("quickOpenInput"),
+      )`,
+      PAGE_TIMEOUT_MS,
+    );
+    const hintsReset = await evaluate(
+      cdp,
+      `(() => {
+        const hints = document.querySelector(".quick-open-hints");
+        return {
+          visibility: getComputedStyle(hints).visibility,
+          hidden: hints.getAttribute("aria-hidden"),
+        };
+      })()`,
+    );
+    check(
+      "reopening the document search brings the shortcut hints back",
+      hintsReset.visibility === "visible" && hintsReset.hidden === null,
+      JSON.stringify(hintsReset),
+    );
+    await evaluate(
+      cdp,
+      `(() => {
+        const input = document.getElementById("quickOpenInput");
+        input.value = "beta";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      })()`,
+    );
+    await waitForExpression(
+      cdp,
+      `document.querySelectorAll(".quick-open-option").length === 1`,
+      5000,
+    );
+    const betaUrl = base + "/doc/" + paletteIds.get("Palette Beta");
+    await pressKey("Enter", "Enter", 13, 8);
+    const newTab = await waitForNewPage(devtoolsPort, betaUrl, PAGE_TIMEOUT_MS);
+    check(
+      "Shift+Enter opens the document in another tab",
+      Boolean(newTab),
+      JSON.stringify(newTab),
+    );
+    check(
+      "the document search closes when it opens another tab",
+      await waitForExpression(
+        cdp,
+        `!document.querySelector("dialog.quick-open[open]")`,
+        5000,
+      ),
+    );
+    if (newTab) {
+      await fetch(`http://127.0.0.1:${devtoolsPort}/json/close/${newTab.id}`).catch(
+        () => null,
+      );
+    }
+
+    // The editor has its own keyboard handling, so the palette has to sit above
+    // it, and a pending edit has to reach disk before the palette navigates.
+    await cdp.send("Page.navigate", { url: base + "/doc/" + documentId });
+    await waitForPage(cdp, base + "/doc/" + documentId, PAGE_TIMEOUT_MS);
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+    const editorLinePoint = await evaluate(
+      cdp,
+      `(() => {
+        const line = document.querySelector(".doc-content > .doc-block .doc-line");
+        const box = line.getBoundingClientRect();
+        return { x: box.left + 40, y: box.top + box.height / 2 };
+      })()`,
+    );
+    await clickAt(editorLinePoint);
+    await pressKey("End", "End", 35, 0);
+    await cdp.send("Input.insertText", { text: " palette-leave" });
+    await pressKey("o", "KeyO", 79, 2);
+    check(
+      "Ctrl+O opens the document search in the editor",
+      await waitForExpression(
+        cdp,
+        `(() => {
+          const input = document.getElementById("quickOpenInput");
+          return Boolean(
+            document.querySelector("dialog.quick-open[open]") &&
+            input &&
+            document.activeElement === input,
+          );
+        })()`,
+        PAGE_TIMEOUT_MS,
+      ),
+    );
+    await evaluate(
+      cdp,
+      `(() => {
+        const input = document.getElementById("quickOpenInput");
+        input.value = "beta";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      })()`,
+    );
+    await waitForExpression(
+      cdp,
+      `document.querySelectorAll(".quick-open-option").length === 1`,
+      5000,
+    );
+    await pressKey("Escape", "Escape", 27, 0);
+    check(
+      "Escape from the document search returns to the editor",
+      await waitForExpression(
+        cdp,
+        `Boolean(
+          document.getElementById("quickOpenInput") &&
+          !document.querySelector("dialog.quick-open[open]"),
+        )`,
+        5000,
+      ),
+    );
+
+    await pressKey("o", "KeyO", 79, 2);
+    await waitForExpression(
+      cdp,
+      `Boolean(document.querySelector("dialog.quick-open[open]"))`,
+      PAGE_TIMEOUT_MS,
+    );
+    await evaluate(
+      cdp,
+      `(() => {
+        const input = document.getElementById("quickOpenInput");
+        input.value = "beta";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      })()`,
+    );
+    await waitForExpression(
+      cdp,
+      `document.querySelectorAll(".quick-open-option").length === 1`,
+      5000,
+    );
+    await pressKey("Enter", "Enter", 13, 0);
+    await waitForPage(
+      cdp,
+      base + "/doc/" + paletteIds.get("Palette Beta"),
+      PAGE_TIMEOUT_MS,
+    );
+    const savedFromEditor = await evaluate(
+      cdp,
+      `(async () => (await fetch("/api/documents/${documentId}")).json())()`,
+    );
+    check(
+      "opening a document from the editor saves the pending edit first",
+      Boolean(
+        savedFromEditor &&
+          savedFromEditor.content &&
+          savedFromEditor.content.includes("palette-leave"),
+      ),
+      savedFromEditor && savedFromEditor.content,
+    );
+
+    await cdp.send("Page.navigate", { url: base + "/storage" });
+    await waitForPage(cdp, base + "/storage", PAGE_TIMEOUT_MS);
+    await pressKey("o", "KeyO", 79, 2);
+    check(
+      "the document search opens on the storage page",
+      await waitForExpression(
+        cdp,
+        `Boolean(document.querySelector("dialog.quick-open[open]"))`,
+        PAGE_TIMEOUT_MS,
+      ),
+    );
+    await waitForExpression(
+      cdp,
+      `document.querySelectorAll(".quick-open-option").length > 0`,
+      5000,
+    );
+    await pressKey("Escape", "Escape", 27, 0);
+    check(
+      "Escape closes the document search",
+      await waitForExpression(
+        cdp,
+        `!document.querySelector("dialog.quick-open[open]")`,
+        5000,
+      ),
+    );
+
+    await cdp.send("Emulation.setDeviceMetricsOverride", {
+      width: 390,
+      height: 844,
+      deviceScaleFactor: 1,
+      mobile: true,
+    });
+    await cdp.send("Page.navigate", { url: base + "/" });
+    await waitForPage(cdp, base + "/", PAGE_TIMEOUT_MS);
+    await pressKey("o", "KeyO", 79, 2);
+    await waitForExpression(
+      cdp,
+      `Boolean(document.querySelector("dialog.quick-open[open]"))`,
+      PAGE_TIMEOUT_MS,
+    );
+    const paletteMobile = await evaluate(
+      cdp,
+      `(() => {
+        const dialog = document.querySelector("dialog.quick-open[open]");
+        const box = dialog.getBoundingClientRect();
+        return {
+          innerWidth: window.innerWidth,
+          scrollWidth: document.documentElement.scrollWidth,
+          left: box.left,
+          right: box.right,
+        };
+      })()`,
+    );
+    check(
+      "the document search fits a 390px viewport",
+      paletteMobile.left >= 0 &&
+        paletteMobile.right <= paletteMobile.innerWidth + 1 &&
+        paletteMobile.scrollWidth <= paletteMobile.innerWidth + 1,
+      JSON.stringify(paletteMobile),
+    );
+    await pressKey("Escape", "Escape", 27, 0);
+    await cdp.send("Emulation.clearDeviceMetricsOverride");
+
+    await evaluate(
+      cdp,
+      `(async () => {
+        for (const id of ${JSON.stringify(paletteDocuments.map((entry) => entry.id))}) {
+          await fetch("/api/documents/" + encodeURIComponent(id), { method: "DELETE" });
+        }
+        return true;
+      })()`,
+    ).catch(() => null);
 
     await evaluate(
       cdp,

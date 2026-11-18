@@ -12,7 +12,8 @@ text. The menu switches between a dark theme (the default) and a light one. Focu
 mode, from the editor's menu, hides the toolbar and takes the page fullscreen so
 only the writing and the menu button remain. Markdown mode, next to it, turns the
 page into editable Markdown source; leaving it renders the document again, and
-the file on disk stays the same JSON.
+the file on disk stays the same JSON. Copying keeps the formatting, and a paste
+from another program keeps the headings, lists, and emphasis it can represent.
 
 ## Installing
 
@@ -83,9 +84,11 @@ keeps writing there; the old folder is left untouched. The same page adds
 backups — a folder, an SSH server, or a Google Drive folder — that receive a copy
 of every save.
 
-Useful shortcuts: `Ctrl+S` saves now, `Ctrl+K` adds a link, `Ctrl+B` / `Ctrl+I` /
-`Ctrl+U` format text, `Ctrl+M` switches between Markdown mode and the
-normal rendered view, and `/` focuses the search box on the home screen.
+Every shortcut is listed on the **Shortcuts** page (the menu on any page). The
+most useful: `Ctrl+O` searches every document from any page, `Ctrl+S` saves now,
+`Ctrl+K` adds a link, `Ctrl+B` / `Ctrl+I` / `Ctrl+U` format text,
+`Ctrl+Shift+F` toggles focus mode, `Ctrl+Shift+M` switches between Markdown mode
+and the normal rendered view, and `/` focuses the search box on the home screen.
 
 ## Configuration
 

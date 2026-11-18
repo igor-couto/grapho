@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shortcuts - Grapho</title>
+  <meta name="theme-color" content="#232126">
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.ico">
+  <link rel="preload" href="/assets/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/assets/fonts/literata-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <script src="/assets/theme.js"></script>
+  <script src="/assets/menu.js" defer></script>
+  <script src="/assets/quick-open.js" defer></script>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="shortcuts-page">
+  <a class="skip-link" href="#shortcuts">Skip to shortcuts</a>
+
+  <header class="editor-header version-header">
+    <div class="editor-header-start">
+      <a class="back-link" href="/" aria-label="Back to library">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="m14.5 5-7 7 7 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>Library</span>
+      </a>
+    </div>
+
+    <div class="editor-header-end">
+      <div class="menu-wrap">
+        <button class="icon-button" type="button" id="pageMenuButton" aria-label="Page options" title="Page options" aria-haspopup="menu" aria-expanded="false">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <circle cx="5" cy="12" r="1.5" fill="currentColor"/>
+            <circle cx="12" cy="12" r="1.5" fill="currentColor"/>
+            <circle cx="19" cy="12" r="1.5" fill="currentColor"/>
+          </svg>
+        </button>
+        <div class="popover-menu library-menu" id="pageMenu" role="menu" aria-label="Page options" hidden></div>
+      </div>
+    </div>
+  </header>
+
+  <main class="shortcuts-main shell" id="shortcuts">
+    <section class="shortcuts-card" aria-labelledby="shortcutsTitle">
+      <h1 id="shortcutsTitle">Shortcuts</h1>
+      <p class="shortcuts-intro">Every shortcut in the editor and the rest of Grapho.</p>
+
+      <section class="shortcuts-section" aria-labelledby="editorShortcutsTitle">
+        <h2 id="editorShortcutsTitle">In the editor</h2>
+        <dl class="shortcut-list">
+          <div class="shortcut-row">
+            <dt><kbd>Ctrl+B</kbd></dt>
+            <dd>Bold</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Ctrl+I</kbd></dt>
+            <dd>Italic</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Ctrl+U</kbd></dt>
+            <dd>Underline</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Ctrl+K</kbd></dt>
+            <dd>Add or edit a link</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Ctrl+click</kbd></dt>
+            <dd>Open a link in the document in a new tab</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Ctrl+Z</kbd></dt>
+            <dd>Undo</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Ctrl+Shift+Z</kbd><span class="shortcut-join">or</span><kbd>Ctrl+Y</kbd></dt>
+            <dd>Redo</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Ctrl+A</kbd></dt>
+            <dd>Select everything</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Ctrl+S</kbd></dt>
+            <dd>Save now</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Ctrl+Shift+F</kbd></dt>
+            <dd>Focus mode</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Ctrl+Shift+M</kbd></dt>
+            <dd>Markdown mode</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Enter</kbd></dt>
+            <dd>New paragraph</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Shift+Enter</kbd></dt>
+            <dd>Line break inside the paragraph</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>-</kbd><span class="shortcut-join">then</span><kbd>Space</kbd></dt>
+            <dd>Start a bullet list</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>#</kbd><span class="shortcut-join">then</span><kbd>Space</kbd></dt>
+            <dd>Start Heading 1; use ## or ### for Heading 2 or 3</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Tab</kbd></dt>
+            <dd>Indent, nest a list item, or insert a tab in a code block</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Shift+Tab</kbd></dt>
+            <dd>Outdent</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Ctrl+Backspace</kbd></dt>
+            <dd>Delete the word before the caret</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Ctrl+&larr;</kbd><span class="shortcut-join">or</span><kbd>Ctrl+&rarr;</kbd></dt>
+            <dd>Move by word</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Home</kbd><span class="shortcut-join">or</span><kbd>End</kbd></dt>
+            <dd>Start or end of the line</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Ctrl+Home</kbd><span class="shortcut-join">or</span><kbd>Ctrl+End</kbd></dt>
+            <dd>Start or end of the document</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Page Up</kbd><span class="shortcut-join">or</span><kbd>Page Down</kbd></dt>
+            <dd>Move one screen</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>&uarr;</kbd><kbd>&darr;</kbd><kbd>&larr;</kbd><kbd>&rarr;</kbd></dt>
+            <dd>Move the caret; hold Shift to select</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Esc</kbd></dt>
+            <dd>Close a menu, cancel a picture move or resize, or drop the selection</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>&uarr;</kbd><kbd>&darr;</kbd><kbd>&larr;</kbd><kbd>&rarr;</kbd></dt>
+            <dd>With a picture selected, nudge it 4 px; hold Shift for 24 px</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Shift+drag</kbd></dt>
+            <dd>Keep a picture to one axis while moving it</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Alt+drag</kbd></dt>
+            <dd>Resize a picture around its centre from a corner</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="shortcuts-section" aria-labelledby="otherShortcutsTitle">
+        <h2 id="otherShortcutsTitle">Outside the editor</h2>
+        <dl class="shortcut-list">
+          <div class="shortcut-row">
+            <dt><kbd>Ctrl+O</kbd></dt>
+            <dd>Search your documents, from any page except the sign-in page</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>&uarr;</kbd><kbd>&darr;</kbd></dt>
+            <dd>Move through the document search results</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Enter</kbd></dt>
+            <dd>Open the selected document</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Shift+Enter</kbd></dt>
+            <dd>Open the selected document in a new tab</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Esc</kbd></dt>
+            <dd>Close the document search</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>/</kbd></dt>
+            <dd>Focus the search box in the library</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Esc</kbd></dt>
+            <dd>Clear the search or close an open menu in the library</dd>
+          </div>
+          <div class="shortcut-row">
+            <dt><kbd>Esc</kbd></dt>
+            <dd>Close an open dialog or form</dd>
+          </div>
+        </dl>
+      </section>
+    </section>
+  </main>
+</body>
+</html>

@@ -309,6 +309,56 @@ function clickAt(x, y) {
   pointerUp(x, y);
 }
 
+function clickEventAt(x, y, detail) {
+  const rect = rootRect();
+  const clientX = rect.left + x;
+  const clientY = rect.top + y;
+  const target = document.elementFromPoint(clientX, clientY) || root;
+  target.dispatchEvent(
+    new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      clientX,
+      clientY,
+      button: 0,
+      detail,
+    }),
+  );
+}
+
+function doubleClickEventAt(x, y) {
+  const rect = rootRect();
+  const clientX = rect.left + x;
+  const clientY = rect.top + y;
+  const target = document.elementFromPoint(clientX, clientY) || root;
+  target.dispatchEvent(
+    new MouseEvent("dblclick", {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      clientX,
+      clientY,
+      button: 0,
+      detail: 2,
+    }),
+  );
+}
+
+// The browser's three-click gesture: each click is a press and release followed
+// by a click carrying the running click count, and the second one also fires
+// dblclick.
+function tripleClickAt(x, y) {
+  for (let detail = 1; detail <= 3; detail += 1) {
+    pointerDown(x, y);
+    pointerUp(x, y);
+    clickEventAt(x, y, detail);
+    if (detail === 2) {
+      doubleClickEventAt(x, y);
+    }
+  }
+}
+
 function dragFromTo(fromX, fromY, toX, toY) {
   pointerDown(fromX, fromY);
   pointerMove(toX, toY);
@@ -779,6 +829,51 @@ test("pointer: double-click selects the word under the pointer", async () => {
     }),
   );
   assertEqual(editor.selectionText(), word, "double-click selects the whole word");
+});
+
+test("pointer: triple-click selects the line under the pointer", async () => {
+  await load("<p>first line<br>second line<br>third line</p>");
+  const text = blockText(editor.getDocument()[0]);
+  const second = text.indexOf("second");
+  const third = text.indexOf("third");
+  const at = paintedOffsetX(0, second + 3);
+  const point = caretPoint(entry(0), second + 3);
+  tripleClickAt(at, point.y + point.height / 2);
+  const selection = editor.getSelection();
+  assertEqual(selection.anchor.block, 0, "the selection stays in the clicked block");
+  assertEqual(selection.anchor.offset, second, "the line starts at the hard break");
+  assertEqual(selection.focus.offset, third, "the line ends after its hard break");
+  assertEqual(editor.selectionText(), "second line\n", "the whole line is selected");
+  assertEqual(
+    root.querySelectorAll(".doc-selection").length,
+    1,
+    "only the clicked line is painted as selected",
+  );
+});
+
+test("pointer: triple-click selects a wrapped line, not just the painted row", async () => {
+  const sentence =
+    "Wrapping prose puts the offset at a soft wrap on both lines, so a click near the " +
+    "end of the first row still knows which line it is on.";
+  await load(`<p>${sentence}</p>`);
+  const block = entry(0);
+  assert(block.lines.length >= 2, "the paragraph wraps");
+  const firstLine = block.lines[0];
+  const offset = firstLine.offsetEnd - 3;
+  const at = paintedOffsetX(0, offset);
+  const point = caretPoint(entry(0), offset);
+  tripleClickAt(at, point.y + point.height / 2);
+  assertEqual(editor.selectionText(), sentence, "the whole written line is selected");
+});
+
+test("pointer: triple-click selects one code line", async () => {
+  await load("<pre>let a = 1;\nlet b = 2;</pre>");
+  const text = blockText(editor.getDocument()[0]);
+  const second = text.indexOf("let b");
+  const at = paintedOffsetX(0, second + 2);
+  const point = caretPoint(entry(0), second + 2);
+  tripleClickAt(at, point.y + point.height / 2);
+  assertEqual(editor.selectionText(), "let b = 2;", "the last code line is selected");
 });
 
 test("undo: typing over a selection is one undo step", async () => {
@@ -1876,6 +1971,146 @@ test("headings: only a heading starts a normal paragraph at the break", async ()
   assertEqual(blocks[1].type, "quote", "another block style is unchanged by Enter");
 });
 
+test("shortcuts: a hyphen and a space start a bullet list", async () => {
+  await load("<p></p>");
+  typeText("- ");
+
+  let blocks = editor.getDocument();
+  assertEqual(blocks.length, 1, "the line stays one block");
+  assertEqual(blocks[0].type, "list", "the line became a list item");
+  assert(blocks[0].ordered === false, "the shortcut starts a bullet list");
+  assertEqual(blockText(blocks[0]), "", "the marker is not stored as text");
+  assertEqual(editor.getSelection().focus.offset, 0, "the caret waits at the start of the item");
+
+  typeText("first item");
+  blocks = editor.getDocument();
+  assertEqual(blocks[0].type, "list", "typing continues in the list item");
+  assertEqual(blockText(blocks[0]), "first item", "the typed text lands in the item");
+  const markers = Array.from(root.querySelectorAll(".doc-marker")).map((element) => element.textContent);
+  assertEqual(markers.join(""), "\u2022", "the bullet is painted");
+});
+
+test("shortcuts: hashes and a space start the matching heading", async () => {
+  await load("<p></p>");
+  typeText("# ");
+
+  let blocks = editor.getDocument();
+  assertEqual(blocks[0].type, "h1", "# starts Heading 1");
+  assertEqual(blockText(blocks[0]), "", "the marker is not stored as text");
+  assertEqual(editor.activeBlockType(), "h1", "the toolbar reports Heading 1");
+  typeText("Title");
+  assertEqual(blockText(editor.getDocument()[0]), "Title", "typing continues in the heading");
+
+  for (const [marker, type] of [
+    ["## ", "h2"],
+    ["### ", "h3"],
+  ]) {
+    await load("<p></p>");
+    typeText(marker);
+    blocks = editor.getDocument();
+    assertEqual(blocks[0].type, type, JSON.stringify(marker) + " starts " + type);
+    assertEqual(blockText(blocks[0]), "", "the marker is not stored as text");
+  }
+});
+
+test("shortcuts: the marker converts a line that already has text", async () => {
+  await load("<p>A written line</p>");
+  editor.collapseTo({ block: 0, offset: 0 });
+  editor.sync();
+  typeText("# ");
+
+  let blocks = editor.getDocument();
+  assertEqual(blocks[0].type, "h1", "the line became a heading");
+  assertEqual(blockText(blocks[0]), "A written line", "the text after the marker stayed");
+  assertEqual(editor.getSelection().focus.offset, 0, "the caret lands before the text");
+
+  await load("<p>A written line</p>");
+  editor.collapseTo({ block: 0, offset: 0 });
+  editor.sync();
+  typeText("- ");
+  blocks = editor.getDocument();
+  assertEqual(blocks[0].type, "list", "the line became a bullet item");
+  assertEqual(blockText(blocks[0]), "A written line", "the text after the marker stayed");
+});
+
+test("shortcuts: markers only work at the start of a line", async () => {
+  await load("<p>one two</p>");
+  editor.collapseTo({ block: 0, offset: 7 });
+  editor.sync();
+  typeText(" - ");
+  let block = editor.getDocument()[0];
+  assertEqual(block.type, "p", "a hyphen in the middle of a line stays text");
+  assertEqual(blockText(block), "one two - ", "the typed hyphen and spaces stayed");
+
+  await load("<p></p>");
+  typeText("#### ");
+  block = editor.getDocument()[0];
+  assertEqual(block.type, "p", "there is no Heading 4");
+  assertEqual(blockText(block), "#### ", "the unsupported marker stays text");
+
+  await load("<p>Line one<br>line two</p>");
+  editor.collapseTo({ block: 0, offset: 9 });
+  editor.sync();
+  typeText("# ");
+  block = editor.getDocument()[0];
+  assertEqual(block.type, "p", "a marker after a hard break does not restyle the block");
+  assertEqual(blockText(block), "Line one\n# line two", "the marker is text on the second line");
+});
+
+test("shortcuts: code blocks and Markdown mode keep the markers literal", async () => {
+  await load("<pre>code</pre>");
+  editor.collapseTo({ block: 0, offset: 0 });
+  editor.sync();
+  typeText("- ");
+  let block = editor.getDocument()[0];
+  assertEqual(block.type, "code", "the code block is unchanged");
+  assertEqual(blockText(block), "- code", "the marker is typed into the code");
+
+  await load("<pre>code</pre>");
+  editor.collapseTo({ block: 0, offset: 0 });
+  editor.sync();
+  typeText("# ");
+  assertEqual(blockText(editor.getDocument()[0]), "# code", "a heading marker in code stays text");
+
+  await load("<p></p>");
+  editor.setSourceMode(true);
+  try {
+    typeText("# ");
+    block = editor.getDocument()[0];
+    assertEqual(block.type, "p", "Markdown source lines stay paragraphs");
+    assertEqual(blockText(block), "# ", "Markdown mode keeps the marker as source");
+  } finally {
+    editor.setSourceMode(false);
+  }
+});
+
+test("shortcuts: a paste never runs a line shortcut", async () => {
+  await load("<p></p>");
+  assert(pasteClipboard("", "- "), "paste handles the event");
+  const block = editor.getDocument()[0];
+  assertEqual(block.type, "p", "pasted text is not restyled");
+  assertEqual(blockText(block), "- ", "the pasted marker stays text");
+});
+
+test("shortcuts: one undo takes back the marker and the block style", async () => {
+  await load("<p></p>");
+  typeText("- ");
+  assertEqual(editor.getDocument()[0].type, "list", "the shortcut fired");
+  editor.undo();
+  let blocks = editor.getDocument();
+  assertEqual(blocks[0].type, "p", "undo brings back the paragraph");
+  assertEqual(blockText(blocks[0]), "", "undo removes the marker too");
+
+  await load("<p>A written line</p>");
+  editor.collapseTo({ block: 0, offset: 0 });
+  editor.sync();
+  typeText("# ");
+  editor.undo();
+  blocks = editor.getDocument();
+  assertEqual(blocks[0].type, "p", "undo takes back the heading style");
+  assertEqual(blockText(blocks[0]), "A written line", "undo gives the line back whole");
+});
+
 test("lists: ordered markers number consecutive items", async () => {
   await load("<p>alpha</p><p>beta</p><p>gamma</p>");
   editor.setSelection({ block: 0, offset: 0 }, { block: 2, offset: 5 });
@@ -1911,6 +2146,23 @@ test("links: linked text keeps its range and can be removed", async () => {
   editor.removeLinkAtCaret();
   assertEqual(editor.getDocument()[0].runs.filter((run) => run.href).length, 0, "the link was removed");
   assertEqual(blockText(editor.getDocument()[0]), "Link this phrase or that phrase.", "text unchanged");
+});
+
+test("links: a caret inside a link changes that link", async () => {
+  await load('<p>Link this <a href="https://old.example/">phrase</a> now.</p>');
+  editor.collapseTo({ block: 0, offset: 12 });
+  editor.sync();
+  assertEqual(editor.linkAtCaret()?.href, "https://old.example/", "the caret starts inside the link");
+
+  editor.setLink("/doc/6f1c2f7a-58f7-4b1e-9f6d-8f1c2f7a58f7");
+  const runs = editor.getDocument()[0].runs.filter((run) => run.href);
+  assertEqual(runs.map((run) => run.text).join(""), "phrase", "the linked text stays the same");
+  assertEqual(
+    editor.getDocument()[0].runs.find((run) => run.text === "phrase")?.href,
+    "/doc/6f1c2f7a-58f7-4b1e-9f6d-8f1c2f7a58f7",
+    "the page path replaces the old target",
+  );
+  assertEqual(blockText(editor.getDocument()[0]), "Link this phrase now.", "text unchanged");
 });
 
 test("images: inserting, selecting, and deleting an image keeps the text intact", async () => {
@@ -2496,6 +2748,351 @@ test("clipboard: copy and cut use the selected model text", async () => {
   editor.undo();
   assertEqual(blockText(editor.getDocument()[0]), "alpha beta gamma", "undo restores a cut");
 });
+
+function copySelection() {
+  const clipboard = new DataTransfer();
+  editor.handleCopy({ preventDefault() {}, clipboardData: clipboard }, false);
+  return clipboard;
+}
+
+function pasteClipboard(html, plainText) {
+  const clipboard = new DataTransfer();
+  if (html) {
+    clipboard.setData("text/html", html);
+  }
+  clipboard.setData("text/plain", plainText === undefined ? String(html || "") : plainText);
+  let prevented = false;
+  editor.handlePaste({
+    preventDefault() {
+      prevented = true;
+    },
+    clipboardData: clipboard,
+  });
+  return prevented;
+}
+
+function markText(block, key) {
+  return block.runs
+    .filter((run) => run[key])
+    .map((run) => run.text)
+    .join("");
+}
+
+test("clipboard: copy writes semantic HTML and paste restores the marks", async () => {
+  await load("<p>alpha <b>beta</b> and <i>gamma</i> delta</p>");
+  editor.setSelection({ block: 0, offset: 0 }, { block: 0, offset: 26 });
+  editor.sync();
+  const clipboard = copySelection();
+  const html = clipboard.getData("text/html");
+  assert(html.includes("<b>beta</b>"), "bold survives in the copied HTML: " + html);
+  assert(html.includes("<i>gamma</i>"), "italic survives in the copied HTML: " + html);
+  assertEqual(clipboard.getData("text/plain"), "alpha beta and gamma delta", "plain fallback");
+
+  await load("<p></p>");
+  assert(pasteClipboard(html, clipboard.getData("text/plain")), "paste handles the event");
+  const blocks = editor.getDocument();
+  assertEqual(blocks.length, 1, "one pasted paragraph");
+  assertEqual(blockText(blocks[0]), "alpha beta and gamma delta", "pasted text");
+  assertEqual(markText(blocks[0], "b"), "beta", "pasted bold");
+  assertEqual(markText(blocks[0], "i"), "gamma", "pasted italic");
+});
+
+test("clipboard: copy and paste keep literal spaces and tabs", async () => {
+  await load("<p>two  spaces <code>a  b</code> tab\there</p>");
+  editor.selectAll();
+  editor.sync();
+  const clipboard = copySelection();
+  await load("<p></p>");
+  pasteClipboard(clipboard.getData("text/html"), clipboard.getData("text/plain"));
+  assertEqual(blockText(editor.getDocument()[0]), "two  spaces a  b tab\there", "the text is exact");
+  assertEqual(
+    editor.getDocument()[0].runs.find((run) => run.code).text,
+    "a  b",
+    "inline code keeps its double space",
+  );
+});
+
+test("clipboard: copying a list item pastes it back as a list item", async () => {
+  await load("<ul><li>first</li><li>Second <b>bold</b></li><li>third</li></ul>");
+  const item = editor.getDocument()[1];
+  editor.setSelection({ block: 1, offset: 0 }, { block: 1, offset: blockLength(item) });
+  editor.sync();
+  const clipboard = copySelection();
+  const html = clipboard.getData("text/html");
+  assert(html.includes("<ul>") && html.includes("<li>"), "the item is copied inside a list: " + html);
+
+  await load("<p></p>");
+  pasteClipboard(html, clipboard.getData("text/plain"));
+  const blocks = editor.getDocument();
+  assertEqual(blocks.length, 1, "one pasted item");
+  assertEqual(blocks[0].type, "list", "the pasted block is a list item");
+  assertEqual(Boolean(blocks[0].ordered), false, "it is unordered");
+  assertEqual(blockText(blocks[0]), "Second bold", "the item keeps its text");
+  assertEqual(markText(blocks[0], "b"), "bold", "the item keeps its marks");
+});
+
+test("clipboard: external HTML keeps headings, styles, and links", async () => {
+  const html =
+    '<meta charset="utf-8">' +
+    "<h2>Pasted title</h2>" +
+    "<ul><li>one</li><li>Two <b>bold</b></li></ul>" +
+    '<p><span style="font-weight:700">heavy</span> ' +
+    '<span style="font-style:italic">slanted</span> ' +
+    '<span style="text-decoration:underline">under</span> ' +
+    '<a href="https://example.com/page">link</a></p>' +
+    '<p style="text-align:center">Centered</p>';
+  await load("<p></p>");
+  pasteClipboard(html);
+  const blocks = editor.getDocument();
+  assertEqual(blocks.length, 5, "the heading, two items, and two paragraphs");
+  assertEqual(blocks[0].type, "h2", "heading type");
+  assertEqual(blockText(blocks[0]), "Pasted title", "heading text");
+  assertEqual(blocks[1].type, "list", "first list item");
+  assertEqual(blocks[2].type, "list", "second list item");
+  assertEqual(markText(blocks[1], "b"), "", "plain first item");
+  assertEqual(markText(blocks[2], "b"), "bold", "bold tag in the item");
+  assertEqual(markText(blocks[3], "b"), "heavy", "font-weight style becomes bold");
+  assertEqual(markText(blocks[3], "i"), "slanted", "font-style style becomes italic");
+  assertEqual(markText(blocks[3], "u"), "under", "text-decoration style keeps underline");
+  const link = blocks[3].runs.find((run) => run.href);
+  assertEqual(link && link.href, "https://example.com/page", "the link target survives");
+  assertEqual(blocks[4].align, "center", "paragraph alignment survives");
+});
+
+test("clipboard: paste drops scripts, styles, unsafe links, and remote images", async () => {
+  const html =
+    "<p>safe <b>bold</b></p>" +
+    "<script>window.pwned = 1</script>" +
+    "<style>p { color: red }</style>" +
+    "<p><img src=\"https://example.com/tracker.png\" alt=\"tracker\">" +
+    "<img src=\"data:image/svg+xml;base64,PHN2Zz4=\" alt=\"svg\">" +
+    '<a href="javascript:alert(1)">bad</a> ' +
+    '<a href="data:text/html;base64,PHNjcmlwdD4=">data</a></p>' +
+    '<iframe src="https://example.com"></iframe>';
+  await load("<p></p>");
+  pasteClipboard(html, "safe bold");
+  const blocks = editor.getDocument();
+  assertEqual(window.pwned, undefined, "pasted scripts never run");
+  const text = blocks.map(blockText).join("\n");
+  assert(!text.includes("pwned"), "script text is not inserted: " + text);
+  assert(!text.includes("color"), "style text is not inserted: " + text);
+  assertEqual(blocks.filter((block) => block.type === "image").length, 0, "no image is pasted");
+  for (const block of blocks) {
+    for (const run of block.runs || []) {
+      assert(!run.href, "the unsafe link is dropped: " + run.href);
+    }
+  }
+});
+
+test("clipboard: pasting paragraphs into the middle joins the outer lines", async () => {
+  await load("<p>alpha beta</p>");
+  editor.collapseTo({ block: 0, offset: 5 });
+  editor.sync();
+  pasteClipboard("<p>one</p><p>two</p>", "one\ntwo");
+  const blocks = editor.getDocument();
+  assertEqual(blocks.length, 2, "two paragraphs after the join");
+  assertEqual(blockText(blocks[0]), "alphaone", "the first pasted line joins the head");
+  assertEqual(blockText(blocks[1]), "two beta", "the last pasted line joins the tail");
+  const selection = editor.getSelection();
+  assertEqual(selection.focus.block, 1, "the caret ends in the last pasted line");
+  assertEqual(selection.focus.offset, 3, "the caret ends after the pasted text");
+});
+
+test("clipboard: a rich paste is one undo step", async () => {
+  await load("<p>start</p>");
+  const before = serializeDocument(editor.getDocument());
+  pasteClipboard("<h2>Title</h2><p>body</p>");
+  const after = serializeDocument(editor.getDocument());
+  assert(after !== before, "the paste changes the document");
+  editor.undo();
+  assertEqual(serializeDocument(editor.getDocument()), before, "one undo removes the whole paste");
+});
+
+test("clipboard: paste into a code block keeps plain text", async () => {
+  await load("<pre>a</pre>");
+  editor.collapseTo({ block: 0, offset: 1 });
+  editor.sync();
+  pasteClipboard("<p><b>bold</b> line</p><p>two</p>", "bold line\ntwo");
+  const blocks = editor.getDocument();
+  assertEqual(blocks.length, 1, "the code block stays one block");
+  assertEqual(blocks[0].type, "code", "it stays code");
+  assertEqual(blockText(blocks[0]), "abold line\ntwo", "the paste becomes code text");
+  assert(!blocks[0].runs.some((run) => run.b), "code carries no marks");
+});
+
+test("clipboard: a copied document pastes back with every block type", async () => {
+  const pixel =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const html =
+    '<img width="40" height="30" alt="Lead" src="' + pixel + '">' +
+    "<h1>A heading</h1>" +
+    "<p>plain <b>bold</b> <i>italic</i> <u>under</u> <s>struck</s> <code>code</code> " +
+    '<a href="https://example.com/">link</a> and<br>a hard break</p>' +
+    "<blockquote><p>A quote</p></blockquote>" +
+    "<ul><li>one<ul><li>nested</li></ul></li><li>two</li></ul>" +
+    "<ol><li>first</li></ol>" +
+    "<pre>let x = 1;\nlet y = 2;</pre>" +
+    "<p>before</p>" +
+    '<img width="40" height="30" alt="Dot" src="' + pixel + '">' +
+    "<p>after</p>" +
+    '<p data-align="right">right</p>';
+  await load(html);
+  const original = serializeDocument(editor.getDocument());
+  editor.selectAll();
+  editor.sync();
+  const clipboard = copySelection();
+  const copied = clipboard.getData("text/html");
+  assert(copied.includes("<pre>let x = 1;\nlet y = 2;</pre>"), "the code block is copied as a pre: " + copied);
+  assert(copied.includes(pixel), "an embedded picture is copied: " + copied);
+
+  await load("<p></p>");
+  pasteClipboard(copied, clipboard.getData("text/plain"));
+  assertEqual(serializeDocument(editor.getDocument()), original, "the whole document survives copy and paste");
+});
+
+test("clipboard: Google Docs style wrappers are read as marks, not markup", async () => {
+  const html =
+    '<meta charset="utf-8">' +
+    '<b style="font-weight:normal;" id="docs-internal-guid-check">' +
+    '<p dir="ltr" style="line-height:1.38;"><span style="font-size:11pt;font-family:Arial;font-weight:400;">plain </span>' +
+    '<span style="font-weight:700;">bold</span><span style="font-style:italic;"> italic</span></p>' +
+    '<ul><li dir="ltr" style="margin-left:0pt;"><p dir="ltr"><span style="font-weight:400;">item</span></p></li></ul>' +
+    "</b>";
+  await load("<p></p>");
+  pasteClipboard(html, "");
+  const blocks = editor.getDocument();
+  assertEqual(blocks.length, 2, "a paragraph and a list item");
+  assertEqual(blockText(blocks[0]), "plain bold italic", "the text is kept");
+  assertEqual(markText(blocks[0], "b"), "bold", "only the styled span is bold");
+  assertEqual(markText(blocks[0], "i"), " italic", "the italic span is italic");
+  assertEqual(blocks[1].type, "list", "the list item keeps its block");
+  assertEqual(blockText(blocks[1]), "item", "the item text");
+});
+
+test("clipboard: pasting a list item into a list splits the item", async () => {
+  await load("<ul><li>first</li><li>second</li></ul>");
+  editor.collapseTo({ block: 1, offset: 3 });
+  editor.sync();
+  pasteClipboard("<ul><li>added</li></ul>", "added");
+  const blocks = editor.getDocument();
+  assertEqual(blocks.length, 4, "the split item plus the pasted item");
+  assertEqual(blocks[2].type, "list", "the pasted item is a list item");
+  assertEqual(blockText(blocks[2]), "added", "the pasted item text");
+  const selection = editor.getSelection();
+  assertEqual(selection.focus.block, 2, "the caret is in the pasted item");
+  assertEqual(selection.focus.offset, 5, "the caret is after the pasted text");
+});
+
+test("clipboard: Google Docs paragraph separators do not become blank paragraphs", async () => {
+  const html =
+    '<b style="font-weight:normal" id="docs-internal-guid-check">' +
+    "<p>one</p><br><p>two <b>bold</b></p>" +
+    "</b><br class=\"Apple-interchange-newline\">";
+  await load("<p>alpha beta</p>");
+  editor.collapseTo({ block: 0, offset: 5 });
+  editor.sync();
+  pasteClipboard(html, "one\ntwo bold");
+  const blocks = editor.getDocument();
+  assertEqual(blocks.length, 2, "two paragraphs, no separator blank line");
+  assertEqual(blockText(blocks[0]), "alphaone", "the first line joins the head");
+  assertEqual(blockText(blocks[1]), "two bold beta", "the second line joins the tail");
+  assertEqual(markText(blocks[1], "b"), "bold", "the pasted bold survives");
+
+  // A <br> inside a paragraph is still a hard break, not a separator.
+  await load("<p></p>");
+  pasteClipboard("<p>one<br>two</p>", "one\ntwo");
+  assertEqual(blockText(editor.getDocument()[0]), "one\ntwo", "an inline hard break survives");
+});
+
+test("clipboard: a paste ending with a picture keeps the text that follows it", async () => {
+  const pixel =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const image = '<img width="10" height="10" alt="Dot" src="' + pixel + '">';
+
+  await load("<p>alpha</p>");
+  editor.collapseTo({ block: 0, offset: 0 });
+  editor.sync();
+  pasteClipboard(image, "");
+  let blocks = editor.getDocument();
+  assertEqual(blocks.length, 2, "the picture and the paragraph it was pasted before");
+  assertEqual(blocks[0].type, "image", "the picture is first");
+  assertEqual(blocks[1].type, "p", "no spurious paragraph between the picture and the text");
+  assertEqual(blockText(blocks[1]), "alpha", "the text after the caret is kept");
+  let selection = editor.getSelection();
+  assertEqual(selection.focus.block, 1, "the caret is in the text after the picture");
+  assertEqual(selection.focus.offset, 0, "at the start of that text");
+
+  await load("<p>alpha</p>");
+  editor.collapseTo({ block: 0, offset: 5 });
+  editor.sync();
+  pasteClipboard(image, "");
+  blocks = editor.getDocument();
+  assertEqual(blocks.length, 3, "a picture at the end gets a paragraph after it");
+  assertEqual(blocks[1].type, "image", "the picture is last");
+  assertEqual(blockText(blocks[2]), "", "the caret paragraph is empty");
+  selection = editor.getSelection();
+  assertEqual(selection.focus.block, 2, "the caret is in that paragraph");
+});
+
+test("clipboard: replacing an image selection does not delete the picture before it", async () => {
+  const pixel =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const image = '<img width="10" height="10" alt="Dot" src="' + pixel + '">';
+  await load("<p>a</p>" + image + image + image);
+  editor.setSelection({ block: 2, offset: 0 }, { block: 3, offset: 0 });
+  editor.sync();
+  pasteClipboard("<p>x</p>", "x");
+  const blocks = editor.getDocument();
+  assertEqual(blocks.length, 3, "the untouched picture survives");
+  assertEqual(blocks[0].type, "p", "the first paragraph");
+  assertEqual(blocks[1].type, "image", "the picture before the selection is kept");
+  assertEqual(blocks[2].type, "p", "the paste goes in a new paragraph");
+  assertEqual(blockText(blocks[2]), "x", "the pasted text");
+});
+
+test("clipboard: pasting a list inside a nested item keeps the nesting", async () => {
+  await load("<ul><li>outer<ul><li>alpha beta</li><li>second</li></ul></li></ul>");
+  editor.collapseTo({ block: 1, offset: 5 });
+  editor.sync();
+  pasteClipboard("<ul><li>x</li><li>y</li></ul>", "x\ny");
+  const blocks = editor.getDocument();
+  assertEqual(blocks.length, 6, "the split item and the two pasted items");
+  assertEqual(blocks[2].depth, 1, "the first pasted item stays nested");
+  assertEqual(blocks[3].depth, 1, "the second pasted item stays nested");
+  assertEqual(blocks[4].depth, 1, "the rest of the split line stays nested too");
+  assertEqual(blockText(blocks[4]), " beta", "the rest of the split line");
+  assertEqual(blockText(blocks[5]), "second", "the following sibling is untouched");
+});
+
+test("clipboard: a nested table does not duplicate its cell text", async () => {
+  await load("<p></p>");
+  pasteClipboard(
+    "<table><tr><td>outer<table><tr><td>inner</td></tr></table></td><td>other</td></tr></table>",
+  );
+  assertEqual(blockText(editor.getDocument()[0]), "outerinner other", "the nested text appears once");
+});
+
+test("clipboard: copied image attributes stay inside the stored bounds", async () => {
+  const pixel =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  await load("<p></p>");
+  pasteClipboard(
+    '<img width="10" height="10" data-radius="012" data-x="000123" data-y="12" src="' + pixel + '">',
+  );
+  const block = editor.getDocument()[0];
+  assertEqual(block.type, "image", "the picture is pasted");
+  assertEqual(block.radius, null, "a non-canonical radius is dropped, not stored and stripped later");
+  const stored = serializeDocument([block]);
+  assert(!stored.includes("000123"), "a too-long x offset is dropped");
+  assert(stored.includes('data-y="12"'), "a bounded y offset is kept");
+});
+
+test("clipboard: unusable clipboard HTML falls back to plain text", async () => {
+  await load("<p></p>");
+  pasteClipboard("<script>alert(1)</script>", "fallback");
+  assertEqual(blockText(editor.getDocument()[0]), "fallback", "plain text is inserted");
+});
+
 
 test("selection: deleting across paragraphs and an image keeps the outer text", async () => {
   await load(

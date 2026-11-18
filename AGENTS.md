@@ -92,8 +92,14 @@ src/disk.rs       free space for the storage page (statvfs / GetDiskFreeSpaceEx)
 src/assets.rs     embedded HTML/CSS/JS/font lookup
 assets/           browser UI; no build step (login.html is the password gate)
 assets/doc/       the editor: model, layout, view, input, images, and PDF export
+assets/doc/clipboard.js     rich copy/paste: selection HTML and sanitized pasted HTML
 assets/doc/markdown.js      Markdown mode: rich blocks <-> editable source
 assets/doc/markdown-edit.js Markdown mode: toolbar commands edit the source
+assets/menu.js      the page menu on storage, version, shortcuts, and not-found
+assets/home.js      the library: listing, search, view, sort, rename, delete
+assets/quick-open.js  the Ctrl+O document search, shared by every page except the gate
+assets/shortcuts.html  the page listing every editor and app shortcut
+assets/storage.html  the page for the data folder and backup connectors
 assets/icons/     standalone SVG sources for the icons the pages inline
 assets/pretext/   vendored text layout engine (MIT); do not edit
 assets/fonts/     bundled Inter/Literata files and their licenses
@@ -206,6 +212,35 @@ card's preview only when the card comes near the viewport and keeps card
 elements between renders, so search filtering never rebuilds them. List rows
 show no preview. The summary still carries the excerpt for search matching.
 
+While the listing is in flight the home page shows placeholder rows or cards.
+`index.html` ships a few so the very first paint is not an empty library;
+`home.js` then rebuilds the set to cover the first screen in the current view
+(one placeholder per list row, one per grid cell), so a slow listing looks like
+a page that is loading rather than one with almost nothing on it. The
+placeholders are `aria-hidden` and the listing container carries `aria-busy`;
+they stay in the DOM through a failed load so "Try again" has something to show
+while it waits, and `renderDocuments` does nothing until the first listing has
+arrived, so changing the view or the sort during the wait cannot flash the
+empty state. The shimmer in `app.css` is the loading cue; it is turned off when
+the reader asks for reduced motion.
+
+The Shortcuts page (`/shortcuts`, `assets/shortcuts.html`) is a plain page with
+two sections: the editor's keys and the rest of the app's. It has no script of
+its own; `menu.js` and `app.css` do the work. The home, editor, and page menus
+link to it, so update it when a key handler changes.
+
+Every page except the password gate loads `assets/quick-open.js`. `Ctrl+O` opens
+a centered search over the whole library: the script reads `/api/documents` when
+the palette opens, so there is no background refresh and no request per
+keystroke, and it filters titles locally. Enter opens the highlighted document,
+Shift+Enter opens it in a new tab and switches there, and Escape or a backdrop
+click closes the palette. The keyboard hints in the footer fade away after three
+seconds without moving the footer, and the next opening brings them back. The
+listing can answer 401 on the public version and not-found pages, so that case
+becomes a sign-in row instead of an error. The palette builds its own `<dialog>`
+on first use and `app.css` owns its look; a new page loads the script with
+`defer` unless it is the password gate.
+
 ## Editor architecture
 
 The editor does not use `contenteditable`. `assets/doc/input.js` owns the block
@@ -213,6 +248,17 @@ model and the selection, `layout.js` turns blocks into positioned lines with
 pretext, and `view.js` paints those lines plus the caret and selection.
 `model.js` converts the block model to and from the stored HTML, which is
 unchanged.
+
+The paper is blank until the editor has fetched, measured, and laid out the
+document, and a large document, a slow connection, or a slow machine can make
+that last long enough to read as an empty page. `editor.html` therefore carries
+a `.paper-loading` ghost of a title and a page of text lines inside the sheet:
+it shows only while the paper has `aria-busy="true"`, and `applyDocument` clears
+that attribute in the same task that paints the text, so the ghost never
+outlives the document. It stays invisible for 150ms before fading in, so an
+ordinary fast open shows nothing; reduced motion keeps the delay and drops the
+fade. The shimmer is the same library loading cue, and the title and prose are
+hidden while the ghost stands in.
 
 - Every line comes from `prepare`/`layoutNextLineRange` or
   `prepareRichInline`/`layoutNextRichInlineLineRange`. Do not reintroduce browser
@@ -252,6 +298,11 @@ unchanged.
   Every other reader of the document (view, layout, PDF, HTML export) therefore
   needs no transform of its own, and the menu stays open because one turn is
   rarely the whole gesture. Undo restores the previous data URL.
+- `Download image` writes the embedded data URL's own bytes back out as a file,
+  never a re-render or re-encode of the picture on the page. The name comes from
+  the image's alt text, which starts as the inserted file's name, and falls back
+  to the document title; the blob goes through the same download helper as the
+  exports. The menu closes like it does for the other whole-image actions.
 - A corner radius is the opposite: a bounded `data-radius` on the `<img>`, not
   pixels. Images are square by default (`IMAGE_RADIUS_DEFAULT`), so only a
   different value is stored; the menu field applies it on `input` with coalesced
@@ -287,6 +338,13 @@ unchanged.
   writing a title continues in Normal text instead of another heading.
   `Shift+Enter` is still a hard break inside the heading. This is rich-text
   behavior only; Markdown source lines are plain blocks and keep their markers.
+- Markdown line shortcuts work in the rendered editor: typing `- ` at the start
+  of a block starts a bullet item, and `# `, `## `, or `### ` starts Heading 1
+  to 3. The space that completes the marker triggers the rule and both it and
+  the marker are consumed, so the caret continues in the new style and text
+  after it stays in the converted block. The rules run on typed input only and
+  only at the very start of a line: a marker elsewhere, a code block, pasted
+  text, and Markdown source keep the literal characters.
 - Paper width belongs to the document, not the HTML: `paper_width` (pixels) in
   the document JSON, applied before the first layout. Dragging either border
   resizes both edges around the centre; the workspace bounds the drag and leaves
@@ -305,6 +363,29 @@ unchanged.
   hangs them; the stored HTML escapes text before writing line feeds as `<br>`.
 - The hidden `<textarea>` only captures keystrokes, IME, and clipboard events; its
   value is cleared after every event.
+- A modal dialog that closes has to leave the editor able to take typing again.
+  Chrome restores focus when a dialog closes without restoring the editing state,
+  and can drop focus on the page body instead, so keys arrive and nothing is
+  written until the page is reloaded. `DocEditor.focusEditor` nudge-blurs an
+  already-active textarea for that reason, and both dialogs' `close` events call
+  `restoreEditorFocus`, which takes focus back one task later from the page body
+  or from that textarea, and from nowhere else. `test/app-check.mjs` checks
+  typing after each way out of both dialogs with real key events, because
+  `Input.insertText` bypasses the browser path that breaks.
+- Copy writes the selection's plain text plus the selected blocks as semantic
+  HTML; cut writes the same and then deletes. Paste prefers the HTML flavor and
+  reduces it in `assets/doc/clipboard.js` to what the editor can represent:
+  headings, paragraphs, lists, quotes, code blocks, inline marks, links, and
+  embedded bitmap images. Inline styles other editors use for bold, italic,
+  underline, strike-through, and alignment become the same semantic marks and
+  bounded `data-align`; scripts, styles, forms, media, remote images, unknown
+  attributes, and unsafe URL schemes are dropped before parsing, and paste
+  never fetches anything. A `<br>` that sits between block elements is treated
+  as another editor's paragraph separator, not as a hard break inside a line.
+  A pasted plain paragraph joins the line at the caret run by run, while a
+  heading, list, quote, or code block is inserted as its own block and splits
+  the line there. A code block takes the pasted text as plain lines, and
+  Markdown mode pastes and copies plain text only.
 - Page Up and Page Down move the caret one screen and scroll the page by the same
   distance, so the caret keeps its place and the next keystroke stays there. When
   the jump would pass the document, the caret goes to its very first or very last
@@ -320,12 +401,18 @@ unchanged.
   reach `sync()` without `animateCaret`, so they snap; the next gesture restores
   the slide. `prefers-reduced-motion` removes it. A selection hides the caret,
   so collapsing one shows it at the new spot without a slide.
+- Double-click selects the word under the pointer. A third click in the same
+  gesture selects the writer's line instead, the way a native text field does:
+  the text between hard breaks (the whole block when it has none), including the
+  hard break after it, so typing over the selection replaces the line instead of
+  leaving an empty one. The line is selected whole even when it wraps on the
+  paper, and a picture has no line, so the gesture leaves its selection alone.
 - Focus mode hides the editor's bar and asks the browser for fullscreen, from
-  the document menu. The header stays in the DOM because its menu button is the
-  way out: CSS takes it out of the flow, hides the start and the toolbar, and
-  lets the paper fill the viewport. Leaving fullscreen leaves focus mode, and
-  Escape leaves both.
-- Markdown mode, the next item in the document menu (or `Ctrl+M`), turns
+  the document menu (or `Ctrl+Shift+F`). The header stays in the DOM because its
+  menu button is the way out: CSS takes it out of the flow, hides the start and
+  the toolbar, and lets the paper fill the viewport. Leaving fullscreen leaves
+  focus mode, and Escape leaves both.
+- Markdown mode, the next item in the document menu (or `Ctrl+Shift+M`), turns
   the paper into editable Markdown source without adding a second editing
   surface. It is a view over the stored document: while it is on the editor
   holds one paragraph block per source line (blocks carry `source: true`, one
@@ -349,6 +436,16 @@ unchanged.
   The mode is per-visit (off after a reload) and is never stored with the
   document. A toggle keeps the rich blocks in a snapshot, so toggling with no
   edits restores them exactly; a toggle clears undo history.
+- The link dialog (`Ctrl+K`) points the selected text at a web address or at
+  another Grapho page. The field is both: a typed address is applied as before,
+  while the list under it shows the library's recent documents, filters by title
+  as the writer types, and links the chosen page as a root-relative
+  `/doc/<id>`. Choosing a row links that page; the arrow keys pick a row and
+  Enter (or the dialog's primary button) commits it. The listing is read once
+  when the dialog opens, like `Ctrl+O`, and filtered locally, so typing sends no
+  request; the current document is left out. A root-relative target keeps
+  working on any host or port the library is served from, the store's sanitizer
+  passes it, and Markdown mode carries it.
 - Known gaps: no native spellcheck, screen readers get the painted text but not a
   text-editing surface, printing the editor prints the painted page, image and
   paper resizing need a pointer, turning an animated GIF keeps only its first
@@ -358,10 +455,10 @@ unchanged.
   grouping), and alignment, indentation, underline, hard breaks and empty
   paragraphs show up in the source as small HTML snippets when they carry
   attributes Markdown cannot express.
-  Its link dialog creates http, https, and mailto links; relative and fragment
-  links already stored in a document round-trip unchanged. An inline toolbar
-  toggle does nothing (rather than nesting markers) when the caret sits inside
-  an existing emphasis or code span.
+  Its link dialog creates http, https, mailto, and root-relative Grapho page
+  links; other relative and fragment links already stored in a document
+  round-trip unchanged. An inline toolbar toggle does nothing (rather than
+  nesting markers) when the caret sits inside an existing emphasis or code span.
 - PDF export (`assets/doc/pdf.js`) lays the document out again at an A4 content
   width, so its line breaks can differ from the paper on screen. It writes the
   file itself and uses the standard PDF fonts (Times and Courier), so do not add
@@ -393,8 +490,13 @@ These should not be casually changed:
 - The stored HTML is the interchange format between the editor and older
   documents. `parseDocument`/`serializeDocument` must round-trip it; test with
   documents written by earlier versions.
-- Rich HTML paste is reduced to plain text on purpose. Image files are the one
-  exception; keep it that way unless the user asks for sanitized paste support.
+- Clipboard HTML is untrusted input. Copy writes semantic HTML; paste reduces it
+  in `assets/doc/clipboard.js` to the tags and bounded attributes the editor can
+  write, plus the inline styles other editors use for bold, italic, underline,
+  strike-through, and alignment, which become the same semantic model. Scripts,
+  styles, forms, media, remote images, unsafe URL schemes, and unknown attributes
+  are dropped before parsing. Paste must never touch the network, and every
+  pasted document still has to pass the store sanitizer unchanged.
 - The CSP, frame denial, no-referrer policy, and same-origin mutation check are
   part of the app. Do not loosen them for convenience. The version page is the
   only response allowed `connect-src https://api.github.com`, for its update
@@ -585,8 +687,9 @@ scratch image with an empty `/data` directory.
 
 `node --check assets/home.js`, `node --check assets/editor.js`,
 `node --check assets/login.js`, `node --check assets/menu.js`,
-`node --check assets/storage.js`, and `node --check assets/theme.js` are useful
-syntax checks when Node is available; Node is not a runtime dependency.
+`node --check assets/quick-open.js`, `node --check assets/storage.js`, and
+`node --check assets/theme.js` are useful syntax checks when Node is available;
+Node is not a runtime dependency.
 
 The editor's caret, selection, and writing behavior is checked in a real
 browser. These tests need Node 22+ and a local Chrome or Chromium, but no npm

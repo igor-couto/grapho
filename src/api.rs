@@ -109,6 +109,7 @@ pub fn router(store: SharedStore, auth: Option<Arc<Auth>>, options: ServerOption
         // The storage page reveals a filesystem path and can move the library,
         // so it is as private as the documents themselves.
         .route("/storage", get(storage_page))
+        .route("/shortcuts", get(shortcuts_page))
         .route("/api/storage", get(get_storage).put(update_storage))
         .route("/api/storage/backups", post(add_backup))
         .route("/api/storage/backups/ssh", post(add_ssh_backup))
@@ -179,6 +180,10 @@ async fn editor_page(State(state): State<AppState>, Path(raw_id): Path<String>) 
 
 async fn storage_page() -> Response {
     with_page_cache(Html(assets::STORAGE_HTML).into_response())
+}
+
+async fn shortcuts_page() -> Response {
+    with_page_cache(Html(assets::SHORTCUTS_HTML).into_response())
 }
 
 async fn login_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -1486,6 +1491,13 @@ mod tests {
             "/login?next=%2Fstorage"
         );
 
+        let response = app.clone().oneshot(get("/shortcuts")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/login?next=%2Fshortcuts"
+        );
+
         let response = app.clone().oneshot(get("/api/storage")).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
@@ -1904,6 +1916,31 @@ mod tests {
         assert_eq!(body["editable"], true);
         assert_eq!(body["documents"], 0);
         assert_eq!(body["bytes"], 0);
+
+        let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+
+    #[tokio::test]
+    async fn the_shortcuts_page_lists_the_editor_and_the_rest() {
+        let (app, directory) = test_app(None).await;
+
+        let response = app.clone().oneshot(get("/shortcuts")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-cache"
+        );
+
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("response body");
+        let body = String::from_utf8(bytes.to_vec()).expect("utf-8 page");
+        assert!(body.contains("id=\"editorShortcutsTitle\""));
+        assert!(body.contains("id=\"otherShortcutsTitle\""));
+        assert!(body.contains("<kbd>Ctrl+S</kbd>"));
+        // The library and editor menus link to the page in their own markup.
+        assert!(assets::INDEX_HTML.contains("href=\"/shortcuts\""));
+        assert!(assets::EDITOR_HTML.contains("href=\"/shortcuts\""));
 
         let _ = tokio::fs::remove_dir_all(directory).await;
     }

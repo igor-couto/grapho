@@ -1,7 +1,7 @@
 // The standard page menu: the theme choice and the pages that manage this
-// Grapho install. The library, storage, version, and not-found pages get this
-// menu; the editor has its own with document actions, and the password gate
-// has no menu at all.
+// Grapho install. The storage, version, shortcuts, and not-found pages get this
+// menu; the library and the editor have their own, and the password gate has no
+// menu at all.
 (function () {
   "use strict";
 
@@ -13,10 +13,14 @@
     '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.6"/><path d="M12 11.2v5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="12" cy="7.9" r="1" fill="currentColor"/></svg>';
   var STORAGE_ICON =
     '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><ellipse cx="12" cy="6.1" rx="6.7" ry="2.7" stroke="currentColor" stroke-width="1.6"/><path d="M5.3 6.1v11.8c0 1.5 3 2.7 6.7 2.7s6.7-1.2 6.7-2.7V6.1" stroke="currentColor" stroke-width="1.6"/><path d="M5.3 12c0 1.5 3 2.7 6.7 2.7s6.7-1.2 6.7-2.7" stroke="currentColor" stroke-width="1.6"/></svg>';
+  var SHORTCUTS_ICON =
+    '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="2.8" y="6" width="18.4" height="12" rx="2.4" stroke="currentColor" stroke-width="1.6"/><path d="M6.4 9.8h.01M9.4 9.8h.01M12.4 9.8h.01M15.4 9.8h.01M18.4 9.8h.01M6.4 12.8h.01M9.4 12.8h.01M12.4 12.8h.01M15.4 12.8h.01M18.4 12.8h.01M7.6 15.4h8.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
 
   function markup() {
     var theme =
       document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+    var shortcutsCurrent =
+      window.location.pathname === "/shortcuts" ? ' aria-current="page"' : "";
 
     return [
       '<p class="popover-label" id="themeLabel">Theme</p>',
@@ -40,6 +44,11 @@
       '<a class="menu-item" role="menuitem" href="/version">' +
         VERSION_ICON +
         "Version</a>",
+      '<a class="menu-item" role="menuitem" href="/shortcuts"' +
+        shortcutsCurrent +
+        ">" +
+        SHORTCUTS_ICON +
+        "Shortcuts</a>",
     ].join("");
   }
 

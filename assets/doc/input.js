@@ -2,6 +2,7 @@
 // textarea that receives typing, IME, and clipboard input. Every change goes
 // through commit(), which keeps undo, layout, and painting in step.
 
+import { blocksFromPastedHtml, selectionHtml } from "./clipboard.js";
 import {
   ALIGNMENTS,
   blockAlignment,
@@ -39,6 +40,14 @@ const TYPING_COALESCE_MS = 700;
 const UNDO_LIMIT = 120;
 const ALIGNMENT_VALUES = new Set(ALIGNMENTS);
 const HEADING_TYPES = new Set(["h1", "h2", "h3"]);
+// Markdown line shortcuts in the rendered editor. The complete line prefix,
+// space included, maps to the block it starts; nothing above Heading 3 exists.
+const MARKDOWN_SHORTCUTS = new Map([
+  ["- ", "list"],
+  ["# ", "h1"],
+  ["## ", "h2"],
+  ["### ", "h3"],
+]);
 // Tab types four spaces at the caret in a paragraph. A selection gets one tab
 // stop at the start of every line it touches instead, the way a code editor
 // indents a block of text.
@@ -129,6 +138,9 @@ export class DocEditor {
       this.cancelImageResize();
     });
     this.root.addEventListener("dblclick", (event) => this.handleDoubleClick(event));
+    // The browser does not emit a "tripleclick" event; a click's `detail` is
+    // the running click count, which is the same count that drives dblclick.
+    this.root.addEventListener("click", (event) => this.handleTripleClick(event));
 
     this.textarea.style.fontSize = "16px";
 
@@ -282,9 +294,17 @@ export class DocEditor {
   }
 
   focusEditor() {
-    if (document.activeElement !== this.textarea) {
-      this.textarea.focus({ preventScroll: true });
+    // A dialog that closes can hand this textarea back active but unable to
+    // accept text: while the dialog was open the page was inert, and the
+    // browser's restored focus does not bring the editing state with it, so
+    // keystrokes arrive and nothing is written. Focusing an element that is
+    // already active is a no-op and cannot repair that, so take the textarea
+    // out and put it back. Both handlers run in this task and paint once, so
+    // the caret never flickers.
+    if (document.activeElement === this.textarea) {
+      this.textarea.blur();
     }
+    this.textarea.focus({ preventScroll: true });
     this.sync();
   }
 
@@ -495,6 +515,47 @@ export class DocEditor {
      Insertion and deletion
      --------------------------------------------------------------------- */
 
+  // Markdown line shortcuts, for typed input only: the space that ends "- ",
+  // "# ", "## ", or "### " at the start of a block turns the block into a
+  // bullet item or the matching heading and consumes the marker, so the caret
+  // continues in the new style. Text already after the caret belongs to the
+  // converted block; a marker anywhere else on the line, a code block, and
+  // Markdown source stay literal. Pasting never runs this.
+  applyMarkdownShortcut(typed) {
+    if (this.sourceMode || !this.isCollapsed()) {
+      return false;
+    }
+    // Every marker is at most "### " long and must start at offset 0, so a
+    // caret deeper in the block skips the text work below on every keystroke.
+    const offset = this.focus.offset;
+    if (offset + typed.length > 4) {
+      return false;
+    }
+    const index = this.focus.block;
+    const block = this.blocks[index];
+    if (!block || block.type === "image" || block.type === "code") {
+      return false;
+    }
+    const type = MARKDOWN_SHORTCUTS.get(blockText(block).slice(0, offset) + typed);
+    if (!type) {
+      return false;
+    }
+
+    const next = {
+      ...block,
+      id: createBlockId(),
+      runs: removeRangeFromRuns(block.runs, 0, offset),
+      type,
+      ordered: false,
+      // A bullet marker on an item keeps that item's nesting; every other
+      // conversion starts at the outermost level, like the style menu.
+      depth: type === "list" && block.type === "list" ? block.depth : 0,
+    };
+    const caret = { block: index, offset: 0 };
+    this.commit(this.replaceBlock(index, next), caret, caret, { coalesce: true, keepMarks: true });
+    return true;
+  }
+
   insertText(text, overrideMarks) {
     if (!text) {
       return;
@@ -580,6 +641,127 @@ export class DocEditor {
       this.typing = null;
     }
     this.commit(blocks, caret, caret, { coalesce: true, keepMarks: true });
+  }
+
+  // Insert block content from a rich clipboard. A single pasted paragraph joins
+  // the paragraph at the caret, keeping its marks run by run. Headings, lists,
+  // quotes, and code blocks keep their own block and split the line at the
+  // caret. A code block and Markdown source hold plain text, so they take the
+  // pasted text as lines instead of blocks.
+  insertBlocks(pasted) {
+    if (!pasted.length) {
+      return;
+    }
+    const target = this.blocks[this.focus.block];
+    if (this.sourceMode || !target || target.type === "code") {
+      this.insertText(pastedPlainText(pasted));
+      return;
+    }
+
+    const deletion = this.selectionDeletion();
+    let blocks = deletion ? deletion.blocks : this.blocks;
+    let caret = deletion ? { ...deletion.caret } : { ...this.focus };
+
+    // A picture caret is replaced by a paragraph, the same way typing over a
+    // selected picture works; the paste then lands in that paragraph. A caret
+    // that only landed on a picture because the deleted selection ended next to
+    // it must not replace that picture: the paste goes after it instead.
+    if (blocks[caret.block] && blocks[caret.block].type === "image") {
+      blocks = blocks.slice();
+      if (deletion) {
+        blocks.splice(caret.block + 1, 0, emptyParagraph());
+        caret = { block: caret.block + 1, offset: 0 };
+      } else {
+        blocks[caret.block] = emptyParagraph();
+        caret = { block: caret.block, offset: 0 };
+      }
+    }
+
+    if (pasted.length === 1 && isPlainParagraph(pasted[0])) {
+      const runs = insertRunList(blocks[caret.block], caret.offset, pasted[0].runs);
+      const next = blocks.slice();
+      next[caret.block] = { ...blocks[caret.block], id: createBlockId(), runs };
+      const position = { block: caret.block, offset: caret.offset + blockLength(pasted[0]) };
+      this.commit(next, position, position);
+      return;
+    }
+
+    const [head, tail] = splitBlockModel(blocks[caret.block], caret.offset);
+    const body = pasted.map((block) => ({ ...block, id: createBlockId() }));
+    // Pasting list items inside a nested item inserts them as siblings of that
+    // item, so their nesting is relative to where the caret is.
+    const listDepth =
+      blocks[caret.block] && blocks[caret.block].type === "list"
+        ? Math.min(LIST_DEPTH_LIMIT, Math.max(0, Number(blocks[caret.block].depth) || 0))
+        : 0;
+    if (listDepth > 0) {
+      for (let index = 0; index < body.length; index += 1) {
+        const block = body[index];
+        if (block.type === "list") {
+          body[index] = { ...block, depth: Math.min(LIST_DEPTH_LIMIT, (Number(block.depth) || 0) + listDepth) };
+        }
+      }
+    }
+    let first = head;
+    let last = tail;
+    let mergedLast = false;
+    let mergedLastLength = 0;
+
+    // A pasted paragraph at either edge joins the line it was pasted onto, so
+    // pasting "one\ntwo" mid-paragraph continues the sentence instead of
+    // leaving ragged half-paragraphs. Headings and list items stay separate.
+    if (isPlainParagraph(body[0])) {
+      const edge = body.shift();
+      first = { ...first, id: createBlockId(), runs: normalizeRuns([...first.runs, ...edge.runs]) };
+    }
+    if (body.length && isPlainParagraph(body[body.length - 1])) {
+      const edge = body.pop();
+      mergedLast = true;
+      mergedLastLength = blockLength(edge);
+      last = { ...last, id: createBlockId(), runs: normalizeRuns([...edge.runs, ...last.runs]) };
+    }
+
+    // An empty half left over from splitting at the very start or end of a
+    // block is not a pasted blank line; it is where the caret already was.
+    const keepFirst = blockLength(first) > 0 || body.length === 0;
+    const keepLast = blockLength(last) > 0 || body.length === 0;
+    const replacement = [];
+    if (keepFirst) {
+      replacement.push(first);
+    }
+    const bodyStart = replacement.length;
+    replacement.push(...body);
+    if (keepLast) {
+      replacement.push(last);
+    }
+
+    const next = blocks.slice();
+    next.splice(caret.block, 1, ...replacement);
+
+    let position = { block: caret.block, offset: 0 };
+    if (mergedLast && keepLast) {
+      position = { block: caret.block + replacement.length - 1, offset: mergedLastLength };
+    } else if (body.length) {
+      position = {
+        block: caret.block + bodyStart + body.length - 1,
+        offset: blockLength(body[body.length - 1]),
+      };
+    } else if (keepFirst) {
+      position = { block: caret.block, offset: blockLength(first) };
+    }
+
+    // A picture has no caret. A paste that ends on one and stops the document
+    // gets a paragraph to continue writing in; if the split tail follows it, the
+    // caret belongs at the start of that text and no paragraph is needed.
+    if (next[position.block] && next[position.block].type === "image") {
+      if (position.block === next.length - 1) {
+        next.push(emptyParagraph());
+        position = { block: next.length - 1, offset: 0 };
+      } else {
+        position = { block: position.block + 1, offset: 0 };
+      }
+    }
+    this.commit(next, position, position);
   }
 
   marksForTyping() {
@@ -1144,6 +1326,20 @@ export class DocEditor {
     }
     const { from, to } = this.normalized();
     if (from.block === to.block && from.offset === to.offset) {
+      // A caret inside an existing link changes that link, which is how the
+      // link dialog's Edit state works. A bare caret instead arms the marks
+      // for whatever is typed next.
+      const link = this.linkAtCaret();
+      const block = this.blocks[from.block];
+      if (link && block && block.type !== "image" && block.type !== "code") {
+        const runs = setHrefOnRuns(block.runs, link.from, link.to, href || null);
+        this.commit(
+          this.replaceBlock(from.block, { ...block, id: createBlockId(), runs }),
+          this.anchor,
+          this.focus,
+        );
+        return;
+      }
       this.pendingMarks = { ...this.activeMarks(), href: href || "" };
       this.sync();
       return;
@@ -1647,6 +1843,9 @@ export class DocEditor {
     if (!value) {
       return;
     }
+    if (this.applyMarkdownShortcut(value)) {
+      return;
+    }
     this.insertText(value);
   }
 
@@ -1680,6 +1879,16 @@ export class DocEditor {
     }
     event.preventDefault();
     event.clipboardData.setData("text/plain", this.selectionText());
+    // The rendered view also offers the selection as semantic HTML, so another
+    // program (or Grapho itself) can keep the formatting. Markdown source is
+    // plain lines, so its copy stays plain text.
+    if (!this.sourceMode) {
+      const { from, to } = this.normalized();
+      const html = selectionHtml(this.blocks, from, to);
+      if (html) {
+        event.clipboardData.setData("text/html", html);
+      }
+    }
     if (cut) {
       this.deleteSelectionIfAny();
     }
@@ -1695,6 +1904,17 @@ export class DocEditor {
       event.preventDefault();
       this.callbacks.onPasteImages(files);
       return;
+    }
+    // Rich paste is for the rendered view only; Markdown source lines are plain
+    // text, and insertBlocks reduces rich content for code blocks too.
+    const html = this.sourceMode ? "" : clipboard.getData("text/html");
+    if (html) {
+      const pasted = blocksFromPastedHtml(html);
+      if (pasted && pasted.length) {
+        event.preventDefault();
+        this.insertBlocks(pasted);
+        return;
+      }
     }
     const text = clipboard.getData("text/plain");
     if (text) {
@@ -2092,6 +2312,37 @@ export class DocEditor {
     this.focusEditor();
   }
 
+  // Three clicks select the whole line under the pointer, as a native text
+  // field does: the text between hard breaks, or the whole block when it has
+  // none. The line's own hard break is part of the selection, so replacing the
+  // selection replaces the line rather than leaving a blank one behind. A
+  // picture has no line to select, and Shift+click is still an ordinary extend.
+  handleTripleClick(event) {
+    if (
+      event.detail < 3 ||
+      event.button !== 0 ||
+      event.shiftKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.altKey
+    ) {
+      return;
+    }
+    const position = this.positionFromEvent(event);
+    const block = this.blocks[position.block];
+    if (!block || block.type === "image") {
+      return;
+    }
+    const text = blockText(block);
+    const { start, end } = lineRangeAt(text, position.offset);
+    if (start === end) {
+      this.focusEditor();
+      return;
+    }
+    this.setSelection({ block: position.block, offset: start }, { block: position.block, offset: end });
+    this.focusEditor();
+  }
+
   imageEntryAt(clientX, clientY) {
     if (!this.layout) {
       return null;
@@ -2152,6 +2403,24 @@ export class DocEditor {
 function insertRuns(block, offset, text, marks) {
   const { left, right } = splitRuns(block.runs, offset);
   return normalizeRuns([...left, { text, ...marks }, ...right]);
+}
+
+// Insert existing runs (with their own marks) at an offset of one block.
+function insertRunList(block, offset, runs) {
+  const { left, right } = splitRuns(block.runs, offset);
+  return normalizeRuns([...left, ...runs, ...right]);
+}
+
+// A pasted paragraph joins the line at the caret. Alignment, legacy indent, and
+// the other block types belong to a whole block, so they are not joined.
+function isPlainParagraph(block) {
+  return Boolean(block) && block.type === "p" && !block.align && !block.indent;
+}
+
+// Rich content reduced to the lines a code block or a Markdown source line can
+// hold: marks and block types have no place there.
+function pastedPlainText(blocks) {
+  return blocks.map((block) => (block.type === "image" ? "" : blockText(block))).join("\n");
 }
 
 // Start offsets of the lines in a block's text: the text start, and every
@@ -2436,6 +2705,16 @@ function wordBoundaries(text) {
     points.push(part.index + part.segment.length);
   }
   return points;
+}
+
+// The line holding an offset: from the start of the text after the previous
+// hard break through the end of the following one, if there is one. Whether
+// the line wraps on the paper is a layout question; a line here is the writer's
+// line, which is what a click count of three selects in a text field.
+function lineRangeAt(text, offset) {
+  const start = offset > 0 ? text.lastIndexOf("\n", offset - 1) + 1 : 0;
+  const next = text.indexOf("\n", offset);
+  return { start, end: next === -1 ? text.length : next + 1 };
 }
 
 function selectionHasMark(blocks, from, to, key) {
