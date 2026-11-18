@@ -20,7 +20,7 @@
 //
 //   paragraph line            plain text
 //   (blank line)              an empty paragraph
-//   # .. ####                 h1 .. h4 (a space after the hashes)
+//   # .. ###                  h1 .. h3 (a space after the hashes)
 //   > text                    quote
 //   - / * / + text            unordered list item
 //   1. text                   ordered list item (any digits; leading spaces
@@ -94,7 +94,7 @@ import {
 } from "./model.js";
 
 const LIST_DEPTH_LIMIT = 6; // model.js LIST_DEPTH_LIMIT (not exported there)
-const HEADING_LEVELS = { h1: 1, h2: 2, h3: 3, h4: 4 };
+const HEADING_LEVELS = { h1: 1, h2: 2, h3: 3 };
 const ALIGNMENTS = new Set(["center", "right", "justify"]);
 const INLINE_HTML_TAGS = new Set(["a", "b", "code", "i", "s", "u"]);
 
@@ -613,7 +613,7 @@ function leadingColumns(text) {
  *                                               as serialized HTML
  *   {kind: "fence"}
  *   {kind: "p", body}
- *   {kind: "h1"} .. {kind: "h4"}, body
+ *   {kind: "h1"} .. {kind: "h3"}, body
  *   {kind: "quote", body}
  *   {kind: "list", ordered, indent, depth, body}
  * `body` is the Markdown text after the line's marker (still Markdown). An
@@ -632,7 +632,7 @@ export function readLine(text) {
   if (fenceLength >= 3) {
     return { kind: "fence" };
   }
-  const heading = /^(#{1,4})[ \t](.*)$/.exec(line);
+  const heading = /^(#{1,3})[ \t](.*)$/.exec(line);
   if (heading) {
     return { kind: "h" + heading[1].length, body: heading[2] };
   }
@@ -707,7 +707,6 @@ export function writeLine(line) {
     case "h1":
     case "h2":
     case "h3":
-    case "h4":
       return "#".repeat(HEADING_LEVELS[line.kind]) + " " + body;
     case "quote":
       return "> " + body;
@@ -736,7 +735,7 @@ export function writeLine(line) {
  *   {kind: "fenceOpen", fenceLength}
  *   {kind: "fenceClose"}
  *   {kind: "codeContent"}
- *   {kind: "p"|"h1".."h4"|"quote"|"list", body, indent, ordered, depth}
+ *   {kind: "p"|"h1".."h3"|"quote"|"list", body, indent, ordered, depth}
  * plus `index` on text entries.
  */
 export function sourceLineInfo(blocks) {
@@ -841,7 +840,6 @@ function richBlockFromLine(line, info) {
     case "h1":
     case "h2":
     case "h3":
-    case "h4":
       return createBlock(info.kind, inlineToRuns(info.body));
     case "quote":
       return createBlock("quote", inlineToRuns(info.body));
@@ -1141,8 +1139,7 @@ function blockLinesFor(block, counters) {
   switch (block.type) {
     case "h1":
     case "h2":
-    case "h3":
-    case "h4": {
+    case "h3": {
       const level = HEADING_LEVELS[block.type];
       return { lines: ["#".repeat(level) + " " + markdown], kind: "markdown", prefixLength: level + 1 };
     }
@@ -1251,7 +1248,6 @@ function htmlLineFor(block, runs, attributes) {
     case "h1":
     case "h2":
     case "h3":
-    case "h4":
       return "<" + block.type + attributes + ">" + inner + "</" + block.type + ">";
     default:
       return "<p" + attributes + ">" + inner + "</p>";
@@ -1370,7 +1366,7 @@ function classifyHtmlLine(line) {
   if (!line || line[0] !== "<") {
     return null;
   }
-  let match = /^<h([1-4])([^<>]*)>/.exec(line);
+  let match = /^<h([1-3])([^<>]*)>/.exec(line);
   if (match) {
     const shape = "h" + match[1];
     if (!parseBlockAttributes(match[2])) {

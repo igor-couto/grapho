@@ -330,14 +330,14 @@ unchanged.
   the source back with `assets/doc/markdown.js`, so the JSON on disk is the same
   sanitized HTML as always. The dialect is line-per-block: one line is one
   paragraph, a blank line is an empty paragraph (so intentional line breaks
-  survive leaving and re-entering the mode), `#`..`####`, `>`, list markers and
+  survive leaving and re-entering the mode), `#`..`###`, `>`, list markers and
   fences are understood, and inline marks, links, underline and hard breaks are
   inline Markdown. Content Markdown cannot express (alignment, legacy indent,
   empty paragraphs) rides a documented serialized-HTML escape hatch; images stay
   real image blocks and are never written into the source as base64 or urls, and
   only the accepted HTML shapes are parsed, so a stored document still cannot
-  reach the network. The style menu offers all four heading levels while the
-  mode is on; the rich editor keeps its two-heading menu. Toolbar actions in
+  reach the network. Both modes offer Heading 1 to 3, and nothing above three:
+  the sanitizer turns an older document's `h4` into an `h3`. Toolbar actions in
   the mode edit the source text directly
   through `assets/doc/markdown-edit.js`; `DocEditor.setSourceMode` gates the
   rich commands off so they can never rewrite a source line as a styled block.

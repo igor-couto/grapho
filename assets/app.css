@@ -681,8 +681,7 @@ html[data-theme="dark"] .new-document-button:hover:not(:disabled) {
 
 .document-preview h1,
 .document-preview h2,
-.document-preview h3,
-.document-preview h4 {
+.document-preview h3 {
   margin: 1.4em 0 0.55em;
   font-weight: 500;
   line-height: 1.23;
@@ -701,11 +700,6 @@ html[data-theme="dark"] .new-document-button:hover:not(:disabled) {
 .document-preview h3 {
   font-size: 1.24em;
   letter-spacing: -0.025em;
-}
-
-.document-preview h4 {
-  font-size: 1.08em;
-  letter-spacing: -0.02em;
 }
 
 .document-preview ul,
@@ -2206,12 +2200,6 @@ html[data-theme="dark"] .toast.is-error {
   color: var(--accent);
 }
 
-/* The style menu carries two extra heading levels that only Markdown mode
-   shows. .menu-item is display:flex, so [hidden] needs its own rule. */
-.style-menu .menu-item[hidden] {
-  display: none;
-}
-
 .align-choice {
   display: flex;
   gap: 3px;
@@ -2785,14 +2773,6 @@ body.is-resizing-paper * {
   font-size: 21.7px;
   font-weight: 500;
   letter-spacing: -0.025em;
-  line-height: 1.23;
-}
-
-.doc-line.is-h4 {
-  font-family: var(--font-reading);
-  font-size: 18.9px;
-  font-weight: 500;
-  letter-spacing: -0.02em;
   line-height: 1.23;
 }
 

@@ -428,7 +428,6 @@ test("layout: painted fragments match measured positions", async () => {
       "<h1>A long heading that carries a good number of letters</h1>" +
       "<h2>A second heading of a similar length for measurement</h2>" +
       "<h3>A third heading of a similar length for measurement</h3>" +
-      "<h4>A fourth heading of a similar length for measurement</h4>" +
       "<h1>Heading with <b>bold</b> and <i>italic</i> and <code>code</code> bits</h1>" +
       "<p>Before <b>bold words</b> and <i>italic words</i> and <code>some_code()</code> after.</p>" +
       "<blockquote>A quoted line of prose that is long enough to wrap once.</blockquote>" +
@@ -2163,7 +2162,7 @@ test("fuzz: a deterministic editing session keeps every invariant", async () => 
       case 12:
         editor.collapseTo({ block: blockIndex, offset });
         editor.sync();
-        editor.setBlockType(pick(["p", "h1", "h2", "quote", "code"]));
+        editor.setBlockType(pick(["p", "h1", "h2", "h3", "quote", "code"]));
         break;
       case 13:
         editor.collapseTo({ block: blockIndex, offset });
@@ -2239,7 +2238,7 @@ test("fuzz: a deterministic editing session keeps every invariant", async () => 
     for (let index = 0; index < current.length; index += 1) {
       const item = current[index];
       assert(
-        ["p", "h1", "h2", "h3", "h4", "quote", "list", "code", "image"].includes(item.type),
+        ["p", "h1", "h2", "h3", "quote", "list", "code", "image"].includes(item.type),
         `${label}: block ${index} type ${item.type}`,
       );
       if (item.type === "image") {

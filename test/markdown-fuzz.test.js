@@ -229,7 +229,6 @@ const RICH_HAZARD_PREFIXES = [
   "# ",
   "## ",
   "### ",
-  "#### ",
   "> ",
   "- ",
   "* ",
@@ -376,7 +375,7 @@ function randomRichBlock(random) {
     return applyRandomFormat(random, createBlock("quote", randomRuns(random)));
   }
   if (roll < 0.45) {
-    return applyRandomFormat(random, createBlock(random.pick(["h1", "h2", "h3", "h4"]), randomRuns(random)));
+    return applyRandomFormat(random, createBlock(random.pick(["h1", "h2", "h3"]), randomRuns(random)));
   }
   if (roll < 0.51) {
     return applyRandomFormat(random, createBlock("p", []));
@@ -511,7 +510,6 @@ test("markdown fuzz: hand-built extremes round-trip", async () => {
     [createBlock("h1", [])],
     [createBlock("h2", [])],
     [createBlock("h3", [])],
-    [createBlock("h4", [])],
     [createBlock("quote", [])],
     [createBlock("code", [{ text: "" }])],
     [createBlock("code", [{ text: "\n" }])],
@@ -784,7 +782,7 @@ function checkAttackSource(lines, describe) {
   checkNoActiveElements(blocks, describe);
   checkHrefsInBlocks(blocks, describe);
   for (const block of blocks) {
-    assert(block.type === "p" || block.type === "h1" || block.type === "h2" || block.type === "h3" || block.type === "h4" || block.type === "quote" || block.type === "list", () => describe() + ": unexpected block type " + block.type);
+    assert(block.type === "p" || block.type === "h1" || block.type === "h2" || block.type === "h3" || block.type === "quote" || block.type === "list", () => describe() + ": unexpected block type " + block.type);
   }
 
   // lineToBlocks is the per-line path the toolbar uses; it must agree.
@@ -907,7 +905,7 @@ const SOURCE_MARKDOWN_LINES = [
   "# Heading",
   "## Smaller",
   "### Third",
-  "#### Fourth",
+  "#### four hashes are text",
   "> quoted",
   "- item",
   "  - nested",

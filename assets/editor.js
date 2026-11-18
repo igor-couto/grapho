@@ -832,10 +832,7 @@ function handleSelectionChange(info) {
   }
 
   const type = info.blockType || "p";
-  // The rich style menu only offers Normal, H1, H2, Quote and Code block; a
-  // stored H3/H4 keeps the old "Normal text" label there. Markdown mode reads
-  // the source line instead and does show all four heading levels.
-  updateStyleState(type === "h3" || type === "h4" ? "p" : type);
+  updateStyleState(type);
   updateAlignState(info.alignment || "left");
 }
 
@@ -866,7 +863,6 @@ const STYLE_LABELS = {
   h1: "Heading 1",
   h2: "Heading 2",
   h3: "Heading 3",
-  h4: "Heading 4",
   quote: "Quote",
   code: "Code block",
 };
@@ -958,11 +954,7 @@ function handleStyleMenuKeydown(event) {
   if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
     return;
   }
-  // The two extra heading levels are hidden outside Markdown mode; skip them
-  // so arrow keys cannot land on an invisible item and stop moving.
-  const items = Array.from(els.styleMenu.querySelectorAll("[data-block-style]")).filter(
-    (item) => !item.hidden,
-  );
+  const items = Array.from(els.styleMenu.querySelectorAll("[data-block-style]"));
   const index = items.indexOf(document.activeElement);
   if (index === -1) {
     return;
@@ -1798,7 +1790,6 @@ function enterMarkdownMode() {
   state.sourceDirty = false;
   document.body.classList.add("is-markdown-mode");
   updateMarkdownMenuItem();
-  setSourceStyleOptions(true);
   editor.setSourceMode(true);
   editor.setDocument(conversion.blocks, { anchor: caret, focus: caret });
   editor.focusEditor();
@@ -1836,7 +1827,6 @@ function exitMarkdownMode() {
   state.markdownConversion = null;
   document.body.classList.remove("is-markdown-mode");
   updateMarkdownMenuItem();
-  setSourceStyleOptions(false);
   editor.setSourceMode(false);
   editor.setDocument(richBlocks, { anchor: caret, focus: caret });
   editor.focusEditor();
@@ -1858,18 +1848,6 @@ function updateMarkdownMenuItem() {
   if (els.markdownMenuItemLabel) {
     els.markdownMenuItemLabel.textContent = state.markdownMode ? "Exit Markdown mode" : "Markdown mode";
   }
-}
-
-// The source dialect understands all four heading levels, so the style menu
-// offers the extra two only while Markdown mode is on. The rich editor keeps
-// its two-heading menu.
-function setSourceStyleOptions(enabled) {
-  els.styleMenu.querySelectorAll('[data-block-style="h3"], [data-block-style="h4"]').forEach((item) => {
-    // The extra menu items stay hidden outside Markdown mode. The stylesheet
-    // gives [hidden] menu items display:none because .menu-item is display:flex;
-    // an inline style would break the Content-Security-Policy.
-    item.hidden = !enabled;
-  });
 }
 
 function handleSourceFormat(key) {
@@ -1995,7 +1973,7 @@ function exportHtml() {
     "border-left:2px solid #1967d2;font-style:italic;color:#4a4e43;}",
     // Tab indents a selected line by putting spaces in the text, and a normal
     // HTML paragraph collapses them away. Keep the indentation visible.
-    "p,h1,h2,h3,h4,blockquote{white-space:pre-wrap;}",
+    "p,h1,h2,h3,blockquote{white-space:pre-wrap;}",
     "pre{padding:16px;background:#f1ece1;border-radius:8px;white-space:pre-wrap;",
     "font-family:ui-monospace,Consolas,monospace;font-size:.8em;}",
     "code{font-family:ui-monospace,Consolas,monospace;font-size:.84em;}",
@@ -2003,7 +1981,7 @@ function exportHtml() {
     "img.wrap-left{float:left;max-width:42%;margin:.35em 1.35em 0 0;}",
     "img.wrap-right{float:right;max-width:42%;margin:.35em 0 0 1.35em;}",
     ...radiusRules,
-    "h2,h3,h4,blockquote,pre{clear:both;}",
+    "h2,h3,blockquote,pre{clear:both;}",
     '[data-align="center"]{text-align:center;}',
     '[data-align="right"]{text-align:right;}',
     '[data-align="justify"]{text-align:justify;}',
@@ -2121,7 +2099,7 @@ function exportMarkdown() {
       parts.push(quoted.split("\n").map((line) => (line ? "> " + line : ">")).join("\n"));
       continue;
     }
-    if (block.type === "h1" || block.type === "h2" || block.type === "h3" || block.type === "h4") {
+    if (block.type === "h1" || block.type === "h2" || block.type === "h3") {
       const level = Number(block.type.slice(1));
       parts.push("#".repeat(level) + " " + markdownRuns(block.runs).trim());
       continue;

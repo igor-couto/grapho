@@ -509,7 +509,7 @@ function fontFor(block, marks) {
 }
 
 function isHeading(block) {
-  return block.type === "h1" || block.type === "h2" || block.type === "h3" || block.type === "h4";
+  return block.type === "h1" || block.type === "h2" || block.type === "h3";
 }
 
 /* --------------------------------------------------------------------------

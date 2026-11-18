@@ -483,6 +483,9 @@ pub fn normalize_title(raw: &str) -> String {
 /// Only the small, predictable subset of HTML the editor can produce is allowed
 /// to survive. This keeps stored documents safe to render, even if a client is
 /// modified or a file is edited by hand.
+///
+/// The editor offers Heading 1 to 3; an older document's `<h4>` is demoted to
+/// `<h3>` below, so no deeper level reaches the browser or a new file.
 pub fn sanitize_content(html: &str) -> String {
     let tags: HashSet<&str> = [
         "a",
@@ -496,6 +499,9 @@ pub fn sanitize_content(html: &str) -> String {
         "h1",
         "h2",
         "h3",
+        // Not a heading level Grapho offers: `h4` stays in the set only so
+        // `demote_heading_four` can see it and turn an older document's fourth
+        // level into an `h3` instead of dropping it to a plain paragraph.
         "h4",
         "i",
         "img",
@@ -541,6 +547,8 @@ pub fn sanitize_content(html: &str) -> String {
         ("h1", block_attributes.clone()),
         ("h2", block_attributes.clone()),
         ("h3", block_attributes.clone()),
+        // An older document's `h4` keeps its alignment and indent when it is
+        // demoted, so it still looks like the heading the author wrote.
         ("h4", block_attributes.clone()),
         ("li", block_attributes),
     ]);
@@ -550,7 +558,7 @@ pub fn sanitize_content(html: &str) -> String {
     // a click into a `data:text/html` page.
     let url_schemes = ["http", "https", "mailto", "data"].into_iter().collect();
 
-    Builder::default()
+    let clean = Builder::default()
         .tags(tags)
         .tag_attributes(tag_attributes)
         .url_schemes(url_schemes)
@@ -613,7 +621,55 @@ pub fn sanitize_content(html: &str) -> String {
             _ => Some(Cow::Borrowed(value)),
         })
         .clean(html)
-        .to_string()
+        .to_string();
+
+    demote_heading_four(clean)
+}
+
+/// Heading levels stop at three. A document written by an older version may
+/// still carry `<h4>`; it becomes an `<h3>` so the text keeps its place in the
+/// outline instead of turning into a paragraph when the file is next written.
+///
+/// This runs on the sanitiser's output, where `<` only ever starts a tag, so
+/// escaped text like `&lt;h4&gt;` is never touched.
+fn demote_heading_four(html: String) -> String {
+    if !html.contains("<h4") && !html.contains("</h4") {
+        return html;
+    }
+
+    let mut output = String::with_capacity(html.len());
+    let mut rest = html.as_str();
+    loop {
+        let opening = rest.find("<h4");
+        let closing = rest.find("</h4");
+        let Some(start) = (match (opening, closing) {
+            (Some(opening), Some(closing)) => Some(opening.min(closing)),
+            (opening, closing) => opening.or(closing),
+        }) else {
+            output.push_str(rest);
+            break;
+        };
+
+        output.push_str(&rest[..start]);
+        let tag = &rest[start..];
+        let (length, replacement) = if tag.starts_with("</h4") {
+            (4, "</h3")
+        } else {
+            (3, "<h3")
+        };
+        let after = &tag[length..];
+        let name_ends = after.starts_with('>')
+            || after.starts_with('/')
+            || after.starts_with(char::is_whitespace);
+        if name_ends {
+            output.push_str(replacement);
+        } else {
+            // `<h40` or similar: not the heading element.
+            output.push_str(&tag[..length]);
+        }
+        rest = after;
+    }
+    output
 }
 
 /// Images are stored inline as base64 data URLs. Only the bitmap formats the
@@ -675,7 +731,6 @@ fn is_line_break_tag(tag: &str) -> bool {
             "/h1",
             "/h2",
             "/h3",
-            "/h4",
             "/li",
             "/blockquote",
             "/pre",
@@ -813,7 +868,6 @@ fn preview_tag(name: &str) -> Option<&'static str> {
         "h1" => "h1",
         "h2" => "h2",
         "h3" => "h3",
-        "h4" => "h4",
         "ul" => "ul",
         "ol" => "ol",
         "li" => "li",
@@ -1049,6 +1103,31 @@ mod tests {
         assert!(clean.contains("data-align=\"justify\""));
         assert!(!clean.contains("diagonal"));
         assert!(!clean.contains("data-indent=\"two\""));
+    }
+
+    #[test]
+    fn heading_four_from_an_older_document_becomes_heading_three() {
+        let clean = sanitize_content(concat!(
+            "<h4>Small</h4>",
+            "<h4 data-align=\"center\" data-indent=\"2\">Centered</h4>",
+            "<h4 data-align=\"diagonal\">Bounded</h4>",
+            "<p>A literal &lt;h4&gt; stays text</p>",
+        ));
+
+        assert!(clean.contains("<h3>Small</h3>"), "plain h4: {clean}");
+        assert!(
+            clean.contains("<h3 data-align=\"center\" data-indent=\"2\">Centered</h3>"),
+            "attributes survive the demotion: {clean}"
+        );
+        assert!(!clean.contains("<h4"), "no heading four is stored: {clean}");
+        assert!(
+            !clean.contains("diagonal"),
+            "attributes stay bounded: {clean}"
+        );
+        assert!(
+            clean.contains("A literal &lt;h4&gt; stays text"),
+            "escaped text is not a tag: {clean}"
+        );
     }
 
     #[test]

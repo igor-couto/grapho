@@ -34,7 +34,6 @@ const STYLES = {
   h1: { size: 33.25, weight: 500, italic: false, lineHeight: 1.23, before: 51.5, after: 18.3, tracking: -0.03 },
   h2: { size: 26.25, weight: 500, italic: false, lineHeight: 1.23, before: 40.7, after: 14.4, tracking: -0.03 },
   h3: { size: 21.7, weight: 500, italic: false, lineHeight: 1.23, before: 33.6, after: 11.9, tracking: -0.025 },
-  h4: { size: 18.9, weight: 500, italic: false, lineHeight: 1.23, before: 29.3, after: 10.4, tracking: -0.02 },
   quote: { size: 19.25, weight: 400, italic: true, lineHeight: 1.72, before: 28.9, after: 28.9, indent: 26, tracking: 0 },
   list: { size: 17.5, weight: 400, italic: false, lineHeight: 1.82, before: 4.4, after: 4.4, tracking: 0 },
   code: {

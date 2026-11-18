@@ -5,8 +5,8 @@
 // stay in the layout cache.
 
 const INLINE_TAGS = new Set(["a", "b", "code", "del", "em", "i", "s", "span", "strike", "strong", "u"]);
-const BLOCK_TAGS = new Set(["blockquote", "div", "h1", "h2", "h3", "h4", "p", "pre", "ul", "ol"]);
-const HEADING_LEVELS = { h1: 1, h2: 2, h3: 3, h4: 4 };
+const BLOCK_TAGS = new Set(["blockquote", "div", "h1", "h2", "h3", "p", "pre", "ul", "ol"]);
+const HEADING_LEVELS = { h1: 1, h2: 2, h3: 3 };
 const LIST_DEPTH_LIMIT = 6;
 
 export const ALIGNMENTS = ["left", "center", "right", "justify"];
@@ -678,7 +678,7 @@ function serializeBlock(block) {
   if (block.type === "quote") {
     return "<blockquote" + attributes + "><p>" + inner + "</p></blockquote>";
   }
-  if (block.type === "h1" || block.type === "h2" || block.type === "h3" || block.type === "h4") {
+  if (HEADING_LEVELS[block.type]) {
     return "<" + block.type + attributes + ">" + inner + "</" + block.type + ">";
   }
   if (block.type === "list") {

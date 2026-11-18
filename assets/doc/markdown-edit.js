@@ -32,11 +32,11 @@ import {
   stripInline,
 } from "./markdown.js";
 
-const STYLES = new Set(["p", "h1", "h2", "h3", "h4", "quote", "code"]);
+const STYLES = new Set(["p", "h1", "h2", "h3", "quote", "code"]);
 const ALIGNMENTS = new Set(["left", "center", "right", "justify"]);
 const MARK_KEYS = new Set(["b", "i", "u", "s", "code"]);
 const FENCE_KINDS = new Set(["fenceOpen", "fenceClose", "codeContent"]);
-const INLINE_KINDS = new Set(["p", "h1", "h2", "h3", "h4", "quote", "list", "blank"]);
+const INLINE_KINDS = new Set(["p", "h1", "h2", "h3", "quote", "list", "blank"]);
 
 /* --------------------------------------------------------------------------
    Small model helpers
@@ -75,7 +75,7 @@ function styleOfBlock(block) {
   if (!block) {
     return "p";
   }
-  if (block.type === "h1" || block.type === "h2" || block.type === "h3" || block.type === "h4") {
+  if (block.type === "h1" || block.type === "h2" || block.type === "h3") {
     return block.type;
   }
   if (block.type === "quote" || block.type === "code") {
@@ -971,7 +971,7 @@ function escapeMarkSelection(block, visibleStart, visibleEnd, key) {
  * @param {{anchor: {block: number, offset: number}, focus: {block: number, offset: number}, collapsed: boolean}} selection
  * @returns {{
  *   marks: {b: boolean, i: boolean, u: boolean, s: boolean, code: boolean, href: string},
- *   style: "p"|"h1"|"h2"|"h3"|"h4"|"quote"|"code",
+ *   style: "p"|"h1"|"h2"|"h3"|"quote"|"code",
  *   align: "left"|"center"|"right"|"justify",
  *   ordered: boolean|null,
  *   href: string
@@ -1647,7 +1647,7 @@ function fenceSelection(blocks, sel, infos) {
 
 /**
  * Set the paragraph style of every line the selection touches. Styles are the
- * menu's values: "p", "h1", "h2", "h3", "h4", "quote", "code". Code wraps the
+ * menu's values: "p", "h1", "h2", "h3", "quote", "code". Code wraps the
  * selected lines in a fence and toggles an enclosing fence off again.
  *
  * @returns {{blocks: Array, anchor: Object, focus: Object}|null}

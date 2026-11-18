@@ -133,7 +133,7 @@ function assertLosslessBlocks(blocks, message) {
    -------------------------------------------------------------------------- */
 
 test("markdown emitter: headings, quotes, and plain paragraphs", async () => {
-  assertDeepEqual(sourceOf("<h1>A</h1><h2>B</h2><h3>C</h3><h4>D</h4>"), ["# A", "## B", "### C", "#### D"], "headings");
+  assertDeepEqual(sourceOf("<h1>A</h1><h2>B</h2><h3>C</h3>"), ["# A", "## B", "### C"], "headings");
   assertDeepEqual(sourceOf("<blockquote>quoted</blockquote>"), ["> quoted"], "quote");
   assertDeepEqual(sourceOf("<p>plain</p>"), ["plain"], "paragraph");
   assertDeepEqual(sourceOf("<p>one</p><p>two</p>"), ["one", "two"], "two paragraphs, no cosmetic blank line");
@@ -291,7 +291,6 @@ const CORPUS = [
   "<h1>Heading one</h1>",
   '<h2 data-align="center">Centered heading</h2>',
   '<h3 data-indent="2">Indented heading</h3>',
-  "<h4>Small</h4>",
   "<h1></h1>",
   "<p>Plain paragraph with <b>bold</b>, <i>italic</i>, <s>strike</s>, <u>underline</u> and <code>inline code</code>.</p>",
   "<p><b><i>both</i></b> and <b>bold <i>nested</i> after</b></p>",
@@ -378,26 +377,26 @@ test("markdown lossless: toggling a document that changes nothing keeps its byte
    -------------------------------------------------------------------------- */
 
 test("markdown parser: every block form", async () => {
-  const lines = ["# H1", "## H2", "### H3", "#### H4", "> quoted", "- item", "  * nested", "1. ordered", "    3. deep", "plain"];
+  const lines = ["# H1", "## H2", "### H3", "> quoted", "- item", "  * nested", "1. ordered", "    3. deep", "plain"];
   const blocks = sourceToRich(sourceBlocks(lines)).blocks;
   assertDeepEqual(
     blocks.map((block) => block.type),
-    ["h1", "h2", "h3", "h4", "quote", "list", "list", "list", "list", "p"],
+    ["h1", "h2", "h3", "quote", "list", "list", "list", "list", "p"],
     "block types",
   );
   assertDeepEqual(
     blocks.map((block) => blockText(block)),
-    ["H1", "H2", "H3", "H4", "quoted", "item", "nested", "ordered", "deep", "plain"],
+    ["H1", "H2", "H3", "quoted", "item", "nested", "ordered", "deep", "plain"],
     "block text",
   );
-  assertEqual(blocks[5].ordered, false, "dash item is unordered");
-  assertEqual(blocks[5].depth, 0, "dash item is at depth 0");
-  assertEqual(blocks[6].ordered, false, "star item is unordered");
-  assertEqual(blocks[6].depth, 1, "two spaces nest one level");
-  assertEqual(blocks[7].ordered, true, "number item is ordered");
-  assertEqual(blocks[7].depth, 0, "ordered item at depth 0");
-  assertEqual(blocks[8].ordered, true, "deep ordered item");
-  assertEqual(blocks[8].depth, 2, "four spaces nest two levels");
+  assertEqual(blocks[4].ordered, false, "dash item is unordered");
+  assertEqual(blocks[4].depth, 0, "dash item is at depth 0");
+  assertEqual(blocks[5].ordered, false, "star item is unordered");
+  assertEqual(blocks[5].depth, 1, "two spaces nest one level");
+  assertEqual(blocks[6].ordered, true, "number item is ordered");
+  assertEqual(blocks[6].depth, 0, "ordered item at depth 0");
+  assertEqual(blocks[7].ordered, true, "deep ordered item");
+  assertEqual(blocks[7].depth, 2, "four spaces nest two levels");
 });
 
 test("markdown parser: blank lines become empty paragraphs", async () => {
@@ -522,6 +521,7 @@ test("markdown parser: malicious or malformed HTML lines stay literal text", asy
     '<p><a href="javascript:alert(1)">x</a></p>',
     '<p data-align="evil">x</p>',
     '<p data-indent="0">x</p>',
+    '<h4 data-align="center">x</h4>',
     '<div data-align="center">x</div>',
     "<span>x</span>",
     '<ul data-depth="9" data-ordered="0"><li>x</li></ul>',
@@ -667,8 +667,8 @@ test("line helpers: readLine classifies every form", async () => {
   assertDeepEqual(readLine(""), { kind: "blank" }, "empty line");
   assertDeepEqual(readLine("   "), { kind: "blank" }, "spaces line");
   assertDeepEqual(readLine("# h"), { kind: "h1", body: "h" }, "h1");
-  assertDeepEqual(readLine("#### h"), { kind: "h4", body: "h" }, "h4");
-  assertDeepEqual(readLine("##### h"), { kind: "p", body: "##### h" }, "five hashes are text");
+  assertDeepEqual(readLine("### h"), { kind: "h3", body: "h" }, "h3");
+  assertDeepEqual(readLine("#### h"), { kind: "p", body: "#### h" }, "four hashes are text");
   assertDeepEqual(readLine("> q"), { kind: "quote", body: "q" }, "quote");
   assertDeepEqual(readLine(">q"), { kind: "quote", body: "q" }, "quote without a space");
   assertDeepEqual(readLine("- item"), { kind: "list", ordered: false, indent: 0, depth: 0, body: "item" }, "dash item");
@@ -685,7 +685,7 @@ test("line helpers: readLine classifies every form", async () => {
 });
 
 test("line helpers: writeLine is the inverse for canonical lines", async () => {
-  const canonical = ["# h", "#### h", "> q", "> ", "- item", "  - item", "1. item", "  3. item", "plain", "<p></p>", "```"];
+  const canonical = ["# h", "### h", "> q", "> ", "- item", "  - item", "1. item", "  3. item", "plain", "<p></p>", "```"];
   for (const line of canonical) {
     assertEqual(writeLine(readLine(line)), line, "writeLine(readLine(" + JSON.stringify(line) + "))");
   }

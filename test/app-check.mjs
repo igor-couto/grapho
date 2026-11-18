@@ -364,6 +364,20 @@ async function main() {
     equal("list markers are painted", blocks[6].marker, "\u2022");
     equal("code keeps its newline and tab", blocks[9].text, "const x = 1;\n\treturn x;");
 
+    // Heading levels stop at three, in the rich style menu as in Markdown mode.
+    const styleMenu = await evaluate(
+      cdp,
+      `Array.from(document.querySelectorAll("#styleMenu [data-block-style]")).map(
+        (item) => item.dataset.blockStyle + ":" + item.textContent,
+      )`,
+    );
+    check(
+      "the style menu offers Heading 1 to 3 and nothing deeper",
+      styleMenu.join("|") ===
+        "p:Normal text|h1:Heading 1|h2:Heading 2|h3:Heading 3|quote:Quote|code:Code block",
+      JSON.stringify(styleMenu),
+    );
+
     // Exercise the real pointer and keyboard path: click after "First", type Q,
     // then drag over "paragraph" and replace it with R.
     const linePoints = await evaluate(

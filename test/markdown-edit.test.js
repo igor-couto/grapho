@@ -138,7 +138,7 @@ test("markdown-edit inspect: headings, quotes, and lists report the rich toolbar
   assertEqual(inspect(sourceBlocks("# Heading"), collapsed(0, 4)).style, "h1", "h1");
   assertEqual(inspect(sourceBlocks("## Heading"), collapsed(0, 4)).style, "h2", "h2");
   assertEqual(inspect(sourceBlocks("### Heading"), collapsed(0, 4)).style, "h3", "h3");
-  assertEqual(inspect(sourceBlocks("#### Heading"), collapsed(0, 4)).style, "h4", "h4");
+  assertEqual(inspect(sourceBlocks("#### Heading"), collapsed(0, 4)).style, "p", "four hashes are a paragraph");
   assertEqual(inspect(sourceBlocks("> quoted"), collapsed(0, 3)).style, "quote", "quote");
 
   const unordered = inspect(sourceBlocks("- item"), collapsed(0, 3));
@@ -799,7 +799,7 @@ test("markdown-edit: every command is total and keeps a valid selection", () => 
   };
   const alphabet = ["a", "b", " ", "*", "_", "~", "`", "[", "]", "(", ")", "<", ">", "#", "-", "+", "1", ".", "\\", "!", "|", "/", ":"];
   const keys = ["b", "i", "u", "s", "code"];
-  const styles = ["p", "h1", "h2", "h3", "h4", "quote", "code"];
+  const styles = ["p", "h1", "h2", "h3", "quote", "code"];
   const aligns = ["left", "center", "right", "justify"];
 
   for (let round = 0; round < 50; round += 1) {
