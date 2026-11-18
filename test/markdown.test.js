@@ -153,11 +153,11 @@ test("markdown emitter: placeholder document is one empty source line", async ()
   assertEqual(sourceToRich(conversion.blocks).blocks.length, 1, "parses back to one paragraph");
 });
 
-test("markdown emitter: empty paragraphs elsewhere use the HTML escape hatch", async () => {
-  assertDeepEqual(sourceOf("<p>a</p><p></p><p>b</p>"), ["a", "<p></p>", "b"], "middle empty paragraph");
-  assertDeepEqual(sourceOf("<p></p><p>a</p>"), ["<p></p>", "a"], "leading empty paragraph");
-  assertDeepEqual(sourceOf("<p>a</p><p></p>"), ["a", "<p></p>"], "trailing empty paragraph");
-  assertDeepEqual(sourceOf("<p></p><p></p>"), ["<p></p>", "<p></p>"], "two empty paragraphs");
+test("markdown emitter: empty paragraphs are blank source lines", async () => {
+  assertDeepEqual(sourceOf("<p>a</p><p></p><p>b</p>"), ["a", "", "b"], "middle empty paragraph");
+  assertDeepEqual(sourceOf("<p></p><p>a</p>"), ["", "a"], "leading empty paragraph");
+  assertDeepEqual(sourceOf("<p>a</p><p></p>"), ["a", ""], "trailing empty paragraph");
+  assertDeepEqual(sourceOf("<p></p><p></p>"), ["", ""], "two empty paragraphs");
 });
 
 test("markdown emitter: inline marks", async () => {
@@ -400,10 +400,12 @@ test("markdown parser: every block form", async () => {
   assertEqual(blocks[8].depth, 2, "four spaces nest two levels");
 });
 
-test("markdown parser: blank lines are cosmetic outside fences", async () => {
+test("markdown parser: blank lines become empty paragraphs", async () => {
   const blocks = sourceToRich(sourceBlocks(["a", "", "   ", "", "b"])).blocks;
-  assertEqual(blocks.length, 2, "blank lines are ignored");
-  assertDeepEqual(blocks.map((block) => blockText(block)), ["a", "b"], "text");
+  assertEqual(blocks.length, 5, "every blank line keeps its paragraph");
+  assertDeepEqual(blocks.map((block) => blockText(block)), ["a", "", "", "", "b"], "text");
+  assertEqual(blocks[1].type, "p", "blank line paragraph type");
+  assertEqual(blockLength(blocks[1]), 0, "blank line paragraph is empty");
   assertEqual(sourceToRich([]).blocks.length, 1, "empty input still gives a paragraph");
   assertEqual(sourceToRich([]).blocks[0].type, "p", "empty input paragraph type");
   assertEqual(blockLength(sourceToRich([]).blocks[0]), 0, "empty input paragraph is empty");
@@ -586,7 +588,7 @@ test("caret maps: fenced code lines map to the right content offset", async () =
   assertDeepEqual(mapSourceCaretToRich(back, { block: 4, offset: 99 }), { block: 1, offset: 5 }, "fence close maps to code end");
 });
 
-test("caret maps: images and blank lines resolve to a sensible neighbour", async () => {
+test("caret maps: images and blank lines map to their blocks", async () => {
   const html = '<p>a</p><img alt="x" width="1" height="1" src="data:image/png;base64,AAAA"><p>b</p>';
   const blocks = parseDocument(html);
   const conversion = richToSource(blocks);
@@ -599,11 +601,11 @@ test("caret maps: images and blank lines resolve to a sensible neighbour", async
   assertEqual(back.imageTargets[1], 1, "image targets name the rich image block");
 
   const withBlank = sourceToRich(sourceBlocks(["", "hello"])).lineMap;
-  assertEqual(withBlank[0], null, "blank line has no rich mapping");
+  assertEqual(withBlank[0].richIndex, 0, "blank line maps to the empty paragraph it becomes");
   assertDeepEqual(
     mapSourceCaretToRich({ lineMap: withBlank }, { block: 0, offset: 0 }),
     { block: 0, offset: 0 },
-    "leading blank maps to the next block start",
+    "caret on a blank line stays on its empty paragraph",
   );
 
   const allImages = richToSource(parseDocument('<img alt="x" width="1" height="1" src="data:image/png;base64,AAAA">'));

@@ -13,11 +13,13 @@
 // Source dialect
 // ---------------------------------------------------------------------------
 //
-// One non-empty line is one block. Blank (whitespace-only) lines are cosmetic
-// and ignored outside fenced code. This matches the editor's own Enter
-// semantics: a line is a paragraph.
+// One line is one block. A blank (whitespace-only) line is an empty paragraph
+// block, so pressing Enter in the source survives leaving and re-entering the
+// mode; blank lines inside fenced code are code content. This matches the
+// editor's own Enter semantics: a line is a paragraph.
 //
 //   paragraph line            plain text
+//   (blank line)              an empty paragraph
 //   # .. ####                 h1 .. h4 (a space after the hashes)
 //   > text                    quote
 //   - / * / + text            unordered list item
@@ -46,7 +48,9 @@
 //   <p data-align="center">text</p>
 //   <h2 data-indent="2">text</h2>
 //   <blockquote><p data-align="center">text</p></blockquote>
-//   <p></p>                                  an empty paragraph
+//   <p></p>                                  an empty paragraph, as older
+//                                            documents may still carry (new
+//                                            empty paragraphs are blank lines)
 //   <ul data-depth="1" data-ordered="1"><li data-align="center">text</li></ul>
 //                                            a list item carrying rich-only
 //                                            attributes (depth is explicit
@@ -790,8 +794,10 @@ export function sourceLineInfo(blocks) {
 
 /**
  * Parse one source line on its own into rich blocks. A blank or fence line
- * returns []. A line carrying HTML returns the blocks the normal parser makes
- * from it, but only when the line uses the accepted shapes; otherwise the
+ * returns [] because an isolated line used by the editing commands carries no
+ * content; the whole-document parser is the one that turns blank lines into
+ * empty paragraphs. A line carrying HTML returns the blocks the normal parser
+ * makes from it, but only when the line uses the accepted shapes; otherwise the
  * line is a paragraph.
  */
 export function lineToBlocks(text) {
@@ -870,8 +876,9 @@ function richBlockFromLine(line, info) {
  *   `blocks` are the source blocks (text blocks carry `source: true`; images
  *   are the same objects). `lineMap[i]` describes source block `i` for
  *   mapping a source caret back to the rich model:
- *     {richIndex, lineOffset, prefixLength} for a text line,
- *     null for an image or a cosmetic blank line.
+ *     {richIndex, lineOffset, prefixLength} for a text line (including the
+ *       empty paragraph a blank line becomes),
+ *     null for an image.
  *   `lineOffset` is the offset inside the rich block where this source line
  *   starts (non-zero only for the lines of a fenced code block).
  *   `richLines[i]` is the inverse for rich block `i`:
@@ -980,10 +987,11 @@ export function richToSource(blocks) {
  * @returns {{blocks: Array, lineMap: Array}}
  *   `blocks` are rich blocks. `lineMap[i]` describes source block `i`:
  *     {richIndex, lineOffset, prefixLength} when it produced or continued a
- *     rich block, or null for an image and for a cosmetic blank line. A fenced
- *     code block's content lines all map to the same `richIndex` with their
- *     own `lineOffset`. `imageTargets[i]` is the rich index of a source image
- *     block (null elsewhere), so a caret on a picture stays on the picture.
+ *     rich block, or null for an image. A blank line maps to the empty
+ *     paragraph it becomes. A fenced code block's content lines all map to the
+ *     same `richIndex` with their own `lineOffset`. `imageTargets[i]` is the
+ *     rich index of a source image block (null elsewhere), so a caret on a
+ *     picture stays on the picture.
  */
 export function sourceToRich(sourceBlocks) {
   const input = Array.isArray(sourceBlocks) ? sourceBlocks : [];
@@ -1010,7 +1018,10 @@ export function sourceToRich(sourceBlocks) {
     const text = sourceText(source);
     const info = readLine(text);
     if (info.kind === "blank") {
-      lineMap.push(null);
+      // A line the user left empty is an intentionally empty paragraph, so a
+      // toggle out of the mode must not drop it.
+      blocks.push(emptyParagraph());
+      lineMap.push(lineEntry(blocks.length - 1, 0, 0, 0, 0));
       imageTargets.push(null);
       index += 1;
       continue;
@@ -1156,6 +1167,11 @@ function blockLinesFor(block, counters) {
       };
     }
     default: {
+      if (!markdown) {
+        // An empty paragraph is a blank source line, not an HTML escape: the
+        // line the user sees and leaves in the source is a real line break.
+        return { lines: [""], kind: "markdown", prefixLength: 0 };
+      }
       const line = paragraphLineFor(markdown, runs);
       if (line === null) {
         return { lines: [htmlLineFor(block, runs, attributes)], kind: "html", prefixLength: 0 };

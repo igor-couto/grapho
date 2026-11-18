@@ -84,7 +84,8 @@ backups — a folder, an SSH server, or a Google Drive folder — that receive a
 of every save.
 
 Useful shortcuts: `Ctrl+S` saves now, `Ctrl+K` adds a link, `Ctrl+B` / `Ctrl+I` /
-`Ctrl+U` format text, and `/` focuses the search box on the home screen.
+`Ctrl+U` format text, `Ctrl+M` switches between Markdown mode and the
+normal rendered view, and `/` focuses the search box on the home screen.
 
 ## Configuration
 

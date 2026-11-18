@@ -2333,6 +2333,26 @@ function handleGlobalKeydown(event) {
     return;
   }
 
+  // Ctrl+M switches between the Markdown source and the normal rendered view,
+  // the same as the document menu item. It is deliberately Ctrl-only rather
+  // than Ctrl-or-Cmd: on macOS Cmd+M minimizes the window, so that stays with
+  // the system. Repeated keydowns from a held key must not flip the view back
+  // and forth, an open dialog owns the keyboard until it closes, and a picture
+  // gesture in flight is not interrupted by rebuilding the view under it.
+  if (event.ctrlKey && !event.shiftKey && event.key.toLocaleLowerCase() === "m") {
+    event.preventDefault();
+    if (event.repeat || event.isComposing) {
+      return;
+    }
+    if (editor.imageDrag || editor.imageResize) {
+      return;
+    }
+    if (!els.linkDialog.open && !els.deleteDialog.open) {
+      toggleMarkdownMode();
+    }
+    return;
+  }
+
   if (event.key.toLocaleLowerCase() === "s") {
     event.preventDefault();
     if (!els.linkDialog.open && !els.deleteDialog.open) {

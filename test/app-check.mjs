@@ -1693,6 +1693,38 @@ async function main() {
       (await evaluate(cdp, `document.body.classList.contains("is-markdown-mode")`)) === false,
     );
 
+    // The keyboard shortcut toggles the view without opening the menu.
+    await pressKey("m", "KeyM", 77, 2);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const shortcutOn = await evaluate(
+      cdp,
+      `({
+        mode: document.body.classList.contains("is-markdown-mode"),
+        label: document.getElementById("markdownMenuItemLabel").textContent,
+        sourceLines: document.querySelectorAll(".doc-line.is-source").length
+      })`,
+    );
+    await pressKey("m", "KeyM", 77, 2);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const shortcutOff = await evaluate(
+      cdp,
+      `({
+        mode: document.body.classList.contains("is-markdown-mode"),
+        label: document.getElementById("markdownMenuItemLabel").textContent,
+        sourceLines: document.querySelectorAll(".doc-line.is-source").length
+      })`,
+    );
+    check(
+      "Ctrl+M toggles Markdown mode without the menu",
+      shortcutOn.mode === true &&
+        shortcutOn.label === "Exit Markdown mode" &&
+        shortcutOn.sourceLines > 0 &&
+        shortcutOff.mode === false &&
+        shortcutOff.label === "Markdown mode" &&
+        shortcutOff.sourceLines === 0,
+      JSON.stringify({ shortcutOn, shortcutOff }),
+    );
+
     // Every toolbar control edits the source in Markdown mode. Work on the last
     // line (a plain paragraph), then leave and come back to prove round-trip.
     const readSource = () =>
@@ -1914,6 +1946,35 @@ async function main() {
         corrupted: corruptedLines.slice(0, 3),
         sample: bulkLines.slice(0, 6),
         bulkRich,
+      }),
+    );
+
+    // A blank line typed in the source is a real line break: it must come back
+    // after leaving and re-entering the mode, in the editor and on disk.
+    await enterMarkdown();
+    await pressKey("Home", "Home", 36, 2);
+    await pressKey("End", "End", 35, 0);
+    await pressKey("Enter", "Enter", 13, 0);
+    const blankSource = await readSource();
+    const blankLines = blankSource.split("\n");
+    const blankIndex = blankLines.findIndex((line) => line === "");
+    await leaveMarkdown();
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const blankSaved = (await readSavedDocument()).content;
+    await enterMarkdown();
+    const reenteredSource = await readSource();
+    await leaveMarkdown();
+    check(
+      "a blank line typed in Markdown mode survives leaving and re-entering",
+      blankIndex > 0 &&
+        blankLines[blankIndex] === "" &&
+        reenteredSource === blankSource &&
+        String(blankSaved).includes("<p></p>"),
+      JSON.stringify({
+        blankIndex,
+        around: blankLines.slice(Math.max(0, blankIndex - 1), blankIndex + 2),
+        sameSource: reenteredSource === blankSource,
+        hasEmptyParagraph: String(blankSaved).includes("<p></p>"),
       }),
     );
 

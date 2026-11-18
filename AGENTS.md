@@ -320,20 +320,21 @@ unchanged.
   way out: CSS takes it out of the flow, hides the start and the toolbar, and
   lets the paper fill the viewport. Leaving fullscreen leaves focus mode, and
   Escape leaves both.
-- Markdown mode, the next item in the document menu, turns the paper into
-  editable Markdown source without adding a second editing surface. It is a
-  view over the stored document: while it is on the editor holds one paragraph
-  block per source line (blocks carry `source: true`, one unmarked run, painted
-  by the source style in `layout.js` and `.doc-line.is-source`), with image
-  blocks unchanged between the lines. Entering converts rich blocks to source;
-  leaving, saving, and exporting parse the source back with
-  `assets/doc/markdown.js`, so the JSON on disk is the same sanitized HTML as
-  always. The dialect is line-per-block: one non-empty line is one paragraph,
-  blank lines are cosmetic, `#`..`####`, `>`, list markers and fences are
-  understood, and inline marks, links, underline and hard breaks are inline
-  Markdown. Content Markdown cannot express (alignment, legacy indent, empty
-  paragraphs) rides a documented serialized-HTML escape hatch; images stay real
-  image blocks and are never written into the source as base64 or urls, and
+- Markdown mode, the next item in the document menu (or `Ctrl+M`), turns
+  the paper into editable Markdown source without adding a second editing
+  surface. It is a view over the stored document: while it is on the editor
+  holds one paragraph block per source line (blocks carry `source: true`, one
+  unmarked run, painted by the source style in `layout.js` and
+  `.doc-line.is-source`), with image blocks unchanged between the lines.
+  Entering converts rich blocks to source; leaving, saving, and exporting parse
+  the source back with `assets/doc/markdown.js`, so the JSON on disk is the same
+  sanitized HTML as always. The dialect is line-per-block: one line is one
+  paragraph, a blank line is an empty paragraph (so intentional line breaks
+  survive leaving and re-entering the mode), `#`..`####`, `>`, list markers and
+  fences are understood, and inline marks, links, underline and hard breaks are
+  inline Markdown. Content Markdown cannot express (alignment, legacy indent,
+  empty paragraphs) rides a documented serialized-HTML escape hatch; images stay
+  real image blocks and are never written into the source as base64 or urls, and
   only the accepted HTML shapes are parsed, so a stored document still cannot
   reach the network. The style menu offers all four heading levels while the
   mode is on; the rich editor keeps its two-heading menu. Toolbar actions in
@@ -348,9 +349,10 @@ unchanged.
   paper resizing need a pointer, turning an animated GIF keeps only its first
   frame, and HTML or Markdown exports put free-positioned images back into the
   text flow. Markdown mode is a view, not a Markdown file: its lines are one
-  paragraph each (blank lines are cosmetic, not Markdown's paragraph grouping),
-  and alignment, indentation, underline, hard breaks and empty paragraphs show
-  up in the source as small HTML snippets because Markdown cannot express them.
+  paragraph each (a blank line is an empty paragraph, not Markdown's paragraph
+  grouping), and alignment, indentation, underline, hard breaks and empty
+  paragraphs show up in the source as small HTML snippets when they carry
+  attributes Markdown cannot express.
   Its link dialog creates http, https, and mailto links; relative and fragment
   links already stored in a document round-trip unchanged. An inline toolbar
   toggle does nothing (rather than nesting markers) when the caret sits inside
