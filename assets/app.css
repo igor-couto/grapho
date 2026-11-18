@@ -1221,9 +1221,11 @@ html[data-theme="dark"] .new-document-button:hover:not(:disabled) {
   opacity: 1;
 }
 
-/* A row stays above its neighbours while its menu is open. */
-.documents.is-list .document-card:has(.card-menu-button[aria-expanded="true"]) {
-  z-index: 2;
+/* The card whose menu is open stays above every other card. In list view the
+   menu hangs over the rows below, and those rows are raised on hover; without
+   this the later hovered row would paint over the open menu. */
+.documents .document-card:has(.card-menu-button[aria-expanded="true"]) {
+  z-index: 5;
 }
 
 .documents.is-list .document-card-link {

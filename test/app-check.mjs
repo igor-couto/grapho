@@ -2093,6 +2093,118 @@ async function main() {
       JSON.stringify(cardMenuShifts),
     );
 
+    // The list menu hangs over the rows below. Those rows are raised on hover,
+    // so the card holding the open menu has to outrank every other card or a
+    // row hovered behind the menu paints over it. Two extra documents make a
+    // third row to hover.
+    const layeringDocumentIds = await evaluate(
+      cdp,
+      `(async () => {
+        const ids = [];
+        for (const title of ["Layering first", "Layering second"]) {
+          const created = await fetch("/api/documents", { method: "POST" });
+          if (!created.ok) throw new Error("create failed: " + created.status);
+          const document = await created.json();
+          await fetch("/api/documents/" + encodeURIComponent(document.id), {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title, content: "<p>" + title + "</p>", paper_width: 0 }),
+          });
+          ids.push(document.id);
+        }
+        return ids;
+      })()`,
+    );
+    check("the layering check has extra documents", layeringDocumentIds.length === 2);
+    await cdp.send("Page.navigate", { url: base + "/" });
+    await waitForPage(cdp, base + "/", PAGE_TIMEOUT_MS);
+    let layeringCards = 0;
+    for (let attempt = 0; attempt < 60 && layeringCards < 3; attempt += 1) {
+      layeringCards = await evaluate(
+        cdp,
+        `document.querySelectorAll(".document-card").length`,
+      );
+      if (layeringCards < 3) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+    check("the layering check sees three rows", layeringCards >= 3, String(layeringCards));
+    const listRows = await evaluate(
+      cdp,
+      `(() => {
+        if (document.getElementById("documents").classList.contains("is-grid")) {
+          document.getElementById("viewToggle").click();
+        }
+        const cards = Array.from(document.querySelectorAll(".document-card"));
+        return cards.map((card) => {
+          const box = card.getBoundingClientRect();
+          const button = card.querySelector(".card-menu-button").getBoundingClientRect();
+          return {
+            x: box.x,
+            y: box.y,
+            width: box.width,
+            height: box.height,
+            buttonX: button.x + button.width / 2,
+            buttonY: button.y + button.height / 2,
+          };
+        });
+      })()`,
+    );
+    // The three-dots button only appears while its row is hovered.
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: listRows[0].x + 24,
+      y: listRows[0].y + listRows[0].height / 2,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await clickAt({ x: listRows[0].buttonX, y: listRows[0].buttonY });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: listRows[2].x + listRows[2].width / 2,
+      y: listRows[2].y + listRows[2].height / 2,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const menuOverRow = await evaluate(
+      cdp,
+      `(() => {
+        const documents = document.getElementById("documents");
+        const menu = documents.querySelector(".card-menu:not([hidden])");
+        const cards = Array.from(documents.querySelectorAll(".document-card"));
+        if (!menu || cards.length < 3) return { open: false };
+        const menuBox = menu.getBoundingClientRect();
+        const rowBox = cards[2].getBoundingClientRect();
+        const top = Math.max(menuBox.top, rowBox.top) + 2;
+        const bottom = Math.min(menuBox.bottom, rowBox.bottom) - 2;
+        const hit = bottom > top
+          ? document.elementFromPoint(menuBox.left + menuBox.width / 2, (top + bottom) / 2)
+          : null;
+        return {
+          open: true,
+          overlap: bottom > top,
+          hoveredRow: cards[2].matches(":hover"),
+          hitMenu: Boolean(hit && hit.closest(".card-menu")),
+          openCardZ: getComputedStyle(menu.closest(".document-card")).zIndex,
+          rowZ: getComputedStyle(cards[2]).zIndex,
+        };
+      })()`,
+    );
+    check(
+      "an open card menu stays above the row hovered behind it",
+      menuOverRow.open &&
+        menuOverRow.overlap &&
+        menuOverRow.hoveredRow &&
+        menuOverRow.hitMenu,
+      JSON.stringify(menuOverRow),
+    );
+    await evaluate(cdp, `document.body.click()`);
+    for (const layeringId of layeringDocumentIds) {
+      await evaluate(
+        cdp,
+        `fetch("/api/documents/${layeringId}", { method: "DELETE" })`,
+      ).catch(() => null);
+    }
+
     await evaluate(
       cdp,
       `fetch("/api/documents/${documentId}", { method: "DELETE" })`,
