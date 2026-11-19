@@ -2426,6 +2426,7 @@ async function main() {
           return document.id;
         };
         return {
+          blank: await create("Blank link source", ""),
           target: await create("Link target page", "<p>Target body.</p>"),
           source: await create("Link dialog source", "<p>Link this phrase now.</p>"),
           markdown: await create("Markdown link source", "<p>Go to the page now.</p>"),
@@ -2537,6 +2538,23 @@ async function main() {
         nativeVirtualKeyCode: 13,
       });
     }
+
+    await cdp.send("Page.navigate", { url: base + "/doc/" + linkPages.blank });
+    await waitForPage(cdp, base + "/doc/" + linkPages.blank, PAGE_TIMEOUT_MS);
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+    await clickFirstLine();
+    await pressKey("k", "KeyK", 75, 2);
+    check("Ctrl+K opens the page picker at an empty caret", await waitForLinkResults());
+    await cdp.send("Input.insertText", { text: "Link target page" });
+    await pressEnter();
+    const insertedLink = await paintedLink();
+    check(
+      "the page title becomes the linked label and is saved",
+      insertedLink?.text === "Link target page" &&
+        insertedLink.href === targetHref &&
+        await waitForSavedLinkContent(linkPages.blank, 'href="' + targetHref + '">Link target page</a>'),
+      JSON.stringify(insertedLink),
+    );
 
     await cdp.send("Page.navigate", { url: base + "/doc/" + linkPages.source });
     await waitForPage(cdp, base + "/doc/" + linkPages.source, PAGE_TIMEOUT_MS);

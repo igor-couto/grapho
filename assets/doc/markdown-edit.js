@@ -20,14 +20,17 @@ import {
   blockText,
   createBlock,
   createBlockId,
+  isAtomicBlock,
   marksAt,
   setHrefOnRuns,
   setMarkOnRuns,
+  splitRuns,
 } from "./model.js";
 import {
   blockToLines,
   lineToBlocks,
   readLine,
+  runsToInline,
   sourceLineInfo,
   stripInline,
 } from "./markdown.js";
@@ -1158,13 +1161,59 @@ export function setMark(blocks, selection, key) {
   return mapLineChanges(blocks, sel, changed, editsByBlock);
 }
 
+function insertLinkLabel(blocks, position, info, href, label) {
+  if (!isInlineLine(info) && info?.kind !== "html") {
+    return null;
+  }
+  const index = position.block;
+  const text = lineText(blocks[index]);
+  const offset = clamp(position.offset, 0, text.length);
+  const result = (line, end) => {
+    const caret = { block: index, offset: end };
+    return { blocks: replaceLines(blocks, new Map([[index, line]])), anchor: caret, focus: caret };
+  };
+
+  if (isInlineLine(info)) {
+    const start = Math.max(offset, lineBodyStart(info, text));
+    const separator = info.kind === "list" && !info.body && !/[ \t]$/.test(text) ? " " : "";
+    const inline = runsToInline([{ text: label, href }]);
+    const next = text.slice(0, start) + separator + inline + text.slice(start);
+    const linkStart = start + separator.length;
+    const end = linkStart + inline.length;
+    const link = linkContaining(next, linkStart + 1);
+    if (link?.start === linkStart && link.end === end && link.href === href) {
+      return result(next, end);
+    }
+  }
+
+  // Rewrite the rich block when the line is already HTML, or when adjacent
+  // source syntax makes a literal Markdown insertion ambiguous.
+  const rich = info.kind === "blank" ? createBlock("p", runsFor(text)) : richLineBlock(text);
+  if (!rich || isAtomicBlock(rich) || rich.type === "code") {
+    return null;
+  }
+  const at = info.kind === "blank" ? offset : visibleOffsetForInfo(text, offset, info);
+  const { left, right } = splitRuns(rich.runs, at);
+  const runs = [...left, { ...marksAt(rich, at), text: label, href }, ...right];
+  const [next] = blockToLines({ ...rich, runs });
+  const nextInfo = readLine(next);
+  const end = rawOffsetForInfo(next, at + label.length, nextInfo);
+  if (nextInfo.kind === "html") {
+    // After the anchor, inside the block's closing tag when the link ends it.
+    const last = rawOffsetForInfo(next, at + label.length - 1, nextInfo);
+    const close = next.indexOf("</a>", last);
+    return result(next, close >= 0 ? close + 4 : end);
+  }
+  return result(next, end);
+}
+
 /**
- * Point the selection at an existing Markdown link, or turn the selected text
- * into `[text](href)`. Replaces the url when the selection is already a link.
+ * Link the selection, change an existing link's destination, or insert the
+ * supplied label at a bare caret.
  *
  * @returns {{blocks: Array, anchor: Object, focus: Object}|null}
  */
-export function setLink(blocks, selection, href) {
+export function setLink(blocks, selection, href, label) {
   if (!blocks || !blocks.length || !validHref(href)) {
     return null;
   }
@@ -1174,6 +1223,9 @@ export function setLink(blocks, selection, href) {
   const last = blocks.length - 1;
   const from = clamp(sel.from.block, 0, last);
   const to = clamp(sel.to.block, 0, last);
+  if (sel.collapsed && label && !linkAt(blocks, selection)) {
+    return insertLinkLabel(blocks, { block: from, offset: sel.focus.offset }, infos[from], value, label);
+  }
   const changed = new Map();
   const editsByBlock = new Map();
 

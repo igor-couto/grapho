@@ -1378,15 +1378,14 @@ export class DocEditor {
     }
   }
 
-  setLink(href) {
+  setLink(href, label) {
     if (this.sourceMode) {
-      return;
+      return false;
     }
     const { from, to } = this.normalized();
     if (from.block === to.block && from.offset === to.offset) {
-      // A caret inside an existing link changes that link, which is how the
-      // link dialog's Edit state works. A bare caret instead arms the marks
-      // for whatever is typed next.
+      // A caret inside an existing link changes its target. At a bare caret
+      // the dialog supplies the text for a new link.
       const link = this.linkAtCaret();
       const block = this.blocks[from.block];
       if (link && block && !isAtomicBlock(block) && block.type !== "code") {
@@ -1396,11 +1395,24 @@ export class DocEditor {
           this.anchor,
           this.focus,
         );
-        return;
+        return true;
+      }
+      if (href && label) {
+        if (!block || isAtomicBlock(block) || block.type === "code") {
+          return false;
+        }
+        const marks = this.pendingMarks || this.marksForTyping();
+        const runs = insertRuns(block, from.offset, label, { ...marks, href });
+        const caret = { block: from.block, offset: from.offset + label.length };
+        this.pendingMarks = { ...marks, href: "" };
+        this.commit(this.replaceBlock(from.block, { ...block, id: createBlockId(), runs }), caret, caret, {
+          keepMarks: true,
+        });
+        return true;
       }
       this.pendingMarks = { ...this.activeMarks(), href: href || "" };
       this.sync();
-      return;
+      return true;
     }
 
     let blocks = this.blocks;
@@ -1415,6 +1427,7 @@ export class DocEditor {
       blocks[index] = { ...block, id: createBlockId(), runs: setHrefOnRuns(block.runs, start, end, href) };
     }
     this.commit(blocks, this.anchor, this.focus);
+    return true;
   }
 
   clearFormatting() {

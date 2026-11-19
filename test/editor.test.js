@@ -2424,6 +2424,23 @@ test("links: a caret inside a link changes that link", async () => {
   assertEqual(blockText(editor.getDocument()[0]), "Link this phrase now.", "text unchanged");
 });
 
+test("links: a bare caret inserts the label in its own undo step", async () => {
+  await load("<p></p>");
+  editor.insertText("See ");
+  const href = "/doc/6f1c2f7a-58f7-4b1e-9f6d-8f1c2f7a58f7";
+  editor.setLink(href, "Project notes");
+  assertEqual(editor.getSelection().focus.offset, "See Project notes".length, "caret follows the label");
+  editor.insertText(" for details.");
+  assertEqual(
+    serializeDocument(editor.getDocument()),
+    '<p>See <a href="' + href + '">Project notes</a> for details.</p>',
+    "the link only covers the inserted label",
+  );
+  editor.undo();
+  editor.undo();
+  assertEqual(serializeDocument(editor.getDocument()), "<p>See </p>", "undo leaves the earlier typing");
+});
+
 test("images: inserting, selecting, and deleting an image keeps the text intact", async () => {
   await load("<p>before after</p>");
   editor.collapseTo({ block: 0, offset: "before ".length });

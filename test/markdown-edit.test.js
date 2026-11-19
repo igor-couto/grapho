@@ -316,9 +316,27 @@ test("markdown-edit links: setLink wraps the selection and linkAt reports it", (
 
 test("markdown-edit links: setLink replaces the url of an existing link", () => {
   const blocks = sourceBlocks("a [label](https://old.example) b");
-  const result = setLink(blocks, collapsed(0, "a [lab".length), "https://new.example/x");
+  const result = setLink(blocks, collapsed(0, "a [lab".length), "https://new.example/x", "New title");
   expectSingleLine(result, "a [label](https://new.example/x) b", "url replaced, label kept");
   assertEqual(linkAt(result.blocks, collapsed(0, 4)).href, "https://new.example/x", "new href");
+});
+
+test("markdown-edit links: a bare caret inserts a literal label on a blank line", () => {
+  const title = "Roadmap [Draft] *Q4*";
+  const href = "/doc/6f1c2f7a-58f7-4b1e-9f6d-8f1c2f7a58f7";
+  const result = setLink(sourceBlocks(""), collapsed(0, 0), href, title);
+  const line = blockText(result.blocks[0]);
+  assertEqual(result.focus.offset, line.length, "caret follows the link syntax");
+  assertDeepEqual(sourceToRich(result.blocks).blocks[0].runs, [{ text: title, href }], "literal linked title");
+});
+
+test("markdown-edit links: a bare caret also works on an aligned line", () => {
+  const source = '<p data-align="center">See </p>';
+  const href = "/doc/6f1c2f7a-58f7-4b1e-9f6d-8f1c2f7a58f7";
+  const result = setLink(sourceBlocks(source), collapsed(0, source.indexOf("</p>")), href, "Project notes");
+  const expected = '<p data-align="center">See <a href="' + href + '">Project notes</a></p>';
+  expectSingleLine(result, expected, "alignment and existing text are preserved");
+  assertEqual(result.focus.offset, expected.indexOf("</p>"), "caret follows the anchor inside the paragraph");
 });
 
 test("markdown-edit links: removeLink keeps the label and drops the wrapper", () => {

@@ -1255,14 +1255,9 @@ function openLinkDialog() {
   closeStyleMenu();
   closeMoreFormatting();
 
-  const selection = editor.getSelection();
   const existing = state.markdownMode
-    ? sourceLinkAt(editor.getDocument(), selection)
+    ? sourceLinkAt(editor.getDocument(), editor.getSelection())
     : editor.linkAtCaret();
-  if (selection.collapsed && !existing) {
-    showToast("Select a word or phrase first, then add a link.");
-    return;
-  }
 
   els.linkInput.value = existing ? existing.href : "";
   els.linkTitle.textContent = existing ? "Edit link" : "Add a link";
@@ -1319,14 +1314,27 @@ function normalizeLink(raw) {
   }
 }
 
-function insertLink(href) {
-  closeLinkDialog();
-  if (state.markdownMode) {
-    applySourceCommand(setSourceLink, href);
-  } else {
-    editor.setLink(href);
+function insertLink(href, label) {
+  const inserting = editor.getSelection().collapsed && els.linkRemove.hidden;
+  const applied = state.markdownMode
+    ? applySourceCommand(setSourceLink, href, label)
+    : editor.setLink(href, label);
+  if (inserting && !applied) {
+    showLinkError("Place the cursor in a text line to insert a link.");
+    return;
   }
+  closeLinkDialog();
   editor.focusEditor();
+}
+
+function insertPageLink(page) {
+  insertLink(documentLinkHref(page.id), page.title);
+}
+
+function showLinkError(message) {
+  els.linkError.textContent = message;
+  els.linkError.hidden = false;
+  els.linkInput.focus();
 }
 
 function applyLink(event) {
@@ -1338,16 +1346,16 @@ function applyLink(event) {
   // pick one with the arrow keys); with no row picked, the field is the target.
   const picked = linkPicker.visible[linkPicker.selected];
   if (picked) {
-    insertLink(documentLinkHref(picked.id));
+    insertPageLink(picked);
     return;
   }
-  const url = normalizeLink(els.linkInput.value);
+  const address = els.linkInput.value.trim();
+  const url = normalizeLink(address);
   if (!url) {
-    els.linkError.hidden = false;
-    els.linkInput.focus();
+    showLinkError("Enter a web address, or choose a Grapho page.");
     return;
   }
-  insertLink(url);
+  insertLink(url, address);
 }
 
 function removeLink() {
@@ -1447,7 +1455,7 @@ function handleLinkResultClick(event) {
   }
   const picked = linkPicker.visible[Number(option.getAttribute("data-index"))];
   if (picked) {
-    insertLink(documentLinkHref(picked.id));
+    insertPageLink(picked);
   }
 }
 

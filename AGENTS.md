@@ -481,10 +481,11 @@ hidden while the ghost stands in.
   snapshot. An unchanged round trip restores them exactly. Markdown edits have
   their own undo steps while in source mode and become a single rich-text undo
   step on exit when the parsed document changed.
-- The link dialog (`Ctrl+K`) points the selected text at a web address or at
-  another Grapho page. The field is both: a typed address is applied as before,
-  while the list under it shows the library's recent documents, filters by title
-  as the writer types, and links the chosen page as a root-relative
+- The link dialog (`Ctrl+K`) opens at a caret or with text selected. At a bare
+  caret it inserts the chosen document's title or the typed web address as
+  the link label. Selected text and existing link labels keep their wording.
+  The list shows recent documents, filters by title as the writer types,
+  and links the chosen page as a root-relative
   `/doc/<id>`. Choosing a row links that page; the arrow keys pick a row and
   Enter (or the dialog's primary button) commits it. The listing is read once
   when the dialog opens, like `Ctrl+O`, and filtered locally, so typing sends no
