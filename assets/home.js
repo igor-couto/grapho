@@ -6,6 +6,7 @@
     cards: new Map(),
     previewObserver: null,
     query: "",
+    returnDocument: null,
     searchTimer: null,
     searchRequest: null,
     searchResults: null,
@@ -13,7 +14,6 @@
     view: "list",
     sort: "modified",
     loaded: false,
-    creating: false,
     duplicating: new Set(),
     busy: false,
     pending: null,
@@ -79,7 +79,6 @@
     els.emptyText = document.getElementById("emptyText");
     els.emptyActions = document.getElementById("emptyActions");
     els.emptyClearSearch = document.getElementById("emptyClearSearch");
-    els.newDocument = document.getElementById("newDocument");
     els.cardTemplate = document.getElementById("documentCardTemplate");
     els.actionDialog = document.getElementById("actionDialog");
     els.actionForm = document.getElementById("actionForm");
@@ -107,6 +106,9 @@
         : null;
     state.view = storedChoice(VIEW_KEY, VIEWS, "list");
     state.sort = storedChoice(SORT_KEY, SORTS, "modified");
+    var params = new URLSearchParams(window.location.search);
+    els.searchDocuments.value = params.get("q") || "";
+    state.returnDocument = params.get("from");
     applyView();
     syncSortMenu();
     bindStaticEvents();
@@ -131,8 +133,6 @@
   }
 
   function bindStaticEvents() {
-    els.newDocument.addEventListener("click", createDocument);
-
     els.searchDocuments.addEventListener("input", updateSearch);
 
     els.searchDocuments.addEventListener("keydown", function (event) {
@@ -298,7 +298,7 @@
       els.signOut.hidden = !payload.auth_required;
       els.signOutRule.hidden = !payload.auth_required;
       applySort();
-      updateSearch();
+      updateSearch(true);
     } catch (error) {
       showLoadError(error);
     } finally {
@@ -376,7 +376,18 @@
     }
   }
 
-  function updateSearch() {
+  function syncSearchUrl() {
+    var url = new URL(window.location.href);
+    if (state.query !== (url.searchParams.get("q") || "")) {
+      if (state.query) url.searchParams.set("q", state.query);
+      else url.searchParams.delete("q");
+      url.searchParams.delete("from");
+      state.returnDocument = null;
+      window.history.replaceState(window.history.state, "", url);
+    }
+  }
+
+  function updateSearch(immediate) {
     if (!state.loaded) {
       return;
     }
@@ -386,12 +397,15 @@
     state.searchError = "";
     renderDocuments();
     if (state.query) {
-      state.searchTimer = window.setTimeout(searchDocuments, 230);
+      state.searchTimer = window.setTimeout(searchDocuments, immediate === true ? 0 : 230);
+    } else {
+      syncSearchUrl();
     }
   }
 
   async function searchDocuments() {
     cancelSearch();
+    syncSearchUrl();
     var controller = new AbortController();
     state.searchRequest = controller;
     var params = new URLSearchParams({ q: state.query });
@@ -416,6 +430,14 @@
     }
     state.searchRequest = null;
     renderDocuments();
+    if (state.searchResults && state.returnDocument) {
+      var card = state.cards.get(state.returnDocument);
+      if (card && card.element.isConnected && document.activeElement === document.body) {
+        card.link.focus({ preventScroll: true });
+        card.link.scrollIntoView({ block: "nearest", behavior: "instant" });
+      }
+      state.returnDocument = null;
+    }
   }
 
   async function refreshAfterChange() {
@@ -607,6 +629,11 @@
   function syncCard(card, document) {
     card.document = document;
     card.link.href = "/doc/" + encodeURIComponent(document.id);
+    if (state.query) {
+      var params = new URLSearchParams({ q: state.query });
+      if (document.body_match) params.set("passage", "1");
+      card.link.search = params.toString();
+    }
     card.link.setAttribute("aria-label", "Open " + document.title);
     card.title.title = document.title_match ? document.title : "";
     if (document.title_match) {
@@ -695,34 +722,6 @@
         }
       }
     });
-  }
-
-  async function createDocument() {
-    if (state.creating) {
-      return;
-    }
-
-    state.creating = true;
-    setCreatingState(true);
-
-    try {
-      var document = await request("/api/documents", { method: "POST" });
-      window.location.assign(
-        "/doc/" + encodeURIComponent(document.id) + "?new=1",
-      );
-    } catch (error) {
-      state.creating = false;
-      setCreatingState(false);
-      showToast(
-        error.userMessage ||
-          "The document couldn't be created. Please try again.",
-        true,
-      );
-    }
-  }
-
-  function setCreatingState(isCreating) {
-    els.newDocument.disabled = isCreating;
   }
 
   // A copy is a brand new document, made by the server and answered with the

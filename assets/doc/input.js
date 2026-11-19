@@ -228,24 +228,18 @@ export class DocEditor {
     if (!block || isAtomicBlock(block) || block.type === "code") {
       return null;
     }
-    let index = 0;
-    for (const run of block.runs) {
-      const end = index + run.text.length;
-      if (run.href && this.focus.offset >= index && this.focus.offset <= end) {
-        let from = index;
-        let to = end;
-        let cursor = 0;
-        for (const other of block.runs) {
-          const otherEnd = cursor + other.text.length;
-          if (other.href === run.href && otherEnd >= from && cursor <= to) {
-            from = Math.min(from, cursor);
-            to = Math.max(to, otherEnd);
-          }
-          cursor = otherEnd;
-        }
+    let from = 0;
+    for (let index = 0; index < block.runs.length; index += 1) {
+      const run = block.runs[index];
+      let to = from + run.text.length;
+      while (run.href && block.runs[index + 1]?.href === run.href) {
+        index += 1;
+        to += block.runs[index].text.length;
+      }
+      if (run.href && from <= this.focus.offset && this.focus.offset <= to) {
         return { href: run.href, from, to };
       }
-      index = end;
+      from = to;
     }
     return null;
   }
@@ -292,6 +286,7 @@ export class DocEditor {
   }
 
   setSelection(anchor, focus, options) {
+    this.view.clearSearchPassage();
     // Moving the caret or dragging a new selection ends the current typing
     // run, so the next undo does not also swallow the text typed before it.
     this.typing = null;
@@ -2120,7 +2115,10 @@ export class DocEditor {
     }
 
     event.preventDefault();
-    this.focusEditor();
+    // A tap on a link opens its actions without calling up the phone keyboard.
+    if (!link || event.pointerType !== "touch" || event.shiftKey) {
+      this.focusEditor();
+    }
     const position = this.positionFromEvent(event);
     const extend = event.shiftKey;
     this.pointer = { anchor: extend ? { ...this.anchor } : position };

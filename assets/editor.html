@@ -306,6 +306,14 @@
     <button class="menu-item menu-item-danger" type="button" role="menuitem" data-image-action="remove">Remove image</button>
   </div>
 
+  <div class="popover-menu link-popover" id="linkPopover" role="group" aria-label="Link options" hidden>
+    <span class="link-destination" id="linkDestination" dir="auto"></span>
+    <div class="link-actions">
+      <a class="menu-item" id="linkOpen" aria-describedby="linkDestination" rel="noopener noreferrer">Open</a>
+      <button class="menu-item" id="linkEdit" type="button">Edit</button>
+    </div>
+  </div>
+
   <dialog class="modal link-dialog" id="linkDialog" aria-labelledby="linkTitle">
     <form class="modal-panel" id="linkForm" novalidate>
       <h2 id="linkTitle">Add a link</h2>

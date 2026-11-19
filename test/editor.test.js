@@ -20,6 +20,7 @@ import {
 import {
   blockLength,
   blockText,
+  findSearchPassage,
   headingAnchors,
   imageRadius,
   parseDocument,
@@ -2315,6 +2316,17 @@ test("dividers: the arrow keys step over one instead of into it", async () => {
 
 
 
+test("search: the first passage maps back to the original text across marks and blocks", () => {
+  const blocks = parseDocument("<p>İ 😀 Co<b>pper</b></p><hr><pre>  Kettle &amp; pot</pre><p>copper kettle</p>");
+  const range = findSearchPassage(blocks, "COPPER\t kett");
+  assertEqual(range.from.block, 0, "starts in the original paragraph");
+  assertEqual(range.from.offset, 5, "starts after the expanding lowercase and surrogate pair");
+  assertEqual(range.to.block, 2, "ends in the code block, past the divider");
+  assertEqual(range.to.offset, 6, "stops partway through the word after indentation");
+  assertEqual(findSearchPassage(blocks, "\u0307").to.offset, 1, "an expanded character highlights its original glyph");
+  assertEqual(findSearchPassage(blocks, "no longer here"), null, "stale matches leave the document alone");
+});
+
 test("anchors: headings derive stable, unique slugs", async () => {
   const blocks = parseDocument(
     "<h1>Hello, World!</h1>" +
@@ -2422,6 +2434,14 @@ test("links: a caret inside a link changes that link", async () => {
     "the page path replaces the old target",
   );
   assertEqual(blockText(editor.getDocument()[0]), "Link this phrase now.", "text unchanged");
+});
+
+test("links: editing the last styled fragment updates the entire link", async () => {
+  await load('<p><a href="/old">first <b>second</b> <i>third</i></a> ends here.</p>');
+  editor.collapseTo({ block: 0, offset: 15 });
+  editor.setLink("/new");
+  const linked = editor.getDocument()[0].runs.filter((run) => run.href === "/new");
+  assertEqual(linked.map((run) => run.text).join(""), "first second third", "all styled fragments share the new destination");
 });
 
 test("links: a bare caret inserts the label in its own undo step", async () => {

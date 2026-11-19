@@ -221,7 +221,11 @@ and ignores markup and image data. Results carry the usual card summary and
 plain-text excerpts split around the matching title or passage. The browser
 highlights the match in either view, keeps the selected sort, and refreshes
 active results after a rename, duplicate, or delete. Clearing the query returns
-to the already loaded listing.
+to the already loaded listing. Search results carry the library query in their
+links. A body match opens at the first occurrence in the current document and
+briefly highlights the matching text with the editor's selection geometry.
+The highlight is independent of the editing selection. Library returns to the
+query and brings the originating result into view.
 
 Each card's ⋯ menu opens the document, renames it, duplicates it, or deletes it.
 A duplicate is made by the server, not by replaying the document through the
@@ -272,6 +276,10 @@ builds its own `<dialog>` on first use and `app.css` owns its look; a new page
 loads the script with `defer` unless it is the password gate.
 
 ## Editor architecture
+
+New Document opens a draft with its own URL. The first save creates the file
+only once the title differs from the default or the body has content. A retry
+uses the same id, and a successful save switches the draft to its document URL.
 
 The editor does not use `contenteditable`. `assets/doc/input.js` owns the block
 model and the selection, `layout.js` turns blocks into positioned lines with
@@ -492,6 +500,13 @@ hidden while the ghost stands in.
   request; the current document is left out. A root-relative target keeps
   working on any host or port the library is served from, the store's sanitizer
   passes it, and Markdown mode carries it.
+- Clicking or tapping a rich-text link opens its destination, Open, and Edit
+  controls. The toolbar link button also offers them at a linked caret.
+  The popover reads a Grapho page's title on demand from its protected
+  `/api/documents/{id}/title` route. Open follows a Grapho page in the same
+  tab after flushing pending edits. Back restores the reading position after
+  layout using the source history entry. External web links and Ctrl+click
+  open in a new tab.
 - Heading anchors are derived, never stored: `model.js`'s `headingAnchors` slugs
   each heading's text (accents folded, lowercase, punctuation and whitespace runs
   to one hyphen, capped at 80 characters), gives repeats "-2", "-3" suffixes in

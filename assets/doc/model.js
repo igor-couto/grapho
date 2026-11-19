@@ -84,6 +84,44 @@ export function blockText(block) {
   return block.runs.map((run) => run.text).join("");
 }
 
+// The store searches the first occurrence after collapsing Unicode whitespace
+// and lowercasing each character. Keep the word positions so a match across
+// marks, hard breaks, or blocks maps back to the editor's UTF-16 offsets.
+export function findSearchPassage(blocks, query) {
+  const words = /[^\p{White_Space}]+/gu;
+  const fold = (word) => word.replace(/\p{Changes_When_Lowercased}/gu, (ch) => ch.toLowerCase());
+  const needle = (query.match(words) || []).map(fold).join(" ");
+  if (!needle) return null;
+
+  const positions = [];
+  let text = "";
+  blocks.forEach((block, index) => {
+    for (const word of blockText(block).matchAll(words)) {
+      if (text) text += " ";
+      positions.push({ block: index, offset: word.index, start: text.length, word: word[0] });
+      text += fold(word[0]);
+    }
+  });
+  const start = text.indexOf(needle);
+  if (start < 0) return null;
+
+  function positionAt(index, end) {
+    const word = positions.findLast((word) => word.start <= index);
+    let offset = word.offset;
+    let folded = word.start;
+    for (const ch of word.word) {
+      folded += ch.toLowerCase().length;
+      if (index < folded) {
+        if (end) offset += ch.length;
+        break;
+      }
+      offset += ch.length;
+    }
+    return { block: word.block, offset };
+  }
+  return { from: positionAt(start, false), to: positionAt(start + needle.length - 1, true) };
+}
+
 // Heading anchors are derived from the text, never stored, so no document
 // format changes when one is linked to. The slug folds accents, lowercases,
 // turns runs of punctuation and whitespace into one hyphen, and keeps Unicode

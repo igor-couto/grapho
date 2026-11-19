@@ -5,6 +5,7 @@ import {
   IMAGE_RADIUS_DEFAULT,
   IMAGE_RADIUS_LIMIT,
   blockText,
+  findSearchPassage,
   imageRadius,
   parseDocument,
   serializeDocument,
@@ -34,6 +35,7 @@ import { buildPdf } from "./doc/pdf.js";
 
 const state = {
   documentId: null,
+  draft: false,
   loaded: false,
   dirty: false,
   saving: false,
@@ -44,6 +46,7 @@ const state = {
   saveErrorNotified: false,
   imageEntry: null,
   imageBusy: false,
+  linkAnchor: null,
   toastTimer: null,
   paperWidth: null,
   paperDrag: null,
@@ -89,6 +92,7 @@ const linkLongDate = new Intl.DateTimeFormat(undefined, {
   year: "numeric",
 });
 
+const DEFAULT_TITLE = "Untitled document";
 const IMAGE_MAX_EDGE = 1600;
 const IMAGE_PASSTHROUGH_BYTES = 600 * 1024;
 const IMAGE_DOWNLOAD_EXTENSIONS = {
@@ -124,6 +128,10 @@ async function init() {
   els.alignButton = document.getElementById("alignButton");
   els.alignMenu = document.getElementById("alignMenu");
   els.linkButton = document.getElementById("linkButton");
+  els.linkPopover = document.getElementById("linkPopover");
+  els.linkDestination = document.getElementById("linkDestination");
+  els.linkOpen = document.getElementById("linkOpen");
+  els.linkEdit = document.getElementById("linkEdit");
   els.imageButton = document.getElementById("imageButton");
   els.imageInput = document.getElementById("imageInput");
   els.imageMenu = document.getElementById("imageMenu");
@@ -134,6 +142,12 @@ async function init() {
   els.editor = document.getElementById("editor");
   els.docInput = document.getElementById("docInput");
   els.loadError = document.getElementById("loadError");
+  const query = new URLSearchParams(location.search).get("q");
+  if (query) {
+    const params = new URLSearchParams({ q: query, from: documentIdFromPath() });
+    els.backToLibrary.search = params.toString();
+    els.loadError.querySelector("a").search = params.toString();
+  }
   els.toast = document.getElementById("toast");
 
   els.linkDialog = document.getElementById("linkDialog");
@@ -177,14 +191,18 @@ async function init() {
    -------------------------------------------------------------------------- */
 
 async function loadDocument() {
-  state.documentId = documentIdFromPath();
+  const draftId = location.pathname.match(/^\/doc\/new\/([^/]+)$/)?.[1];
+  state.draft = Boolean(draftId);
+  state.documentId = draftId || documentIdFromPath();
   if (!state.documentId) {
     showLoadFailure({ status: 404 });
     return;
   }
 
   try {
-    const document = await request("/api/documents/" + encodeURIComponent(state.documentId));
+    const document = state.draft
+      ? {}
+      : await request("/api/documents/" + encodeURIComponent(state.documentId));
     await applyDocument(document);
   } catch (error) {
     console.error(error);
@@ -200,18 +218,30 @@ async function applyDocument(document) {
   state.loaded = true;
   state.dirty = false;
 
-  els.documentTitle.value = document.title || "Untitled document";
+  els.documentTitle.value = document.title || DEFAULT_TITLE;
   els.documentTitle.disabled = false;
   updateTitleDisplay();
   els.paper.setAttribute("aria-busy", "false");
   applyPaperWidth(paperWidthFrom(document.paper_width));
 
+  const returning = history.state?.linkReturn;
+  let returnedScrollY;
   loadMissingImages(blocks, () => {
     editor.relayout();
     editor.sync();
     // A late image measurement can move the heading a deep link asked for, so
     // follow it once the flow has settled again.
-    scrollToLocationAnchor({ smooth: false });
+    if (!returning) {
+      scrollToLocationAnchor({ smooth: false });
+    } else if (window.scrollY === returnedScrollY) {
+      // An older image can acquire its height after Back has restored the
+      // paragraph. Keep it in place while the reader is still there.
+      const { block, offset } = editor.getSelection().focus;
+      if (block === returning.position.block && offset === returning.position.offset) {
+        alignReturnCaret(returning.viewportY);
+        returnedScrollY = window.scrollY;
+      }
+    }
   });
   editor.setDocument(blocks);
   state.savedContent = blocksContent(blocks);
@@ -222,11 +252,23 @@ async function applyDocument(document) {
 
   updateEditorPlaceholder();
   hideSaveStatus();
-  scrollToLocationAnchor({ smooth: false });
-
   const params = new URLSearchParams(window.location.search);
+  if (restoreLinkOrigin()) {
+    returnedScrollY = window.scrollY;
+  } else if (!location.hash && params.get("passage") === "1" && params.has("q")) {
+    const range = findSearchPassage(blocks, params.get("q"));
+    if (range) {
+      editor.collapseTo(range.from, { animateCaret: false });
+      editor.view.showSearchPassage(range);
+    }
+  } else {
+    scrollToLocationAnchor({ smooth: false });
+  }
+
   if (params.get("new") === "1") {
     window.history.replaceState(null, "", window.location.pathname);
+  }
+  if (state.draft || params.get("new") === "1") {
     els.documentTitle.focus();
     els.documentTitle.select();
   }
@@ -286,8 +328,8 @@ function showLoadFailure(error) {
   document.title = notFound ? "Document not found - Grapho" : "Couldn't open document - Grapho";
 }
 
-function documentIdFromPath() {
-  const match = window.location.pathname.match(/^\/doc\/([^/]+)\/?$/);
+function documentIdFromPath(path = window.location.pathname) {
+  const match = path.match(/^\/doc\/([^/]+)\/?$/);
   if (!match) {
     return null;
   }
@@ -333,7 +375,7 @@ function normalizeTitle(raw) {
   if (characters.length > 200) {
     cleaned = characters.slice(0, 200).join("");
   }
-  return cleaned || "Untitled document";
+  return cleaned || DEFAULT_TITLE;
 }
 
 function normalizeTitleField() {
@@ -351,7 +393,7 @@ function normalizeTitleField() {
 function updateTitleDisplay() {
   const value = els.documentTitle.value;
   els.documentTitle.parentElement.dataset.title = value;
-  document.title = (value.trim() || "Untitled document") + " - Grapho";
+  document.title = (value.trim() || DEFAULT_TITLE) + " - Grapho";
 }
 
 function updateEditorPlaceholder() {
@@ -401,6 +443,14 @@ function buildPayload() {
   return payload;
 }
 
+function isEmptyDraft(payload) {
+  return state.draft && payload.title === DEFAULT_TITLE && !payload.content;
+}
+
+function savePath() {
+  return "/api/documents/" + encodeURIComponent(state.documentId) + (state.draft ? "/draft" : "");
+}
+
 function scheduleSave(delay) {
   if (!state.loaded) {
     return;
@@ -434,15 +484,25 @@ function saveNow() {
 
   const payload = buildPayload();
   state.dirty = false;
+  if (isEmptyDraft(payload)) {
+    state.saveErrorNotified = false;
+    hideSaveStatus();
+    return Promise.resolve(true);
+  }
   state.saving = true;
 
   state.savePromise = (async () => {
     try {
-      await request("/api/documents/" + encodeURIComponent(state.documentId), {
+      const saved = await request(savePath(), {
         method: "PUT",
         body: payload,
       });
 
+      if (state.draft) {
+        state.documentId = saved.id;
+        state.draft = false;
+        history.replaceState(history.state, "", documentLinkHref(saved.id) + location.search + location.hash);
+      }
       state.savedContent = payload.content;
       state.saving = false;
       state.saveErrorNotified = false;
@@ -492,7 +552,7 @@ async function flushBeforeLeaving() {
   return !state.dirty && !state.saving;
 }
 
-function handlePageLink(event) {
+function handlePageLink(event, beforeLeave) {
   // The link navigates away from the document, so wait until the latest edit
   // is on disk. Modified clicks keep the browser's new-tab behavior.
   const target = event.currentTarget.href;
@@ -508,12 +568,14 @@ function handlePageLink(event) {
     return;
   }
   if (!state.dirty && !state.saving) {
+    beforeLeave?.();
     return;
   }
 
   event.preventDefault();
   flushBeforeLeaving().then((saved) => {
     if (saved) {
+      beforeLeave?.();
       window.location.assign(target);
     } else {
       showToast("Your latest changes couldn't be saved. Try once more before leaving.", true);
@@ -526,8 +588,11 @@ function persistBeforeLeaving() {
     return;
   }
   const payload = buildPayload();
+  if (isEmptyDraft(payload)) {
+    return;
+  }
   try {
-    fetch("/api/documents/" + encodeURIComponent(state.documentId), {
+    fetch(savePath(), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -552,7 +617,10 @@ function showSaveStatus() {
 
 function bindEvents() {
   window.addEventListener("hashchange", () => {
-    scrollToLocationAnchor({ smooth: true });
+    if (!restoreLinkOrigin()) scrollToLocationAnchor({ smooth: true });
+  });
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) restoreLinkOrigin();
   });
 
   els.documentTitle.addEventListener("input", () => {
@@ -602,7 +670,37 @@ function bindEvents() {
   els.styleMenu.addEventListener("keydown", handleStyleMenuKeydown);
   els.formatToolbar.addEventListener("scroll", closeStyleMenu, { passive: true });
 
-  els.linkButton.addEventListener("click", openLinkDialog);
+  els.editor.addEventListener("click", handleLinkClick);
+  els.linkButton.addEventListener("click", () => {
+    const link = !state.markdownMode && editor.isCollapsed() && editor.linkAtCaret();
+    if (link) {
+      showLinkPopover(link.href, els.linkButton, true);
+    } else {
+      openLinkDialog();
+    }
+  });
+  els.linkEdit.addEventListener("click", () => {
+    const fragment = state.linkAnchor;
+    if (fragment?.dataset.href && editor.linkAtCaret()?.href !== fragment.dataset.href) {
+      // Two adjacent links share a caret offset. Edit the one that was hit.
+      editor.collapseTo({ block: editor.getSelection().focus.block, offset: Number(fragment.dataset.end) });
+    }
+    openLinkDialog();
+  });
+  els.linkOpen.addEventListener("click", (event) => {
+    if (els.linkOpen.origin === location.origin) handlePageLink(event, rememberLinkOrigin);
+    closeLinkPopover();
+  });
+  document.addEventListener("focusin", (event) => {
+    if (event.target !== els.docInput && !els.linkPopover.contains(event.target)) closeLinkPopover();
+  });
+  els.docInput.addEventListener("keydown", (event) => {
+    if (event.key === "Tab" && !event.shiftKey && !els.linkPopover.hidden) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      els.linkOpen.focus({ preventScroll: true });
+    }
+  }, true);
   els.linkInput.addEventListener("input", handleLinkInput);
   els.linkInput.addEventListener("keydown", handleLinkInputKeydown);
   els.linkResultsList.addEventListener("mousedown", (event) => event.preventDefault());
@@ -659,6 +757,11 @@ function bindEvents() {
   window.addEventListener("scroll", closeImageMenu, { passive: true });
   window.addEventListener("scroll", closeAlignMenu, { passive: true });
   window.addEventListener("scroll", closeStyleMenu, { passive: true });
+  window.addEventListener("scroll", closeLinkPopover, { passive: true });
+  window.addEventListener("resize", closeLinkPopover);
+  window.visualViewport?.addEventListener("resize", () => {
+    if (state.linkAnchor) positionBelow(els.linkPopover, state.linkAnchor);
+  });
   window.addEventListener("resize", closeImageMenu);
   window.addEventListener("resize", closeAlignMenu);
   window.addEventListener("resize", closeStyleMenu);
@@ -885,6 +988,7 @@ function handleSelectionChange(info) {
   if (!state.loaded) {
     return;
   }
+  closeLinkPopover();
 
   const undoButton = els.formatToolbar.querySelector('[data-command="undo"]');
   const redoButton = els.formatToolbar.querySelector('[data-command="redo"]');
@@ -914,6 +1018,8 @@ function handleSelectionChange(info) {
     setListPressed(source.ordered);
     if (els.linkButton) {
       els.linkButton.setAttribute("aria-pressed", marks.href ? "true" : "false");
+      els.linkButton.setAttribute("aria-label", marks.href ? "Edit link" : "Add link");
+      els.linkButton.title = (marks.href ? "Edit link" : "Add link") + " (Ctrl+K)";
     }
     updateStyleState(source.style || "p");
     updateAlignState(source.align || "left");
@@ -929,6 +1035,9 @@ function handleSelectionChange(info) {
 
   if (els.linkButton) {
     els.linkButton.setAttribute("aria-pressed", marks.href ? "true" : "false");
+    const options = marks.href && info.collapsed;
+    els.linkButton.setAttribute("aria-label", options ? "Link options" : "Add link");
+    els.linkButton.title = options ? "Link options" : "Add link (Ctrl+K)";
   }
 
   const type = info.blockType || "p";
@@ -1076,30 +1185,24 @@ function closeStyleMenu(restoreFocus) {
 }
 
 function positionStyleMenu() {
-  const buttonRect = els.styleButton.getBoundingClientRect();
-  const menuRect = els.styleMenu.getBoundingClientRect();
+  positionBelow(els.styleMenu, els.styleButton);
+}
+
+function positionBelow(menu, anchor) {
+  const anchorRect = anchor.getBoundingClientRect();
   const margin = 12;
   const gap = 8;
-
-  let left = buttonRect.left;
-  if (left + menuRect.width > window.innerWidth - margin) {
-    left = window.innerWidth - menuRect.width - margin;
-  }
-  left = Math.max(margin, left);
-
-  let top = buttonRect.bottom + gap;
-  let above = false;
-  if (top + menuRect.height > window.innerHeight - margin) {
-    top = buttonRect.top - menuRect.height - gap;
-    above = true;
-  }
-  top = Math.max(margin, top);
-
-  // Menus on the left and right of the toolbar open downwards unless the
-  // window is too short; the animation slides them out of the button's side.
-  els.styleMenu.dataset.side = above ? "above" : "below";
-  els.styleMenu.style.left = Math.round(left) + "px";
-  els.styleMenu.style.top = Math.round(top) + "px";
+  const viewport = window.visualViewport;
+  const leftEdge = viewport?.offsetLeft || 0;
+  const topEdge = viewport?.offsetTop || 0;
+  const right = leftEdge + (viewport?.width || window.innerWidth);
+  const bottom = topEdge + (viewport?.height || window.innerHeight);
+  const left = Math.max(leftEdge + margin, Math.min(anchorRect.left, right - menu.offsetWidth - margin));
+  const above = anchorRect.bottom + gap + menu.offsetHeight > bottom - margin;
+  const top = above ? anchorRect.top - menu.offsetHeight - gap : anchorRect.bottom + gap;
+  menu.dataset.side = above ? "above" : "below";
+  menu.style.left = Math.round(left) + "px";
+  menu.style.top = Math.round(Math.max(topEdge + margin, top)) + "px";
 }
 
 function handleStyleMenuClick(event) {
@@ -1189,28 +1292,7 @@ function alignMenuAnchor() {
 }
 
 function positionAlignMenu() {
-  const buttonRect = alignMenuAnchor().getBoundingClientRect();
-  const menuRect = els.alignMenu.getBoundingClientRect();
-  const margin = 12;
-  const gap = 8;
-
-  let left = buttonRect.left;
-  if (left + menuRect.width > window.innerWidth - margin) {
-    left = window.innerWidth - menuRect.width - margin;
-  }
-  left = Math.max(margin, left);
-
-  let top = buttonRect.bottom + gap;
-  let above = false;
-  if (top + menuRect.height > window.innerHeight - margin) {
-    top = buttonRect.top - menuRect.height - gap;
-    above = true;
-  }
-  top = Math.max(margin, top);
-
-  els.alignMenu.dataset.side = above ? "above" : "below";
-  els.alignMenu.style.left = Math.round(left) + "px";
-  els.alignMenu.style.top = Math.round(top) + "px";
+  positionBelow(els.alignMenu, alignMenuAnchor());
 }
 
 function handleAlignMenuClick(event) {
@@ -1245,10 +1327,98 @@ function handleAlignMenuKeydown(event) {
    Links
    -------------------------------------------------------------------------- */
 
+function handleLinkClick(event) {
+  const fragment = event.target.closest(".m-link");
+  const modified = event.shiftKey || event.ctrlKey || event.metaKey || event.altKey;
+  if (!fragment || modified || event.detail > 1 || event.button !== 0 || !editor.isCollapsed()) {
+    return;
+  }
+  showLinkPopover(fragment.dataset.href, fragment, event.pointerType === "touch");
+}
+
+function closeLinkPopover() {
+  if (!state.linkAnchor) return;
+  els.linkPopover.hidden = true;
+  state.linkAnchor = null;
+}
+
+async function showLinkPopover(href, anchor, focusOpen) {
+  // Resolve stored relative and fragment links against this page, just as a
+  // normal HTML anchor would. Inspecting an external link never contacts it.
+  let url;
+  try {
+    url = new URL(href, location.href);
+  } catch {
+    return;
+  }
+  if (!["http:", "https:", "mailto:"].includes(url.protocol)) return;
+  const internal = url.origin === location.origin;
+  const address = internal ? url.pathname + url.search + url.hash : url.href;
+  state.linkAnchor = anchor;
+  els.linkOpen.href = url.href;
+  els.linkOpen.target = internal || url.protocol === "mailto:" ? "_self" : "_blank";
+  els.linkOpen.title = address;
+  els.linkDestination.textContent = address;
+  els.linkDestination.title = address;
+  els.linkPopover.hidden = false;
+  positionBelow(els.linkPopover, anchor);
+  if (focusOpen) els.linkOpen.focus({ preventScroll: true });
+
+  const id = internal && documentIdFromPath(url.pathname);
+  if (!id) return;
+  // Read only the title, on demand. A renamed page can have different wording
+  // from the selected text. Open and Edit are usable while the title loads.
+  try {
+    let title = els.documentTitle.value;
+    if (id !== state.documentId) {
+      const response = await fetch("/api/documents/" + encodeURIComponent(id) + "/title");
+      if (!response.ok) return;
+      title = await response.json();
+    }
+    if (state.linkAnchor === anchor && els.linkOpen.href === url.href && title) {
+      els.linkDestination.textContent = title + (url.hash ? " " + url.hash : "");
+    }
+  } catch {
+    // The address already shown is also a usable destination.
+  }
+}
+
+// Native Back can restore scroll before the asynchronously loaded paper has
+// any height. Keep the originating caret and its screen position in this entry.
+function rememberLinkOrigin() {
+  const point = editor.caretGeometry();
+  if (!point) return;
+  const linkReturn = {
+    position: editor.getSelection().focus,
+    viewportY: els.editor.getBoundingClientRect().top + point.y,
+  };
+  history.replaceState({ ...history.state, linkReturn }, "");
+}
+
+function restoreLinkOrigin() {
+  const origin = history.state?.linkReturn;
+  if (!origin || !state.loaded) return false;
+  const next = { ...history.state };
+  delete next.linkReturn;
+  history.replaceState(next, "");
+  editor.collapseTo(origin.position, { animateCaret: false });
+  alignReturnCaret(origin.viewportY);
+  return true;
+}
+
+function alignReturnCaret(viewportY) {
+  const point = editor.caretGeometry();
+  if (point) {
+    const top = els.editor.getBoundingClientRect().top + point.y - viewportY;
+    window.scrollBy({ top, behavior: "instant" });
+  }
+}
+
 function openLinkDialog() {
   if (!state.loaded) {
     return;
   }
+  closeLinkPopover();
   closeDocumentMenu();
   closeImageMenu();
   closeAlignMenu();
@@ -2155,6 +2325,7 @@ function imageDownloadName(block) {
 }
 
 function handleDocumentPointer(event) {
+  if (!els.linkPopover.hidden && !els.linkPopover.contains(event.target)) closeLinkPopover();
   if (!els.imageMenu.hidden && !els.imageMenu.contains(event.target)) {
     closeImageMenu();
   }
@@ -2284,6 +2455,9 @@ function copyTextFallback(text) {
 async function copyHeadingLink() {
   const anchor = editor.headingAnchor();
   if (!anchor) {
+    return;
+  }
+  if (state.draft && (!(await flushBeforeLeaving()) || state.draft)) {
     return;
   }
   const link = headingAnchorLink(anchor);
@@ -2924,7 +3098,9 @@ async function deleteDocument() {
       showToast("Your latest changes couldn't be saved. Try again before deleting.", true);
       return;
     }
-    await request("/api/documents/" + encodeURIComponent(state.documentId), { method: "DELETE" });
+    if (!state.draft) {
+      await request("/api/documents/" + encodeURIComponent(state.documentId), { method: "DELETE" });
+    }
     state.loaded = false;
     state.dirty = false;
     window.location.assign("/");
@@ -2942,6 +3118,12 @@ async function deleteDocument() {
 
 function handleGlobalKeydown(event) {
   if (event.key === "Escape") {
+    if (!els.linkPopover.hidden) {
+      event.preventDefault();
+      closeLinkPopover();
+      editor.focusEditor();
+      return;
+    }
     if (!els.moreFormattingMenu.hidden) {
       event.preventDefault();
       closeMoreFormatting(els.moreFormattingMenu.contains(document.activeElement));

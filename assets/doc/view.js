@@ -27,6 +27,7 @@ export class EditorView {
     this.blocks = null;
     this.views = new Map();
     this.selectionElements = [];
+    this.passage = null;
     this.caretPoint = null;
   }
 
@@ -61,6 +62,10 @@ export class EditorView {
         view.element.remove();
         this.views.delete(index);
       }
+    }
+    if (this.passage) {
+      if (this.passage.blocks === blocks) this.paintSearchPassage();
+      else this.clearSearchPassage();
     }
   }
 
@@ -173,6 +178,7 @@ export class EditorView {
           }
           if (fragment.marks && fragment.marks.href) {
             span.dataset.href = fragment.marks.href;
+            span.dataset.end = fragment.end;
           }
           lineElement.appendChild(span);
         }
@@ -294,16 +300,51 @@ export class EditorView {
       }
 
       for (const rect of selectionRectsFor(entry, blockStart, blockEnd)) {
-        const element = document.createElement("div");
-        element.className = "doc-selection";
-        element.style.left = rect.x + "px";
-        element.style.top = rect.y + "px";
-        element.style.width = rect.width + "px";
-        element.style.height = rect.height + "px";
+        const element = rangeRectangle(rect, "doc-selection");
         this.overlay.appendChild(element);
         this.selectionElements.push(element);
       }
     }
+  }
+
+  showSearchPassage(range) {
+    this.clearSearchPassage();
+    const layer = document.createElement("div");
+    this.overlay.prepend(layer);
+    this.passage = {
+      range, layer, blocks: this.blocks, scrollY: window.scrollY,
+      timer: window.setTimeout(() => this.clearSearchPassage(), 2400),
+    };
+    this.paintSearchPassage();
+  }
+
+  paintSearchPassage() {
+    const passage = this.passage;
+    const { from, to } = passage.range;
+    const fragment = document.createDocumentFragment();
+    for (let index = from.block; index <= to.block; index += 1) {
+      const entry = this.layout.blocks[index];
+      const start = index === from.block ? from.offset : 0;
+      const end = index === to.block ? to.offset : blockLength(entry.block);
+      if (end <= start) continue;
+      for (const rect of selectionRectsFor(entry, start, end)) {
+        fragment.appendChild(rangeRectangle(rect, "doc-search-match"));
+      }
+    }
+    passage.layer.replaceChildren(fragment);
+    // Reflow (including a late image size) can move the passage. Keep it in
+    // sight while highlighted, unless the reader has already scrolled away.
+    if (window.scrollY === passage.scrollY) {
+      passage.layer.firstElementChild?.scrollIntoView({ block: "center", behavior: "instant" });
+      passage.scrollY = window.scrollY;
+    }
+  }
+
+  clearSearchPassage() {
+    if (!this.passage) return;
+    window.clearTimeout(this.passage.timer);
+    this.passage.layer.remove();
+    this.passage = null;
   }
 
   setCaret(point, animate) {
@@ -431,6 +472,16 @@ function fragmentClass(fragment) {
     classes.push("m-link");
   }
   return classes.join(" ");
+}
+
+function rangeRectangle(rect, className) {
+  const element = document.createElement("div");
+  element.className = className;
+  element.style.left = rect.x + "px";
+  element.style.top = rect.y + "px";
+  element.style.width = rect.width + "px";
+  element.style.height = rect.height + "px";
+  return element;
 }
 
 function selectionRectsFor(entry, start, end) {

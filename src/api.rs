@@ -9,7 +9,7 @@ use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use html_escape::encode_text;
 use serde::{Deserialize, Serialize};
@@ -108,6 +108,8 @@ pub fn router(store: SharedStore, auth: Option<Arc<Auth>>, options: ServerOption
     // deliberately short.
     let protected = Router::new()
         .route("/", get(home_page))
+        .route("/doc/new", get(new_document_page))
+        .route("/doc/new/{id}", get(draft_page))
         .route("/doc/{id}", get(editor_page))
         // The storage page reveals a filesystem path and can move the library,
         // so it is as private as the documents themselves.
@@ -127,6 +129,8 @@ pub fn router(store: SharedStore, auth: Option<Arc<Auth>>, options: ServerOption
                 .put(update_document)
                 .delete(delete_document),
         )
+        .route("/api/documents/{id}/draft", put(save_draft))
+        .route("/api/documents/{id}/title", get(get_document_title))
         // A copy is a new document, so it is created with POST under its source.
         .route("/api/documents/{id}/duplicate", post(duplicate_document))
         .route("/api/documents/{id}/restore", post(restore_document))
@@ -168,22 +172,34 @@ async fn home_page() -> Response {
     )
 }
 
+async fn new_document_page() -> Response {
+    redirect_to(&format!("/doc/new/{}", Uuid::new_v4()))
+}
+
+async fn draft_page(State(state): State<AppState>, Path(raw_id): Path<String>) -> Response {
+    let Some(id) = parse_document_id(&raw_id) else {
+        return page_not_found();
+    };
+    if state.store.contains_active(id).await {
+        // A reload can follow an unload save before the browser has updated
+        // the address bar. Reopen the document if its first save made it.
+        return redirect_to(&format!("/doc/{id}"));
+    }
+    editor_html()
+}
+
 async fn editor_page(State(state): State<AppState>, Path(raw_id): Path<String>) -> Response {
     let Some(id) = parse_document_id(&raw_id) else {
         return page_not_found();
     };
-
-    if state.store.get(id).await.is_none() {
+    if !state.store.contains_active(id).await {
         return page_not_found();
     }
+    editor_html()
+}
 
-    with_page_cache(
-        (
-            [(header::CACHE_CONTROL, "no-cache")],
-            Html(assets::EDITOR_HTML),
-        )
-            .into_response(),
-    )
+fn editor_html() -> Response {
+    with_page_cache(Html(assets::EDITOR_HTML).into_response())
 }
 
 async fn storage_page() -> Response {
@@ -381,6 +397,19 @@ async fn get_document(
     Ok(Json(DocumentView::from(document)))
 }
 
+async fn get_document_title(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+) -> Result<Json<String>, ApiError> {
+    let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
+    state
+        .store
+        .title(id)
+        .await
+        .map(Json)
+        .ok_or_else(ApiError::not_found)
+}
+
 #[derive(Deserialize, Default)]
 struct UpdateDocumentRequest {
     #[serde(default)]
@@ -400,6 +429,21 @@ async fn update_document(
     let document = state
         .store
         .update(id, patch.title, patch.content, patch.paper_width)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    state.backups.mirror_document(document.id);
+    Ok(Json(DocumentView::from(document)))
+}
+
+async fn save_draft(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+    Json(patch): Json<UpdateDocumentRequest>,
+) -> Result<Json<DocumentView>, ApiError> {
+    let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
+    let document = state
+        .store
+        .save_draft(id, patch.title, patch.content, patch.paper_width)
         .await?
         .ok_or_else(ApiError::not_found)?;
     state.backups.mirror_document(document.id);
@@ -1387,6 +1431,9 @@ impl fmt::Debug for ApiError {
 
 impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> Self {
+        if matches!(error, StoreError::EmptyDraft) {
+            return Self::bad_request("Add a title or some content before saving.");
+        }
         eprintln!("document store error: {error}");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -1535,6 +1582,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opening_a_draft_writes_a_file_only_on_its_first_meaningful_save() {
+        let (app, directory) = test_app(Some("a password long enough")).await;
+        let mut request = get("/doc/new");
+        let response = app.clone().oneshot(get("/doc/new")).await.unwrap();
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            "/login?next=%2Fdoc%2Fnew"
+        );
+
+        let response = app
+            .clone()
+            .oneshot(login_request("a password long enough"))
+            .await
+            .unwrap();
+        let cookie = session_cookie_of(&response);
+        with_cookie(&mut request, &cookie);
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let draft = response.headers()[header::LOCATION].to_str().unwrap();
+        let id = draft.strip_prefix("/doc/new/").unwrap();
+
+        let mut request = get(draft);
+        with_cookie(&mut request, &cookie);
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let file = directory.join(format!("{id}.json"));
+        let endpoint = format!("/api/documents/{id}/draft");
+        let mut request = put_json(&endpoint, serde_json::json!({}));
+        with_cookie(&mut request, &cookie);
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!file.exists());
+
+        let mut request = put_json(&endpoint, serde_json::json!({ "title": "Title only" }));
+        with_cookie(&mut request, &cookie);
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let document = json_body(response).await;
+        assert_eq!(document["id"], id);
+        assert_eq!(document["title"], "Title only");
+        assert_eq!(document["content"], "");
+        assert!(file.is_file());
+
+        let mut request = get(draft);
+        with_cookie(&mut request, &cookie);
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[header::LOCATION], format!("/doc/{id}"));
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn private_routes_ask_for_a_password() {
         let (app, directory) = test_app(Some("a password long enough")).await;
 
@@ -1542,6 +1642,7 @@ mod tests {
             "/api/documents",
             "/api/documents/search?q=notes",
             "/api/documents/deleted",
+            "/api/documents/3f0b3b0a-0c5a-4b8f-9a55-0d1f3b8a0000/title",
         ] {
             let response = app.clone().oneshot(get(path)).await.unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -2534,6 +2635,39 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
+        let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+
+    #[tokio::test]
+    async fn link_destinations_show_the_current_title_of_an_active_document() {
+        let (app, directory) = test_app(None).await;
+        let created = app
+            .clone()
+            .oneshot(create_document_request())
+            .await
+            .unwrap();
+        let path = format!(
+            "/api/documents/{}",
+            json_body(created).await["id"].as_str().unwrap()
+        );
+        let title = format!("{path}/title");
+        let renamed = app
+            .clone()
+            .oneshot(put_json(
+                &path,
+                serde_json::json!({ "title": "Release checklist" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(renamed.status(), StatusCode::OK);
+        let response = app.clone().oneshot(get(&title)).await.unwrap();
+        assert_eq!(json_body(response).await, "Release checklist");
+        let response = app.clone().oneshot(delete_request(&path)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            app.oneshot(get(&title)).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
         let _ = tokio::fs::remove_dir_all(directory).await;
     }
 

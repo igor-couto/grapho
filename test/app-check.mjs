@@ -2425,9 +2425,12 @@ async function main() {
           if (!saved.ok) throw new Error("save failed: " + saved.status);
           return document.id;
         };
+        const target = await create("Link target page", "<p>Target body.</p>");
+        const filler = "<p>A paragraph of the release notes.</p>".repeat(30);
         return {
           blank: await create("Blank link source", ""),
-          target: await create("Link target page", "<p>Target body.</p>"),
+          target,
+          reader: await create("Release notes", filler + '<p>See <a href="/doc/' + target + '">the checklist</a>.</p>' + filler),
           source: await create("Link dialog source", "<p>Link this phrase now.</p>"),
           markdown: await create("Markdown link source", "<p>Go to the page now.</p>"),
         };
@@ -2794,6 +2797,33 @@ async function main() {
       deviceScaleFactor: 1,
       mobile: true,
     });
+    const readerUrl = base + "/doc/" + linkPages.reader;
+    await cdp.send("Page.navigate", { url: readerUrl });
+    await waitForPage(cdp, readerUrl, PAGE_TIMEOUT_MS);
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+    const readingTop = await evaluate(cdp, `(() => {
+      const link = document.querySelector(".m-link");
+      link.scrollIntoView({ block: "center", behavior: "instant" });
+      return link.getBoundingClientRect().top;
+    })()`);
+    await tapToolbar(".m-link");
+    check("tapping a link shows the destination's title and keeps the keyboard closed",
+      await waitForExpression(cdp, `!linkPopover.hidden && linkDestination.textContent === "Link target page"
+        && document.activeElement.id !== "docInput"`, PAGE_TIMEOUT_MS));
+    await tapToolbar("#linkEdit");
+    check("Edit opens the existing link", await evaluate(cdp,
+      `linkDialog.open && linkInput.value === ${JSON.stringify(targetHref)}`));
+    await tapToolbar("#linkCancel");
+    await tapToolbar(".m-link");
+    await tapToolbar("#linkOpen");
+    await waitForPage(cdp, base + targetHref, PAGE_TIMEOUT_MS);
+    await evaluate(cdp, "history.back()");
+    await waitForPage(cdp, readerUrl, PAGE_TIMEOUT_MS);
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+    check("Back returns to the paragraph that contained the link", await waitForExpression(cdp,
+      `linkPopover.hidden && Math.abs(document.querySelector(".m-link").getBoundingClientRect().top - ${readingTop}) < 8`,
+      PAGE_TIMEOUT_MS));
+
     await cdp.send("Page.navigate", { url: base + "/doc/" + linkPages.target });
     await waitForPage(cdp, base + "/doc/" + linkPages.target, PAGE_TIMEOUT_MS);
     await waitForEditor(cdp, PAGE_TIMEOUT_MS);
@@ -3424,8 +3454,8 @@ async function main() {
     const searchFixture = await evaluate(
       cdp,
       `(async () => {
-        const filler = "filler words before the marker ".repeat(75);
-        const content = "<p>" + filler + "</p><p>Needleword and R&amp;D notes</p>";
+        const filler = "<p>Filler words before the marker.</p>".repeat(90);
+        const content = filler + "<p>Needleword and R&amp;<b>D</b> notes</p>" + filler;
         const created = await fetch("/api/documents", { method: "POST" });
         if (!created.ok) throw new Error("create failed: " + created.status);
         const document = await created.json();
@@ -3514,6 +3544,20 @@ async function main() {
         ampersandSearch.match === "R&D",
       JSON.stringify(ampersandSearch),
     );
+
+    await clickSelector('.document-card[data-document-id="' + searchFixture.id + '"] .document-card-link');
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+    check("opening the result scrolls to the matching words", await waitForExpression(cdp, `(() => {
+      const hit = document.querySelector(".doc-search-match")?.getBoundingClientRect();
+      const line = Array.from(document.querySelectorAll(".doc-line")).find(el => el.textContent.includes("Needleword"));
+      const box = line?.getBoundingClientRect();
+      return hit && box && scrollY > innerHeight && hit.top > 0 && hit.bottom < innerHeight &&
+        hit.top < box.bottom && hit.bottom > box.top && hit.width < box.width;
+    })()`, PAGE_TIMEOUT_MS));
+    await clickSelector("#backToLibrary");
+    check("Library restores the query and its results", await waitForExpression(cdp, `
+      location.pathname === "/" && document.getElementById("searchDocuments")?.value === "R&D" &&
+        document.querySelector(".document-search-excerpt mark")?.textContent === "R&D"`, PAGE_TIMEOUT_MS));
 
     await evaluate(
       cdp,
@@ -4556,6 +4600,72 @@ async function main() {
       cdp,
       `fetch("/api/documents/${documentId}", { method: "DELETE" })`,
     ).catch(() => null);
+
+    async function openNewDraft() {
+      await evaluate(cdp, `document.getElementById("newDocument").click()`);
+      await waitForPage(cdp, base + "/doc/new/", PAGE_TIMEOUT_MS);
+      await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+      return evaluate(cdp, `location.pathname.split("/").pop()`);
+    }
+
+    const emptyDraftId = await openNewDraft();
+    equal(
+      "a new draft focuses the default title",
+      await evaluate(cdp, `document.activeElement.value`),
+      "Untitled document",
+    );
+    await pressKey("Enter", "Enter", 13, 0);
+    await cdp.send("Input.insertText", { text: "   " });
+    await pressKey("s", "KeyS", 83, 2);
+    await evaluate(cdp, `document.getElementById("backToLibrary").click()`);
+    await waitForExpression(cdp, `location.pathname === "/"`, PAGE_TIMEOUT_MS);
+    check(
+      "leaving a whitespace-only untitled draft writes no file",
+      !(await possibleBinary(path.join(dataDir, emptyDraftId + ".json"))),
+    );
+
+    const titledDraftId = await openNewDraft();
+    await evaluate(cdp, `(() => {
+      const title = document.getElementById("documentTitle");
+      title.value = "Title only";
+      title.dispatchEvent(new Event("input", { bubbles: true }));
+      document.getElementById("backToLibrary").click();
+    })()`);
+    check(
+      "Library waits for the first save of a title-only draft",
+      await waitForExpression(
+        cdp,
+        `document.querySelector('a[href="/doc/${titledDraftId}"]')?.textContent.includes("Title only")`,
+        PAGE_TIMEOUT_MS,
+      ),
+    );
+    const titleOnly = JSON.parse(await readFile(path.join(dataDir, titledDraftId + ".json"), "utf8"));
+    equal("a title-only draft keeps its title on disk", titleOnly.title, "Title only");
+    equal("a title-only draft keeps an empty body on disk", titleOnly.content, "");
+
+    await cdp.send("Emulation.setDeviceMetricsOverride", {
+      width: 390,
+      height: 844,
+      deviceScaleFactor: 1,
+      mobile: true,
+    });
+    const bodyDraftId = await openNewDraft();
+    check(
+      "the draft editor fits a 390px viewport",
+      await evaluate(cdp, `document.documentElement.scrollWidth <= innerWidth + 1`),
+    );
+    await pressKey("Enter", "Enter", 13, 0);
+    await cdp.send("Input.insertText", { text: "Draft with body text" });
+    const bodyDraftUrl = base + "/doc/" + bodyDraftId;
+    await waitForPage(cdp, bodyDraftUrl, PAGE_TIMEOUT_MS);
+    await cdp.send("Page.reload");
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+    equal(
+      "an untitled draft with body text survives reload",
+      await evaluate(cdp, `document.querySelector(".doc-line").textContent`),
+      "Draft with body text",
+    );
+    await cdp.send("Emulation.clearDeviceMetricsOverride");
   } finally {
     if (cdp) {
       cdp.close();

@@ -14,6 +14,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 const SCHEMA_VERSION: u32 = 1;
+const DEFAULT_TITLE: &str = "Untitled document";
 const MAX_TITLE_CHARS: usize = 200;
 const EXCERPT_CHARS: usize = 220;
 /// How much text the home page's grid card miniature holds. The card renders
@@ -47,6 +48,22 @@ pub struct Document {
     pub updated_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     deleted_at: Option<u64>,
+}
+
+impl Document {
+    fn blank(id: Uuid) -> Self {
+        let now = now_millis();
+        Self {
+            version: SCHEMA_VERSION,
+            id,
+            title: DEFAULT_TITLE.to_owned(),
+            content: String::new(),
+            paper_width: None,
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+        }
+    }
 }
 
 /// The compact shape used by the home page.
@@ -87,6 +104,7 @@ struct SearchExcerpt {
 
 #[derive(Debug)]
 pub enum StoreError {
+    EmptyDraft,
     Io(io::Error),
     Corrupt { path: PathBuf, message: String },
 }
@@ -94,6 +112,7 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::EmptyDraft => write!(f, "empty untitled draft"),
             Self::Io(error) => write!(f, "{error}"),
             Self::Corrupt { path, message } => {
                 write!(f, "{}: {message}", path.display())
@@ -106,7 +125,7 @@ impl std::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::Corrupt { .. } => None,
+            Self::EmptyDraft | Self::Corrupt { .. } => None,
         }
     }
 }
@@ -319,23 +338,21 @@ impl Store {
         self.state.read().await.active_document(id).cloned()
     }
 
+    pub async fn title(&self, id: Uuid) -> Option<String> {
+        self.state
+            .read()
+            .await
+            .active_document(id)
+            .map(|doc| doc.title.clone())
+    }
+
     pub(crate) async fn contains_active(&self, id: Uuid) -> bool {
         self.state.read().await.active_document(id).is_some()
     }
 
     pub async fn create(&self) -> Result<Document, StoreError> {
         let mut state = self.state.write().await;
-        let now = now_millis();
-        let document = Document {
-            version: SCHEMA_VERSION,
-            id: Uuid::new_v4(),
-            title: "Untitled document".to_owned(),
-            content: String::new(),
-            paper_width: None,
-            created_at: now,
-            updated_at: now,
-            deleted_at: None,
-        };
+        let document = Document::blank(Uuid::new_v4());
 
         persist_document(&state.directory, &document).await?;
         state.documents.insert(document.id, document.clone());
@@ -392,44 +409,73 @@ impl Store {
         content: Option<String>,
         paper_width: Option<u32>,
     ) -> Result<Option<Document>, StoreError> {
+        self.save(id, title, content, paper_width, false).await
+    }
+
+    /// A draft already has an id, so a retry of the first save updates the
+    /// same file even if the first response never reached the editor.
+    pub async fn save_draft(
+        &self,
+        id: Uuid,
+        title: Option<String>,
+        content: Option<String>,
+        paper_width: Option<u32>,
+    ) -> Result<Option<Document>, StoreError> {
+        self.save(id, title, content, paper_width, true).await
+    }
+
+    async fn save(
+        &self,
+        id: Uuid,
+        title: Option<String>,
+        content: Option<String>,
+        paper_width: Option<u32>,
+        allow_create: bool,
+    ) -> Result<Option<Document>, StoreError> {
         let mut state = self.state.write().await;
-        let Some(existing) = state.active_document(id).cloned() else {
-            return Ok(None);
+        let (mut document, creating) = match state.documents.get(&id) {
+            Some(document) if document.deleted_at.is_none() => (document.clone(), false),
+            None if allow_create => (Document::blank(id), true),
+            _ => return Ok(None),
         };
 
         let next_title = title
             .map(|value| normalize_title(&value))
-            .unwrap_or_else(|| existing.title.clone());
+            .unwrap_or_else(|| document.title.clone());
         let next_content = content
             .map(|value| sanitize_content(&value))
-            .unwrap_or_else(|| existing.content.clone());
+            .unwrap_or_else(|| document.content.clone());
         let next_paper_width = match paper_width {
             // The browser sends zero when the width snaps back to the default,
             // which removes the stored preference instead of pinning a pixel
             // value that should follow the stylesheet.
             Some(0) => None,
             Some(width) => Some(bounded_paper_width(width)),
-            None => existing.paper_width,
+            None => document.paper_width,
         };
 
-        if next_title == existing.title
-            && next_content == existing.content
-            && next_paper_width == existing.paper_width
-        {
-            return Ok(Some(existing));
+        if creating {
+            if next_title == DEFAULT_TITLE
+                && !next_content.contains("<hr>")
+                && !next_content.contains(" src=\"data:image/")
+                && html_to_text(&next_content).is_empty()
+            {
+                return Err(StoreError::EmptyDraft);
+            }
+        } else {
+            if next_title == document.title
+                && next_content == document.content
+                && next_paper_width == document.paper_width
+            {
+                return Ok(Some(document));
+            }
+            document.updated_at = now_millis().max(document.updated_at.saturating_add(1));
         }
 
-        let updated_at = now_millis().max(existing.updated_at.saturating_add(1));
-        let document = Document {
-            version: SCHEMA_VERSION,
-            id,
-            title: next_title,
-            content: next_content,
-            paper_width: next_paper_width,
-            created_at: existing.created_at,
-            updated_at,
-            deleted_at: None,
-        };
+        document.version = SCHEMA_VERSION;
+        document.title = next_title;
+        document.content = next_content;
+        document.paper_width = next_paper_width;
 
         persist_document(&state.directory, &document).await?;
         state.documents.insert(id, document.clone());
@@ -624,7 +670,7 @@ pub fn normalize_title(raw: &str) -> String {
     let title = title.trim().to_owned();
 
     if title.is_empty() {
-        "Untitled document".to_owned()
+        DEFAULT_TITLE.to_owned()
     } else {
         title
     }
@@ -920,17 +966,8 @@ pub fn html_to_text(html: &str) -> String {
 
 fn is_line_break_tag(tag: &str) -> bool {
     matches!(
-        tag,
-        "br" | "img"
-            | "hr"
-            | "/p"
-            | "/div"
-            | "/h1"
-            | "/h2"
-            | "/h3"
-            | "/li"
-            | "/blockquote"
-            | "/pre"
+        tag.trim_start_matches('/'),
+        "br" | "img" | "hr" | "p" | "div" | "h1" | "h2" | "h3" | "li" | "blockquote" | "pre"
     )
 }
 
@@ -1285,6 +1322,10 @@ mod tests {
             html_to_text("<h1>A title</h1><p>One &amp; two<br>three</p><ul><li>four</li></ul>");
         assert_eq!(text, "A title One & two three four");
         assert_eq!(text.split_whitespace().count(), 7);
+        assert_eq!(
+            html_to_text("<ul><li>Parent<ul><li>Child</li></ul></li></ul>"),
+            "Parent Child"
+        );
     }
 
     #[test]
@@ -1597,6 +1638,51 @@ mod tests {
         );
         assert_eq!(preview_html("<p>open <b>bold"), "<p>open <b>bold</b></p>");
         assert_eq!(preview_html(""), "");
+    }
+
+    #[tokio::test]
+    async fn draft_save_requires_content_and_retries_use_the_same_file() {
+        let directory = temp_directory("draft");
+        let store = Store::load(directory.clone()).await.unwrap();
+        let id = Uuid::new_v4();
+
+        let blank = store
+            .save_draft(
+                id,
+                Some(" Untitled   document ".to_owned()),
+                Some("<p>&nbsp;<br></p><img src=\"https://example.test/image.png\">".to_owned()),
+                Some(1180),
+            )
+            .await;
+        assert!(matches!(blank, Err(StoreError::EmptyDraft)));
+        assert!(store.list().await.is_empty());
+        assert!(document_files(&directory).await.is_empty());
+
+        // Dividers and embedded images both count as content without text.
+        for content in ["<hr>", "<img src=\"data:image/png;base64,AA==\">"] {
+            let draft_id = if content == "<hr>" {
+                id
+            } else {
+                Uuid::new_v4()
+            };
+            let save = || store.save_draft(draft_id, None, Some(content.to_owned()), None);
+            let (first, retry) = tokio::join!(save(), save());
+            let first = first.unwrap().unwrap();
+            let retry = retry.unwrap().unwrap();
+            assert_eq!(first.id, draft_id);
+            assert_eq!(first.content, content);
+            assert_eq!(retry.id, first.id);
+            assert_eq!(retry.updated_at, first.updated_at);
+        }
+        assert_eq!(document_files(&directory).await.len(), 2);
+
+        assert!(store.delete(id).await.unwrap());
+        assert!(store
+            .save_draft(id, Some("Late save".to_owned()), None, None)
+            .await
+            .unwrap()
+            .is_none());
+        fs::remove_dir_all(directory).await.unwrap();
     }
 
     #[tokio::test]
