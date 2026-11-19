@@ -2571,6 +2571,30 @@ test("composition: IME text is inserted once, at the caret", async () => {
   assert(point && point.x > 0, "the caret follows the composed text");
 });
 
+test("composition: clearing the candidate clears its preview before the next update", async () => {
+  await load("<p>ab</p>");
+  editor.collapseTo({ block: 0, offset: 1 });
+  editor.focusEditor();
+  textarea.dispatchEvent(new CompositionEvent("compositionstart"));
+  const preview = () => root.querySelector(".doc-composition")?.textContent || "";
+  const update = (data) => textarea.dispatchEvent(new CompositionEvent("compositionupdate", { data }));
+  update("ni");
+  const first = preview();
+  update("");
+  const cleared = preview();
+  update("hao");
+  const next = preview();
+  const beforeCommit = paintedText(0);
+  textarea.dispatchEvent(new CompositionEvent("compositionend", { data: "好" }));
+  assertEqual(first, "ni", "the first candidate is visible");
+  assertEqual(cleared, "", "erasing the candidate clears the preview immediately");
+  assertEqual(next, "hao", "the new candidate appears in the same session");
+  assertEqual(beforeCommit, "ab", "previews leave the paragraph untouched");
+  assertEqual(paintedText(0), "a好b", "the final candidate is inserted at the caret");
+  key("z", { ctrlKey: true });
+  assertEqual(paintedText(0), "ab", "one undo restores the paragraph");
+});
+
 test("images: typing over a selected image replaces it and undo restores it", async () => {
   await load("<p></p>");
   editor.insertImage({
@@ -3958,6 +3982,46 @@ test("keyboard: shift-left paints the backwards selection", async () => {
   assertClose(rects[0].width, expected.width, 1.5, "the backwards highlight spans the selected text");
 });
 
+test("keyboard: Shift+Up and Shift+Down keep their anchor at the document edges", async () => {
+  for (const [block, firstKey, edgeKey, selected, saved] of [
+    [0, "ArrowLeft", "ArrowUp", "fi", "<p>Xrst</p><p>last</p>"],
+    [1, "ArrowRight", "ArrowDown", "st", "<p>first</p><p>laX</p>"],
+  ]) {
+    await load("<p>first</p><p>last</p>");
+    editor.collapseTo({ block, offset: 2 });
+    key(firstKey, { shiftKey: true });
+    key(edgeKey, { shiftKey: true });
+    key(edgeKey, { shiftKey: true });
+    assertEqual(editor.selectionText(), selected, edgeKey + " keeps the selection at the boundary");
+    typeInput("X");
+    assertEqual(serializeDocument(editor.getDocument()), saved, "typing replaces the selected text");
+    key("z", { ctrlKey: true });
+    assertEqual(editor.selectionText(), selected, "undo restores the selection");
+    assertEqual(editor.getSelection().anchor.offset, 2, "undo restores its direction");
+  }
+});
+
+test("keyboard: replacing a backwards selection across a flag and a paragraph break survives redo", async () => {
+  const flag = "🇵🇹";
+  const original = "<p>Go <b>" + flag + "</b></p><p>home!</p>";
+  await load(original);
+  editor.collapseTo({ block: 1, offset: 1 });
+  for (let step = 0; step < 3; step += 1) {
+    key("ArrowLeft", { shiftKey: true });
+  }
+  assertEqual(editor.selectionText(), flag + "\nh", "three keystrokes select three writing units");
+  typeInput("à");
+  const replacement = "<p>Go <b>à</b>ome!</p>";
+  assertEqual(serializeDocument(editor.getDocument()), replacement, "replacement keeps the selected mark");
+  assertEqual(paintedText(0), "Go àome!", "the joined paragraph is painted");
+  key("z", { ctrlKey: true });
+  assertEqual(serializeDocument(editor.getDocument()), original, "undo restores both paragraphs and their marks");
+  assertEqual(editor.selectionText(), flag + "\nh", "undo restores the original selection");
+  key("z", { ctrlKey: true, shiftKey: true });
+  assertEqual(serializeDocument(editor.getDocument()), replacement, "redo reapplies the replacement");
+  assertEqual(editor.getSelection().focus.offset, 4, "typing can resume after the replacement");
+});
+
 test("writing: trailing spaces at a wrapped line edge stay visible", async () => {
   await load("<p></p>");
   const text =
@@ -4424,6 +4488,31 @@ test("model: editing operations keep text and caret consistent", async () => {
   assertEqual(blockText(editor.getDocument()[0]), "hello there world", "undo restores typing");
   editor.redo();
   assertEqual(blockText(editor.getDocument()[0]), "hello ther world", "redo restores deletion");
+});
+
+test("virtual keyboard: Return, deletion, and IME update the painted document without keydown", async () => {
+  await load("<h2>Title🇵🇹!</h2>");
+  editor.collapseTo({ block: 0, offset: 5 });
+  editor.focusEditor();
+  const dispatch = (type, inputType, options = {}) =>
+    textarea.dispatchEvent(new InputEvent(type, { bubbles: true, inputType, ...options }));
+
+  assert(!dispatch("beforeinput", "insertLineBreak", { cancelable: true }), "the editor handles Return");
+  assertEqual(serializeDocument(editor.getDocument()), "<h2>Title</h2><p>🇵🇹!</p>", "Return ends the heading");
+  dispatch("beforeinput", "deleteContentForward", { cancelable: false });
+  dispatch("input", "deleteContentForward");
+  assertEqual(paintedText(1), "!", "the noncancelable deletion removes one whole flag");
+
+  textarea.dispatchEvent(new CompositionEvent("compositionstart"));
+  textarea.value = "語";
+  dispatch("input", "insertCompositionText", { isComposing: true, data: "語" });
+  assert(dispatch("beforeinput", "deleteContentBackward", { cancelable: true, isComposing: true }),
+    "the IME handles its own candidate deletion");
+  assertEqual(paintedText(1), "!", "the uncommitted candidate leaves the draft alone");
+  textarea.dispatchEvent(new CompositionEvent("compositionend", { data: "語" }));
+  assertEqual(paintedText(1), "語!", "the final candidate is painted once");
+  dispatch("beforeinput", "historyUndo", { cancelable: true });
+  assertEqual(paintedText(1), "!", "native undo removes only the committed candidate");
 });
 
 /* --------------------------------------------------------------------------

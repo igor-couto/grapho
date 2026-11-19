@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { selectionHtml } from "../assets/doc/clipboard.js";
-import { DocEditor } from "../assets/doc/input.js";
+import { editorWith, paragraph } from "./editor-fixture.mjs";
 import { richToSource, sourceToRich } from "../assets/doc/markdown.js";
 import { blockText, createBlock, findSearchPassage, serializeDocument } from "../assets/doc/model.js";
 
@@ -37,19 +37,6 @@ function image(alt) {
     type: "image", alt, mode: "block", width: 1, height: 1,
     src: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
   };
-}
-
-function editorWith(blocks) {
-  const editor = new DocEditor({ root: { querySelector: () => null }, textarea: {} });
-  editor.relayout = () => {};
-  editor.sync = () => {};
-  editor.view.scrollCaretIntoView = () => {};
-  editor.setDocument(blocks);
-  return editor;
-}
-
-function paragraph(text) {
-  return createBlock("p", [{ text }]);
 }
 
 function editorWithImages() {
@@ -450,4 +437,84 @@ test("a bold shortcut on selected code leaves a previous text edit available to 
   assert.equal(serializeDocument(editor.getDocument()), "<p>A</p><pre>fn</pre>");
   editor.handleKeyDown({ key: "y", ctrlKey: true, preventDefault() {} });
   assert.equal(serializeDocument(editor.getDocument()), "<p>AB</p><pre>fn</pre>");
+});
+
+for (const mode of ["prose", "code", "Markdown"]) {
+  test(mode + ": undo separates a plain-text paste from the typing on either side", (t) => {
+    t.mock.method(Date, "now", () => 1000);
+    const initial = mode === "code" ? createBlock("code", []) : paragraph("");
+    if (mode === "Markdown") initial.source = true;
+    const editor = editorWith([initial]);
+    editor.setSourceMode(mode === "Markdown");
+    const texts = () => editor.getDocument().map(blockText);
+    const type = (value) => {
+      editor.textarea.value = value;
+      editor.handleInput();
+    };
+
+    type("A");
+    const clipboard = clipboardEvent();
+    clipboard.clipboardData.setData("text/plain", "B\r\nC");
+    editor.handlePaste(clipboard);
+    type("D");
+    const pasted = mode === "code" ? ["AB\nC"] : ["AB", "C"];
+    const finished = mode === "code" ? ["AB\nCD"] : ["AB", "CD"];
+    assert.deepEqual(texts(), finished);
+    for (const expected of [pasted, ["A"], [""]]) {
+      editor.undo();
+      assert.deepEqual(texts(), expected);
+    }
+    for (const expected of [["A"], pasted, finished]) {
+      editor.redo();
+      assert.deepEqual(texts(), expected);
+    }
+  });
+}
+
+test("undo groups rapid keystrokes, splits after a pause, and drops redo after a new edit", (t) => {
+  let now = 1000;
+  t.mock.method(Date, "now", () => now);
+  const editor = editorWith([paragraph("")]);
+  const type = (value) => {
+    editor.textarea.value = value;
+    editor.handleInput();
+  };
+  for (const character of "draft") {
+    type(character);
+    now += 50;
+  }
+  now += 2000;
+  for (const character of " one") type(character);
+  editor.undo();
+  assert.equal(blockText(editor.getDocument()[0]), "draft");
+  assert.deepEqual(editor.getSelection().focus, { block: 0, offset: 5 });
+  editor.undo();
+  assert.equal(blockText(editor.getDocument()[0]), "");
+  editor.redo();
+  type(" two");
+  editor.redo();
+  assert.equal(blockText(editor.getDocument()[0]), "draft two");
+});
+
+test("a thousand-line paste inside styled prose preserves blank paragraphs, the suffix, and undo", () => {
+  const editor = editorWith([createBlock("p", [{ text: "Intro: " }, { text: "End", i: true }])]);
+  editor.collapseTo({ block: 0, offset: 7 });
+  const before = editor.getDocument();
+  const lines = Array.from({ length: 1000 }, (_, i) => i % 10 === 0 ? "" : "Linha " + i + " café");
+  lines.push("");
+  const clipboard = clipboardEvent();
+  clipboard.clipboardData.setData("text/plain", lines.join("\r\n"));
+  editor.handlePaste(clipboard);
+  const expected = lines.slice();
+  expected[0] = "Intro: ";
+  expected[expected.length - 1] = "End";
+  const after = editor.getDocument();
+  assert.deepEqual(after.map(blockText), expected);
+  assert.equal(serializeDocument([after.at(-1)]), "<p><i>End</i></p>");
+  assert.deepEqual(editor.getSelection().focus, { block: 1000, offset: 0 });
+  editor.undo();
+  assert.deepEqual(editor.getDocument(), before);
+  assert.deepEqual(editor.getSelection().focus, { block: 0, offset: 7 });
+  editor.redo();
+  assert.deepEqual(editor.getDocument(), after);
 });

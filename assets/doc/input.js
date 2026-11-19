@@ -122,7 +122,14 @@ export class DocEditor {
     this.bound = true;
 
     this.textarea.addEventListener("keydown", (event) => this.handleKeyDown(event));
-    this.textarea.addEventListener("input", () => this.handleInput());
+    this.textarea.addEventListener("beforeinput", (event) => {
+      // A virtual keyboard can send an editing command without a keydown.
+      // In particular, deleting from our empty textarea may never fire input.
+      if (event.cancelable && !this.composing && !event.isComposing && this.applyInputCommand(event.inputType)) {
+        event.preventDefault();
+      }
+    });
+    this.textarea.addEventListener("input", (event) => this.handleInput(event));
     this.textarea.addEventListener("compositionstart", () => this.handleCompositionStart());
     this.textarea.addEventListener("compositionupdate", (event) => this.handleCompositionUpdate(event));
     this.textarea.addEventListener("compositionend", (event) => this.handleCompositionEnd(event));
@@ -322,16 +329,7 @@ export class DocEditor {
   }
 
   activeMarks() {
-    if (this.pendingMarks) {
-      return this.pendingMarks;
-    }
-    if (!this.isCollapsed()) {
-      const { from } = this.normalized();
-      const block = this.blocks[from.block];
-      return block && !isAtomicBlock(block) ? marksAt(block, from.offset) : {};
-    }
-    const block = this.blocks[this.focus.block];
-    return block && !isAtomicBlock(block) ? marksAt(block, this.focus.offset) : {};
+    return this.pendingMarks || this.marksForTyping();
   }
 
   activeBlockType() {
@@ -452,7 +450,7 @@ export class DocEditor {
     if (settings.undo !== false) {
       const coalesce = settings.coalesce && this.typing && Date.now() - this.typing.time < TYPING_COALESCE_MS;
       if (!coalesce) {
-        this.recordUndo({ blocks: this.blocks, anchor: this.anchor, focus: this.focus });
+        this.recordUndo(this.historySnapshot());
       }
     }
 
@@ -467,7 +465,7 @@ export class DocEditor {
       this.typing = null;
     }
     if (settings.keepMarks !== true) {
-      this.pendingMarks = null;
+      this.pendingMarks = settings.pendingMarks || null;
       this.pendingSourceMarks = null;
     }
 
@@ -487,21 +485,17 @@ export class DocEditor {
     this.redoStack = [];
   }
 
+  historySnapshot() {
+    return { blocks: this.blocks, anchor: this.anchor, focus: this.focus, pendingMarks: this.pendingMarks };
+  }
+
   undo() {
     const previous = this.undoStack.pop();
     if (!previous) {
       return;
     }
-    this.redoStack.push({ blocks: this.blocks, anchor: this.anchor, focus: this.focus });
-    this.blocks = previous.blocks;
-    this.anchor = { ...previous.anchor };
-    this.focus = { ...previous.focus };
-    this.typing = null;
-    this.pendingSourceMarks = null;
-    this.lineHint = null;
-    this.relayout();
-    this.sync();
-    this.emitChange();
+    this.redoStack.push(this.historySnapshot());
+    this.restoreHistorySnapshot(previous);
   }
 
   redo() {
@@ -509,11 +503,16 @@ export class DocEditor {
     if (!next) {
       return;
     }
-    this.undoStack.push({ blocks: this.blocks, anchor: this.anchor, focus: this.focus });
-    this.blocks = next.blocks;
-    this.anchor = { ...next.anchor };
-    this.focus = { ...next.focus };
+    this.undoStack.push(this.historySnapshot());
+    this.restoreHistorySnapshot(next);
+  }
+
+  restoreHistorySnapshot(snapshot) {
+    this.blocks = snapshot.blocks;
+    this.anchor = { ...snapshot.anchor };
+    this.focus = { ...snapshot.focus };
     this.typing = null;
+    this.pendingMarks = snapshot.pendingMarks || null;
     this.pendingSourceMarks = null;
     this.lineHint = null;
     this.relayout();
@@ -594,7 +593,7 @@ export class DocEditor {
     return true;
   }
 
-  insertText(text, overrideMarks) {
+  insertText(text, overrideMarks, { coalesce = true } = {}) {
     if (!text) {
       return;
     }
@@ -613,7 +612,7 @@ export class DocEditor {
           : null;
       if (wrapped && wrapped.text) {
         const blockIndex = this.focus.block;
-        this.insertText(wrapped.text);
+        this.insertText(wrapped.text, undefined, { coalesce });
         if (this.focus.block === blockIndex) {
           const caret = Math.max(0, this.focus.offset - wrapped.closingLength);
           this.setSelection({ block: blockIndex, offset: caret }, { block: blockIndex, offset: caret }, {
@@ -652,7 +651,7 @@ export class DocEditor {
       if (deletion) {
         this.typing = null;
       }
-      this.commit(next, caret, caret, { coalesce: true, keepMarks: true });
+      this.commit(next, caret, caret, { coalesce, keepMarks: true });
       return;
     }
 
@@ -678,7 +677,7 @@ export class DocEditor {
     if (deletion) {
       this.typing = null;
     }
-    this.commit(blocks, caret, caret, { coalesce: true, keepMarks: true });
+    this.commit(blocks, caret, caret, { coalesce, keepMarks: true });
   }
 
   // Insert block content from a rich clipboard. A single pasted paragraph joins
@@ -691,7 +690,7 @@ export class DocEditor {
       return;
     }
     if (this.sourceMode) {
-      this.insertText(pastedPlainText(pasted));
+      this.insertText(pastedPlainText(pasted), undefined, { coalesce: false });
       return;
     }
 
@@ -1385,9 +1384,8 @@ export class DocEditor {
         const marks = this.pendingMarks || this.marksForTyping();
         const runs = insertRuns(block, from.offset, label, { ...marks, href });
         const caret = { block: from.block, offset: from.offset + label.length };
-        this.pendingMarks = { ...marks, href: "" };
         this.commit(this.replaceBlock(from.block, { ...block, id: createBlockId(), runs }), caret, caret, {
-          keepMarks: true,
+          pendingMarks: { ...marks, href: "" },
         });
         return true;
       }
@@ -1733,20 +1731,13 @@ export class DocEditor {
       }
     }
 
-    if (!targetLine) {
-      this.lineHint = null;
-      if (direction < 0) {
-        this.collapseTo({ block: 0, offset: 0 });
-      } else {
-        const last = this.blocks.length - 1;
-        this.collapseTo({ block: last, offset: blockLength(this.blocks[last]) });
-      }
-      this.afterMove();
-      return;
+    let next;
+    if (targetLine) {
+      next = { block: targetEntry.index, offset: pointToOffset(targetEntry, x, targetLine.y + 1) };
+    } else {
+      const last = this.blocks.length - 1;
+      next = direction < 0 ? { block: 0, offset: 0 } : { block: last, offset: blockLength(this.blocks[last]) };
     }
-
-    const offset = pointToOffset(targetEntry, x, targetLine.y + 1);
-    const next = { block: targetEntry.index, offset };
     // The offset at a soft wrap belongs to both lines; this move chose the
     // target line, so keep the caret there.
     this.lineHint = targetLine;
@@ -1927,13 +1918,42 @@ export class DocEditor {
      Input events
      --------------------------------------------------------------------- */
 
-  handleInput() {
-    if (this.composing) {
+  applyInputCommand(inputType) {
+    switch (inputType) {
+      case "deleteContentBackward":
+        this.backspace();
+        break;
+      case "deleteContentForward":
+        this.deleteForward();
+        break;
+      case "deleteWordBackward":
+        this.deleteWordBackward();
+        break;
+      // A textarea reports its ordinary Return as insertLineBreak. Only
+      // Shift+Enter requests a hard break, handled by the keydown listener.
+      case "insertLineBreak":
+      case "insertParagraph":
+        this.insertParagraph();
+        break;
+      case "historyUndo":
+        this.undo();
+        break;
+      case "historyRedo":
+        this.redo();
+        break;
+      default:
+        return false;
+    }
+    return true;
+  }
+
+  handleInput(event) {
+    if (this.composing || event?.isComposing) {
       return;
     }
     const value = this.textarea.value;
     this.textarea.value = "";
-    if (!value) {
+    if (this.applyInputCommand(event?.inputType) || !value) {
       return;
     }
     if (this.applyMarkdownShortcut(value)) {
@@ -1952,7 +1972,7 @@ export class DocEditor {
 
   handleCompositionUpdate(event) {
     const point = this.caretGeometry();
-    if (point && event.data) {
+    if (point) {
       this.view.setComposition(point, event.data);
     }
   }
@@ -2012,7 +2032,7 @@ export class DocEditor {
     const text = clipboard.getData("text/plain");
     if (text) {
       event.preventDefault();
-      this.insertText(text);
+      this.insertText(text, undefined, { coalesce: false });
     }
   }
 
@@ -2753,10 +2773,7 @@ function stepWord(blocks, position, direction) {
 // punctuation between words instead of stopping on every segment edge.
 function wordStarts(text) {
   const starts = [];
-  if (!ensureWordSegmenter()) {
-    return starts;
-  }
-  for (const part of wordSegmenter.segment(text)) {
+  for (const part of wordSegments(text)) {
     if (part.isWordLike) {
       starts.push(part.index);
     }
@@ -2799,12 +2816,31 @@ function ensureWordSegmenter() {
   return wordSegmenter;
 }
 
-function wordBoundaries(text) {
-  if (!ensureWordSegmenter()) {
-    return graphemeBoundaries(text);
+function wordSegments(text) {
+  if (ensureWordSegmenter()) {
+    return wordSegmenter.segment(text);
   }
+  // Without dictionary segmentation, group consecutive letters and numbers
+  // into words. Classify whole graphemes so an accent or emoji stays intact.
+  const points = graphemeBoundaries(text);
+  const segments = [];
+  for (let i = 1; i < points.length; i += 1) {
+    const index = points[i - 1];
+    const segment = text.slice(index, points[i]);
+    const isWordLike = /[\p{L}\p{N}\p{Pc}]/u.test(segment);
+    const previous = segments.at(-1);
+    if (isWordLike && previous?.isWordLike) {
+      previous.segment += segment;
+    } else {
+      segments.push({ index, segment, isWordLike });
+    }
+  }
+  return segments;
+}
+
+function wordBoundaries(text) {
   const points = [0];
-  for (const part of wordSegmenter.segment(text)) {
+  for (const part of wordSegments(text)) {
     points.push(part.index + part.segment.length);
   }
   return points;

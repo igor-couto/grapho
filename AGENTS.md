@@ -263,8 +263,9 @@ its own; `menu.js` and `app.css` do the work. The home, editor, and page menus
 link to it, so update it when a key handler changes.
 
 Every page except the password gate loads `assets/quick-open.js`. `Ctrl+O` opens
-the centered Open by title palette. The script reads `/api/documents` when
-the palette opens, so there is no background refresh and no request per
+the Open by title palette near the top of the viewport. Results expand below
+the search field and scroll when space runs out. The script reads `/api/documents`
+when the palette opens, so there is no background refresh and no request per
 keystroke, and it filters titles locally. Enter opens the highlighted document,
 Shift+Enter opens it in a new tab and switches there, and Escape or a backdrop
 click closes the palette. The new-tab action follows a hidden
@@ -774,7 +775,7 @@ browser. These tests need Node 22+ and a local Chrome or Chromium, but no npm
 packages:
 
 ```bash
-node --test test/editing-regressions.mjs  # selection replacement and saved document structure
+node --test test/editing-regressions.mjs "test/*.test.mjs"  # writing, selection, Unicode, undo and redo
 node test/run.mjs          # editor geometry, typing, Markdown source, undo, PDF
 node test/app-check.mjs    # real server: sanitizer, save, mouse, reload
 ```

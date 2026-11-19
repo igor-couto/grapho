@@ -4099,6 +4099,21 @@ async function main() {
     // Ctrl+O searches the library from any page except the password gate. It
     // lists the real documents, filters as you type, and opens the selected
     // one in this tab or in another one.
+    function paletteBounds() {
+      return evaluate(cdp, `(() => {
+        const dialog = document.querySelector("dialog.quick-open[open]").getBoundingClientRect();
+        const input = document.getElementById("quickOpenInput").getBoundingClientRect();
+        return { inputTop: input.top, bottom: dialog.bottom };
+      })()`);
+    }
+
+    const noPaletteMatches = `(() => {
+      const message = document.getElementById("quickOpenMessage");
+      return Boolean(
+        message && !message.hidden && message.textContent.includes("No matching titles"),
+      );
+    })()`;
+
     const paletteDocuments = await evaluate(
       cdp,
       `(async () => {
@@ -4226,6 +4241,7 @@ async function main() {
       JSON.stringify({ hintsAtOpen, hintsAfterTimeout }),
     );
 
+    const fullPaletteBounds = await paletteBounds();
     await cdp.send("Input.insertText", { text: "palette" });
     const filteredPalette = await waitForExpression(
       cdp,
@@ -4251,20 +4267,19 @@ async function main() {
       JSON.stringify(filteredSnapshot),
     );
 
+    const filteredPaletteBounds = await paletteBounds();
     await cdp.send("Input.insertText", { text: "zzzz" });
-    const emptyPalette = await waitForExpression(
-      cdp,
-      `(() => {
-        const message = document.getElementById("quickOpenMessage");
-        return Boolean(
-          message &&
-          !message.hidden &&
-          message.textContent.includes("No matching titles"),
-        );
-      })()`,
-      5000,
-    );
+    const emptyPalette = await waitForExpression(cdp, noPaletteMatches, 5000);
     check("a search with no title match says so", emptyPalette);
+    const emptyPaletteBounds = await paletteBounds();
+    check(
+      "filtering changes the palette height below the search field",
+      Math.abs(fullPaletteBounds.inputTop - filteredPaletteBounds.inputTop) < 0.5 &&
+        Math.abs(fullPaletteBounds.inputTop - emptyPaletteBounds.inputTop) < 0.5 &&
+        fullPaletteBounds.bottom > filteredPaletteBounds.bottom &&
+        filteredPaletteBounds.bottom > emptyPaletteBounds.bottom,
+      JSON.stringify({ fullPaletteBounds, filteredPaletteBounds, emptyPaletteBounds }),
+    );
 
     await evaluate(
       cdp,
@@ -4566,7 +4581,8 @@ async function main() {
     await pressKey("o", "KeyO", 79, 2);
     await waitForExpression(
       cdp,
-      `Boolean(document.querySelector("dialog.quick-open[open]"))`,
+      `document.querySelector("dialog.quick-open[open]")?.getAnimations().length === 0 &&
+        document.querySelectorAll(".quick-open-option").length >= 2`,
       PAGE_TIMEOUT_MS,
     );
     const paletteMobile = await evaluate(
@@ -4588,6 +4604,24 @@ async function main() {
         paletteMobile.right <= paletteMobile.innerWidth + 1 &&
         paletteMobile.scrollWidth <= paletteMobile.innerWidth + 1,
       JSON.stringify(paletteMobile),
+    );
+    await cdp.send("Input.insertText", { text: "palettezzzz" });
+    const mobileNoMatches = await waitForExpression(cdp, noPaletteMatches, 5000);
+    const mobileEmptyBounds = await paletteBounds();
+    await evaluate(cdp, `document.getElementById("quickOpenInput").select()`);
+    await pressKey("Backspace", "Backspace", 8, 0);
+    const mobileMatches = await waitForExpression(
+      cdp,
+      `document.querySelectorAll(".quick-open-option").length >= 2`,
+      5000,
+    );
+    const mobileFullBounds = await paletteBounds();
+    check(
+      "clearing the search expands the palette downward on a 390px viewport",
+      mobileNoMatches && mobileMatches &&
+        Math.abs(mobileEmptyBounds.inputTop - mobileFullBounds.inputTop) < 0.5 &&
+        mobileFullBounds.bottom > mobileEmptyBounds.bottom,
+      JSON.stringify({ mobileEmptyBounds, mobileFullBounds }),
     );
     await pressKey("Escape", "Escape", 27, 0);
     await cdp.send("Emulation.clearDeviceMetricsOverride");

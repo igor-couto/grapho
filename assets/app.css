@@ -1769,9 +1769,12 @@ html[data-theme="dark"] .toast.is-error {
 /* The palette is shared by every page, so it borrows the modal's surface,
    backdrop, and shadow rather than starting a second overlay style. */
 .quick-open {
+  --quick-open-top: clamp(16px, 14dvh, 120px);
+
+  inset: var(--quick-open-top) 0 auto;
   width: min(600px, calc(100vw - 32px));
-  max-height: min(560px, calc(100vh - 48px));
-  margin: auto;
+  max-height: min(560px, calc(100dvh - var(--quick-open-top) - 16px));
+  margin: 0 auto;
   padding: 0;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -1779,6 +1782,7 @@ html[data-theme="dark"] .toast.is-error {
   background: var(--surface-raised);
   color: var(--ink);
   box-shadow: var(--shadow-overlay);
+  transform-origin: top center;
 }
 
 .quick-open::backdrop {
@@ -1938,7 +1942,7 @@ html[data-theme="dark"] .toast.is-error {
   align-items: center;
   gap: 10px;
   /* The hints fade away after a few seconds (quick-open.js sets the timer) but
-     keep their space, so the footer and the centred palette never jump. */
+     keep their space, so the footer keeps its height. */
   opacity: 1;
   transform: translateY(0);
   transition: opacity 240ms ease, transform 240ms ease, visibility 0s linear;

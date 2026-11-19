@@ -12,6 +12,7 @@ import {
   materializeLineRange,
 } from "../pretext/layout.js";
 import { getGraphemeEnds } from "../pretext/line-text.js";
+import { findGraphemeEnds } from "../pretext/graphemes.js";
 import { blockAlignment, blockIndent, blockText, isAtomicBlock } from "./model.js";
 
 // These stacks must match --font-reading and --font-mono in app.css: Canvas
@@ -1232,9 +1233,10 @@ export function graphemeBoundaries(text) {
   }
   if (!segmenter) {
     const points = [];
-    for (let index = 0; index <= text.length; index += 1) {
-      points.push(index);
-    }
+    // Pretext already ships Unicode character-break tables. Use the full
+    // table here so caret movement can also reach nonprinting characters.
+    findGraphemeEnds("chromium/char", text, 0, text.length, points);
+    points.unshift(0);
     return points;
   }
   const points = [0];

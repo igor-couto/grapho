@@ -62,6 +62,12 @@ function startServer() {
     try {
       const url = new URL(request.url, "http://127.0.0.1");
       let pathname = decodeURIComponent(url.pathname);
+      // The autosave tests open the real editor as a new draft, just as the app does.
+      if (/^\/doc\/new\/[0-9a-f-]{36}$/.test(pathname)) {
+        pathname = "/assets/editor.html";
+      } else if (pathname === "/shortcuts") {
+        pathname = "/assets/shortcuts.html";
+      }
       if (pathname.endsWith("/")) {
         pathname += "index.html";
       }
