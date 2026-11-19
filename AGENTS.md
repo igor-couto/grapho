@@ -159,11 +159,13 @@ works like any other folder. Adding one seeds the whole library through the
 worker, then each create, update, delete, or restore queues a job. `backup.rs`
 reads the latest state per changed id, writes active documents and removes
 copies of deleted ones. It collapses a burst of saves into one write per
-document and records the last failure per
-connector for the page to show. Copies never run on the request path, so a slow
-share cannot slow a save; on shutdown `BackupMirror::flush` gives queued copies a
-few seconds. Removing a connector stops mirroring and leaves the files already
-there alone.
+document and records the last failure per connector for the page to show.
+Failed batches keep their document IDs in `backup-retries.json` beside the
+settings. The next document change retries each affected connector from the
+current store state, including after a restart. Copies run off the request path,
+so a slow share cannot slow a save. On shutdown `BackupMirror::flush` gives
+queued copies a few seconds. Removing a connector stops mirroring and leaves
+the files already there alone.
 
 SSH connectors go through `sftp.rs`: Grapho runs the system OpenSSH `sftp` client
 in batch mode, one invocation per connector per batch. Nothing links an SSH
@@ -410,7 +412,9 @@ hidden while the ghost stands in.
 - A code line carries a synthetic fragment and its own offset range, so the same
   caret, click, and selection code works in `<pre>` blocks. Trailing spaces at a
   line end are painted for the caret but left out of alignment, as the browser
-  hangs them; the stored HTML escapes text before writing line feeds as `<br>`.
+  hangs them. Rich text uses `<br>` for hard breaks. Code blocks keep literal
+  newlines, with the first one wrapped in a `<span>` when it begins the block
+  so HTML parsers preserve it through saving, loading, and pasting.
 - The hidden `<textarea>` only captures keystrokes, IME, and clipboard events; its
   value is cleared after every event.
 - A modal dialog that closes has to leave the editor able to take typing again.
@@ -770,6 +774,7 @@ browser. These tests need Node 22+ and a local Chrome or Chromium, but no npm
 packages:
 
 ```bash
+node --test test/editing-regressions.mjs  # selection replacement and saved document structure
 node test/run.mjs          # editor geometry, typing, Markdown source, undo, PDF
 node test/app-check.mjs    # real server: sanitizer, save, mouse, reload
 ```

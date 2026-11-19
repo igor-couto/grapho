@@ -215,9 +215,12 @@ deletions remove them, and restores copy the documents again. Use a local
 folder, a mounted network share, or a Google
 Drive, OneDrive, or Dropbox folder that its desktop app keeps in sync. Copies run
 in the background, so a slow share never delays a save (a copy still queued when
-Grapho stops gets a few seconds to finish). Removing a backup stops the mirroring
-and leaves the files already in that folder alone. A backup folder that is the
-data folder, sits inside it, or holds another library's documents is refused.
+Grapho stops gets a few seconds to finish). After a failed copy, the next document
+change retries missed writes and deletions, even after a restart. Removing a
+backup stops the mirroring and leaves the files already in that folder alone.
+Keep the data folder and backup folders separate when adding a backup or moving
+the library. Neither can contain the other. A backup folder holding another
+library's documents is refused.
 
 For a second machine, add an SSH server instead. Grapho copies over SFTP using
 your OpenSSH `sftp` client, so the keys, agent, and known_hosts you already use

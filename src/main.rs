@@ -105,11 +105,21 @@ async fn run() -> Result<(), BoxError> {
             .map_err(|error| format!("could not open {}: {error}", config.data_dir.display()))?,
     );
 
-    let secrets_path =
-        settings::path().and_then(|file| file.parent().map(|folder| folder.join("secrets.json")));
+    let settings_file = settings::path();
+    let secrets_path = settings_file
+        .as_ref()
+        .map(|file| file.with_file_name("secrets.json"));
     let secrets = Arc::new(secrets::Secrets::load(secrets_path));
     let drive = Arc::new(drive::Drive::new());
-    let backups = BackupMirror::start(store.clone(), saved.backups, drive.clone(), secrets.clone());
+    let backups = BackupMirror::start(
+        store.clone(),
+        saved.backups,
+        drive.clone(),
+        secrets.clone(),
+        settings_file
+            .as_ref()
+            .map(|file| file.with_file_name("backup-retries.json")),
+    );
 
     let has_password = config.auth.is_some();
     let app = api::router(
@@ -117,7 +127,7 @@ async fn run() -> Result<(), BoxError> {
         config.auth.map(Arc::new),
         api::ServerOptions {
             data_dir_source: config.data_dir_source,
-            settings_file: settings::path(),
+            settings_file,
             backups: backups.clone(),
             drive,
             secrets,

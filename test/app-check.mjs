@@ -3718,11 +3718,14 @@ async function main() {
     // real paste event on the editor's hidden textarea so the event binding, the
     // clipboard reducer, the sanitizer, the debounced save, and a reload all run
     // end to end, then check the stored HTML and what the reload paints.
+    const pastedList = "<ul><li>one<ol><li>child</li></ol></li><li>Two <b>bold</b></li></ul>";
+    const codeText = "\n\nreturn 42;";
     const pasteHtml =
       "<h2>Pasted heading</h2>" +
-      "<ul><li>one</li><li>Two <b>bold</b></li></ul>" +
+      pastedList +
+      "<pre><code>" + codeText + "</code></pre>" +
       '<p>a <span style="font-style:italic">slanted</span> word</p>';
-    const pasteText = "Pasted heading\none\nTwo bold\na slanted word";
+    const pasteText = "Pasted heading\none\nchild\nTwo bold\n" + codeText + "\na slanted word";
     let pasteDocumentId = null;
     try {
       pasteDocumentId = await evaluate(
@@ -3787,7 +3790,7 @@ async function main() {
       check(
         "the rich paste is saved as the document's semantic HTML",
         pastedContent.includes("<h2>Pasted heading</h2>") &&
-          pastedContent.includes("<ul><li>one</li><li>Two <b>bold</b></li></ul>"),
+          pastedContent.includes(pastedList),
         pastedContent,
       );
       check(
@@ -3796,8 +3799,8 @@ async function main() {
         pastedContent,
       );
       check(
-        "the paste drops the span wrapper and its style before saving",
-        !pastedContent.includes("style=") && !pastedContent.includes("<span"),
+        "the pasted italic paragraph keeps only its semantic italic mark",
+        pastedContent.includes("<p>a <i>slanted</i> word</p>") && !pastedContent.includes("style="),
         pastedContent,
       );
 
@@ -3808,15 +3811,18 @@ async function main() {
       const pastedTexts = pastedBlocks.map((block) => block.text);
       equal("a reload paints the pasted heading first", pastedTexts[0], "Pasted heading");
       check(
-        "a reload paints the pasted list items with bullets",
-        pastedBlocks.length === 4 &&
+        "a reload paints the numbered child between its bulleted parent and the next bullet",
+        pastedBlocks.length === 6 &&
           pastedBlocks[1].marker === "\u2022" &&
-          pastedBlocks[2].marker === "\u2022" &&
+          pastedBlocks[2].marker === "1." &&
+          pastedBlocks[3].marker === "\u2022" &&
           pastedTexts[1] === "one" &&
-          pastedTexts[2] === "Two bold",
+          pastedTexts[2] === "child" &&
+          pastedTexts[3] === "Two bold",
         JSON.stringify(pastedBlocks),
       );
-      equal("a reload paints the pasted italic paragraph last", pastedTexts[3], "a slanted word");
+      equal("a reload keeps both leading blank lines in the pasted code", pastedTexts[4], codeText);
+      equal("a reload paints the pasted italic paragraph last", pastedTexts[5], "a slanted word");
     } finally {
       if (pasteDocumentId) {
         await evaluate(

@@ -671,9 +671,8 @@ export function serializeDocument(blocks) {
   while (index < blocks.length) {
     const block = blocks[index];
     if (block.type === "list") {
-      const ordered = Boolean(block.ordered);
       const items = [];
-      while (index < blocks.length && blocks[index].type === "list" && Boolean(blocks[index].ordered) === ordered) {
+      while (index < blocks.length && blocks[index].type === "list") {
         items.push(blocks[index]);
         index += 1;
       }
@@ -682,7 +681,7 @@ export function serializeDocument(blocks) {
       // first item was indented). Normalize the depths into a tree that HTML
       // can represent so no item is lost and serialization always advances.
       const normalized = normalizeListDepths(items);
-      html += serializeList(normalized, 0, 0, ordered).html;
+      html += serializeList(normalized, 0, 0).html;
       continue;
     }
     html += serializeBlock(block);
@@ -693,33 +692,37 @@ export function serializeDocument(blocks) {
 }
 
 function normalizeListDepths(items) {
-  let depth = 0;
-  return items.map((item, index) => {
-    const raw = Math.max(0, Math.min(6, Math.floor(Number(item.depth) || 0)));
-    depth = index === 0 ? 0 : Math.min(raw, depth + 1);
+  // Only shallower items still in scope can be parents. This also rebases a
+  // clipboard selection that starts inside a nested list.
+  const ancestors = [];
+  return items.map((item) => {
+    const raw = Math.max(0, Math.min(LIST_DEPTH_LIMIT, Math.floor(Number(item.depth) || 0)));
+    while (ancestors.length && ancestors[ancestors.length - 1] >= raw) {
+      ancestors.pop();
+    }
+    const depth = ancestors.length;
+    ancestors.push(raw);
     return depth === item.depth ? item : { ...item, depth };
   });
 }
 
-function serializeList(items, startIndex, depth, ordered) {
-  const tag = ordered ? "ol" : "ul";
-  let html = "<" + tag + ">";
+function serializeList(items, startIndex, depth) {
+  let tag = "";
+  let html = "";
   let index = startIndex;
 
-  while (index < items.length) {
-    const item = items[index];
-    if (item.depth !== depth) {
-      break;
+  while (index < items.length && items[index].depth === depth) {
+    const item = items[index++];
+    const nextTag = item.ordered ? "ol" : "ul";
+    if (nextTag !== tag) {
+      if (tag) html += "</" + tag + ">";
+      tag = nextTag;
+      html += "<" + tag + ">";
     }
-    index += 1;
     html += "<li" + blockAttributes(item) + ">" + serializeRuns(item.runs, { allowBreaks: true });
-    while (index < items.length && items[index].depth > depth) {
-      const nested = serializeList(items, index, depth + 1, ordered);
+    if (index < items.length && items[index].depth > depth) {
+      const nested = serializeList(items, index, depth + 1);
       html += nested.html;
-      if (nested.next <= index) {
-        // Defensive: a malformed depth must never trap serialization here.
-        break;
-      }
       index = nested.next;
     }
     html += "</li>";
@@ -765,7 +768,7 @@ function serializeBlock(block) {
     );
   }
   if (block.type === "code") {
-    return "<pre>" + escapeText(blockText(block)) + "</pre>";
+    return serializeCodeBlock(blockText(block));
   }
 
   const inner = serializeRuns(block.runs, { allowBreaks: true });
@@ -781,6 +784,13 @@ function serializeBlock(block) {
     return "<" + tag + "><li" + attributes + ">" + inner + "</li></" + tag + ">";
   }
   return "<p" + attributes + ">" + inner + "</p>";
+}
+
+export function serializeCodeBlock(text) {
+  // An HTML parser consumes a newline immediately after <pre>. Put the first
+  // newline inside a span so parsing, copying, and exporting keep the text.
+  const content = escapeText(text).replace(/^\n/, "<span>\n</span>");
+  return "<pre>" + content + "</pre>";
 }
 
 function blockAttributes(block) {

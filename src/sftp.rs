@@ -113,7 +113,7 @@ pub fn remove(remote: &str) -> String {
 }
 
 pub fn list(dir: &str) -> String {
-    format!("-ls -1 {}\n", quote(dir))
+    format!("ls -1 {}\n", quote(dir))
 }
 
 /// Document names in an `ls -1` listing. The batch echo lines and anything else
@@ -121,7 +121,11 @@ pub fn list(dir: &str) -> String {
 pub fn parse_listing(output: &str) -> Vec<Uuid> {
     output
         .lines()
-        .filter_map(|line| store::document_file_id(Path::new(line.trim())))
+        .map(str::trim)
+        // OpenSSH lists absolute paths or bare names. Ignore command output
+        // such as "Removing /backups/<id>.json" that ends in a document name.
+        .filter(|line| line.starts_with('/') || !line.contains('/'))
+        .filter_map(|line| store::document_file_id(Path::new(line)))
         .collect()
 }
 
@@ -246,7 +250,7 @@ mod tests {
             remove("/backups/grapho/x.json"),
             "-rm \"/backups/grapho/x.json\"\n"
         );
-        assert_eq!(list("/backups"), "-ls -1 \"/backups\"\n");
+        assert_eq!(list("/backups"), "ls -1 \"/backups\"\n");
     }
 
     #[test]
@@ -269,6 +273,7 @@ mod tests {
     #[test]
     fn listings_yield_only_document_names() {
         let output = concat!(
+            "Removing /backups/grapho/2f9c1f2e-0000-4000-8000-000000000000.json\n",
             "sftp> -ls -1 \"/backups/grapho\"\n",
             "/backups/grapho/6f9c1f2e-0000-4000-8000-000000000000.json\n",
             "/backups/grapho/notes.txt\n",

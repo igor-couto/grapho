@@ -20,6 +20,7 @@ import {
 import {
   blockLength,
   blockText,
+  createBlock,
   findSearchPassage,
   headingAnchors,
   imageRadius,
@@ -2536,6 +2537,23 @@ test("model: quotes and code blocks keep their breaks and escaped text", async (
   assertEqual(serializeDocument(reloaded), stored, "stored HTML is stable");
 });
 
+test("code blocks: leading blank lines survive saving and rich copy/paste", async () => {
+  await load("<pre>return 42;</pre>");
+  editor.collapseTo({ block: 0, offset: 0 });
+  key("Enter");
+  key("Enter");
+  const text = "\n\nreturn 42;";
+  const saved = serializeDocument(editor.getDocument());
+  assertEqual(blockText(parseDocument(saved)[0]), text, "the saved code keeps both leading lines");
+  editor.selectAll();
+  const copied = copySelection().getData("text/html");
+  await load("<p></p>");
+  pasteClipboard(copied, "");
+  const code = editor.getDocument().find((block) => block.type === "code");
+  assert(code, "pasting restores a code block");
+  assertEqual(blockText(code), text, "the pasted code keeps both leading lines");
+});
+
 test("composition: IME text is inserted once, at the caret", async () => {
   await load("<p></p>");
   editor.focusEditor();
@@ -2899,6 +2917,50 @@ test("export: PDF draws a divider as a stroked rule", async () => {
   );
 });
 
+test("export: PDF continues the outer numbering after a nested ordered list", async () => {
+  const item = (text, depth) => ({ ...createBlock("list", [{ text }]), ordered: true, depth });
+  const blocks = [item("Prepare", 0), item("Pack", 1), item("Check", 1), item("Leave", 0)];
+  const bytes = await buildPdf(blocks, "Checklist");
+  const pdf = new TextDecoder("latin1").decode(bytes);
+  const markers = Array.from(pdf.matchAll(/^\((\d+\.)\) Tj$/gm), (match) => match[1]);
+  assertEqual(markers.join(" "), "1. 1. 2. 2.", "the last outer item follows Prepare");
+});
+
+test("export: PDF list numbering skips nested bullets and restarts at list boundaries", async () => {
+  const item = (text, depth, ordered = true) => ({ ...createBlock("list", [{ text }]), ordered, depth });
+  const blocks = [
+    item("Prepare", 0), item("Optional", 1, false), item("Pack", 1), item("Inspect", 2), item("Leave", 0),
+    item("Pause", 0, false), item("Return", 0), createBlock("p", [{ text: "Tomorrow" }]), item("Depart", 0),
+  ];
+  const pdf = new TextDecoder("latin1").decode(await buildPdf(blocks, "Itinerary"));
+  const markers = Array.from(pdf.matchAll(/^\((\d+\.)\) Tj$/gm), (match) => match[1]);
+  assertEqual(markers.join(" "), "1. 1. 1. 2. 1. 1.", "ordered markers in the exported file");
+});
+
+test("export: a code block spanning several PDF pages keeps every line once and in order", async () => {
+  const lines = Array.from({ length: 120 }, (_, i) => "ROW" + String(i + 1).padStart(3, "0"));
+  const bytes = await buildPdf([createBlock("code", [{ text: lines.join("\n") }])], "Appendix");
+  const pdf = new TextDecoder("latin1").decode(bytes);
+  // This text-only document has one content stream per page.
+  const pages = Array.from(pdf.matchAll(/\nstream\n([\s\S]*?)\nendstream/g), (stream) =>
+    Array.from(stream[1].matchAll(/^\((ROW\d{3})\) Tj$/gm), (row) => row[1]));
+  assert(pages.length >= 3, "the fixture crosses at least two page breaks");
+  assert(pages.every((page) => page.length > 0), "each page carries code");
+  assertEqual(pages.flat().join("\n"), lines.join("\n"), "exported code lines");
+});
+
+test("export: PDF preserves a Unicode title and escapes literal punctuation in code", async () => {
+  const title = "Revisão 📚";
+  const code = createBlock("code", [{ text: "C:\\notes (café €)" }]);
+  const pdf = new TextDecoder("latin1").decode(await buildPdf([code], title));
+  const metadata = pdf.match(/\/Title <([0-9A-Fa-f]+)>/);
+  assert(metadata, "the document has a title");
+  const bytes = Uint8Array.from(metadata[1].match(/../g), (pair) => parseInt(pair, 16));
+  assertEqual(new TextDecoder("utf-16be").decode(bytes), title, "title in document properties");
+  assert(pdf.includes("(C:\\\\notes \\(caf\\351 \\200\\)) Tj"),
+    "the code line encodes the path, parentheses, accented letter, and euro sign");
+});
+
 test("model: an edited document round-trips through stored HTML", async () => {
   await load("<p>First paragraph.</p>");
   editor.collapseTo({ block: 0, offset: "First paragraph.".length });
@@ -3084,6 +3146,53 @@ function markText(block, key) {
     .map((run) => run.text)
     .join("");
 }
+
+test("clipboard: pasting copied text through the next paragraph start keeps the break", async () => {
+  await load("<p>one</p><p>two</p>");
+  editor.setSelection({ block: 0, offset: 0 }, { block: 1, offset: 0 });
+  const clipboard = copySelection();
+  assertEqual(clipboard.getData("text/plain"), "one\n", "the selection includes the break");
+  await load("<p>XY</p>");
+  editor.collapseTo({ block: 0, offset: 1 });
+  pasteClipboard(clipboard.getData("text/html"), clipboard.getData("text/plain"));
+  typeText("!");
+  assertEqual(serializeDocument(editor.getDocument()), "<p>Xone</p><p>!Y</p>", "typing continues on the pasted line");
+});
+
+test("images: pasting a different picture of the same encoded length updates the displayed image", async () => {
+  // Two 1x1 GIFs with different palettes but identical dimensions and length.
+  const red = "data:image/gif;base64,R0lGODdhAQABAIEAAP8AAAAAAAAAAAAAACwAAAAAAQABAAAIBAABBAQAOw==";
+  const blue = "data:image/gif;base64,R0lGODdhAQABAIEAAAAA/wAAAAAAAAAAACwAAAAAAQABAAAIBAABBAQAOw==";
+  const picture = (src) => '<img width="1" height="1" src="' + src + '">';
+  await load(picture(red) + "<p>Caption</p>");
+  const displayed = () => blockElement(0).querySelector("img").getAttribute("src");
+  assertEqual(displayed(), red, "the original red picture is displayed");
+  editor.collapseTo({ block: 0, offset: 0 });
+  pasteClipboard(picture(blue), "");
+  assertEqual(editor.getDocument()[0].src, blue, "the blue picture replaced the red one in the model");
+  assertEqual(displayed(), blue, "the rendered picture follows the replacement");
+  editor.undo();
+  assertEqual(displayed(), red, "undo repaints the original");
+  editor.redo();
+  assertEqual(displayed(), blue, "redo repaints the replacement");
+});
+
+test("links: editing a styled link survives an undo, redo, save, and reopen", async () => {
+  const original = '<p>A <a href="https://old.example/"><b>fish</b></a>' +
+    '<a href="https://old.example/"><i> &amp; chips</i></a> today</p>';
+  const updated = original.replaceAll("https://old.example/", "https://new.example/");
+  await load(original);
+  editor.collapseTo({ block: 0, offset: 8 });
+  editor.setLink("https://new.example/");
+  assertEqual(serializeDocument(editor.getDocument()), updated, "both styled runs get the new destination");
+  editor.undo();
+  assertEqual(serializeDocument(editor.getDocument()), original, "undo restores the old target");
+  editor.redo();
+  await load(serializeDocument(editor.getDocument()));
+  editor.collapseTo({ block: 0, offset: 3 });
+  assertEqual(editor.linkAtCaret().href, "https://new.example/", "the link reopens on the new target");
+  assertEqual(serializeDocument(editor.getDocument()), updated, "marks, label, and neighbouring prose survived");
+});
 
 test("clipboard: copy writes semantic HTML and paste restores the marks", async () => {
   await load("<p>alpha <b>beta</b> and <i>gamma</i> delta</p>");

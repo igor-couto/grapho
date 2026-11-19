@@ -629,7 +629,7 @@ export class DocEditor {
 
     // Replace a selection in the same commit as the insert, so one undo puts
     // back everything that was selected instead of only the insert.
-    const deletion = this.selectionDeletion();
+    const deletion = this.selectionDeletion({ forInsertion: true });
     let caret = deletion ? { ...deletion.caret } : { ...this.focus };
     let blocks = deletion ? deletion.blocks : this.blocks;
 
@@ -690,30 +690,30 @@ export class DocEditor {
     if (!pasted.length) {
       return;
     }
-    const target = this.blocks[this.focus.block];
-    if (this.sourceMode || !target || target.type === "code") {
+    if (this.sourceMode) {
       this.insertText(pastedPlainText(pasted));
       return;
     }
 
-    const deletion = this.selectionDeletion();
+    const deletion = this.selectionDeletion({ forInsertion: true });
     let blocks = deletion ? deletion.blocks : this.blocks;
     let caret = deletion ? { ...deletion.caret } : { ...this.focus };
 
+    // The surviving block is the paste destination in either selection
+    // direction. Code takes one unmarked run, including any line feeds.
+    if (blocks[caret.block].type === "code") {
+      const text = pastedPlainText(pasted);
+      if (!text) return;
+      pasted = [createBlock("p", [{ text }])];
+    }
+
     // A picture or divider caret is replaced by a paragraph, the same way
     // typing over a selected picture works; the paste then lands in that
-    // paragraph. A caret that only landed on one because the deleted selection
-    // ended next to it must not replace that block: the paste goes after it
-    // instead.
+    // paragraph.
     if (blocks[caret.block] && isAtomicBlock(blocks[caret.block])) {
       blocks = blocks.slice();
-      if (deletion) {
-        blocks.splice(caret.block + 1, 0, emptyParagraph());
-        caret = { block: caret.block + 1, offset: 0 };
-      } else {
-        blocks[caret.block] = emptyParagraph();
-        caret = { block: caret.block, offset: 0 };
-      }
+      blocks[caret.block] = emptyParagraph();
+      caret = { block: caret.block, offset: 0 };
     }
 
     if (pasted.length === 1 && isPlainParagraph(pasted[0])) {
@@ -743,68 +743,57 @@ export class DocEditor {
     }
     let first = head;
     let last = tail;
-    let mergedLast = false;
-    let mergedLastLength = 0;
-
     // A pasted paragraph at either edge joins the line it was pasted onto, so
     // pasting "one\ntwo" mid-paragraph continues the sentence instead of
     // leaving ragged half-paragraphs. Headings and list items stay separate.
-    if (isPlainParagraph(body[0])) {
-      const edge = body.shift();
-      first = { ...first, id: createBlockId(), runs: normalizeRuns([...first.runs, ...edge.runs]) };
+    const firstParagraph = isPlainParagraph(body[0]) ? body.shift() : null;
+    const lastParagraph = isPlainParagraph(body.at(-1)) ? body.pop() : null;
+    if (firstParagraph) {
+      first = { ...first, id: createBlockId(), runs: normalizeRuns([...first.runs, ...firstParagraph.runs]) };
     }
-    if (body.length && isPlainParagraph(body[body.length - 1])) {
-      const edge = body.pop();
-      mergedLast = true;
-      mergedLastLength = blockLength(edge);
-      last = { ...last, id: createBlockId(), runs: normalizeRuns([...edge.runs, ...last.runs]) };
+    if (lastParagraph) {
+      last = { ...last, id: createBlockId(), runs: normalizeRuns([...lastParagraph.runs, ...last.runs]) };
     }
 
-    // An empty half left over from splitting at the very start or end of a
-    // block is not a pasted blank line; it is where the caret already was.
-    const keepFirst = blockLength(first) > 0 || body.length === 0;
-    const keepLast = blockLength(last) > 0 || body.length === 0;
+    // Keep an empty paragraph supplied by the clipboard. Empty halves
+    // created solely by splitting the destination can be left out.
     const replacement = [];
-    if (keepFirst) {
+    if (firstParagraph || blockLength(first) > 0) {
       replacement.push(first);
     }
-    const bodyStart = replacement.length;
     replacement.push(...body);
-    if (keepLast) {
+    // A merged final paragraph puts the caret in the tail, just before the
+    // old text. Otherwise typing continues at the end of the last paste block.
+    const pasteEndIndex = lastParagraph ? replacement.length : replacement.length - 1;
+    if (lastParagraph || blockLength(last) > 0) {
       replacement.push(last);
     }
 
     const next = blocks.slice();
     next.splice(caret.block, 1, ...replacement);
 
-    let position = { block: caret.block, offset: 0 };
-    if (mergedLast && keepLast) {
-      position = { block: caret.block + replacement.length - 1, offset: mergedLastLength };
-    } else if (body.length) {
-      position = {
-        block: caret.block + bodyStart + body.length - 1,
-        offset: blockLength(body[body.length - 1]),
-      };
-    } else if (keepFirst) {
-      position = { block: caret.block, offset: blockLength(first) };
-    }
+    let position = { block: caret.block + pasteEndIndex, offset: blockLength(pasted.at(-1)) };
 
-    // A picture or divider has no caret. A paste that ends on one and stops the
-    // document gets a paragraph to continue writing in; if the split tail
-    // follows it, the caret belongs at the start of that text and no paragraph
-    // is needed.
-    if (next[position.block] && isAtomicBlock(next[position.block])) {
-      if (position.block === next.length - 1) {
-        next.push(emptyParagraph());
-        position = { block: next.length - 1, offset: 0 };
-      } else {
-        position = { block: position.block + 1, offset: 0 };
+    // A paste ending with a picture or divider needs a text caret after it.
+    // Use the following text, or open a paragraph before the next picture.
+    if (isAtomicBlock(next[position.block])) {
+      const after = position.block + 1;
+      if (!next[after] || isAtomicBlock(next[after])) {
+        next.splice(after, 0, emptyParagraph());
       }
+      position = { block: after, offset: 0 };
     }
     this.commit(next, position, position);
   }
 
   marksForTyping() {
+    if (!this.isCollapsed()) {
+      const { from, to } = this.normalized();
+      for (const { block, start } of selectedTextRanges(this.blocks, from, to)) {
+        return block.type === "code" ? {} : marksAt(block, start);
+      }
+      return {};
+    }
     const block = this.blocks[this.focus.block];
     if (!block || isAtomicBlock(block)) {
       return {};
@@ -836,7 +825,7 @@ export class DocEditor {
   // The blocks and caret that result from deleting the current selection, or
   // null when it is collapsed. Callers that insert something immediately use
   // this so the delete and the insert share one commit and one undo step.
-  selectionDeletion() {
+  selectionDeletion({ forInsertion = false } = {}) {
     if (this.isCollapsed()) {
       return null;
     }
@@ -844,24 +833,28 @@ export class DocEditor {
     const first = this.blocks[from.block];
     const last = this.blocks[to.block];
 
-    if (from.block === to.block) {
-      if (isAtomicBlock(first)) {
-        const next = this.blocks.slice();
-        next.splice(from.block, 1);
-        const caret = previousPosition(next, from.block);
-        return { blocks: next.length ? next : [emptyParagraph()], caret };
+    if (isAtomicBlock(first) && isAtomicBlock(last)) {
+      const next = this.blocks.slice();
+      next.splice(from.block, to.block - from.block + 1);
+      const caret = previousPosition(next, from.block);
+      // The neighbour can take focus after Delete, but it is outside the
+      // selection. Give a replacement its own caret at the original gap.
+      if (!next.length || (forInsertion && isAtomicBlock(next[caret.block]))) {
+        const paragraph = emptyParagraph();
+        if (this.sourceMode) {
+          paragraph.source = true;
+        }
+        next.splice(from.block, 0, paragraph);
+        return { blocks: next, caret: from, openedParagraph: true };
       }
+      return { blocks: next, caret };
+    }
+    if (from.block === to.block) {
       const block = { ...first, id: createBlockId(), runs: removeRangeFromRuns(first.runs, from.offset, to.offset) };
       return { blocks: this.replaceBlock(from.block, block), caret: from };
     }
 
     const headLength = from.offset;
-    if (isAtomicBlock(first) && isAtomicBlock(last)) {
-      const next = this.blocks.slice();
-      next.splice(from.block, to.block - from.block + 1);
-      const caret = previousPosition(next, from.block);
-      return { blocks: next.length ? next : [emptyParagraph()], caret };
-    }
     const headRuns = isAtomicBlock(first) ? [] : runsInRange(first, 0, from.offset);
     const tailRuns = isAtomicBlock(last) ? [] : runsInRange(last, to.offset, blockLength(last));
     const base = isAtomicBlock(first) ? last : first;
@@ -1008,12 +1001,12 @@ export class DocEditor {
   }
 
   insertParagraph() {
-    const deletion = this.selectionDeletion();
+    const deletion = this.selectionDeletion({ forInsertion: true });
     const blocks = deletion ? deletion.blocks : this.blocks;
     const index = deletion ? deletion.caret.block : this.focus.block;
     const offset = deletion ? deletion.caret.offset : this.focus.offset;
     const block = blocks[index];
-    if (!block) {
+    if (!block || deletion?.openedParagraph) {
       if (deletion) {
         this.commit(deletion.blocks, deletion.caret, deletion.caret);
       }
@@ -1092,29 +1085,22 @@ export class DocEditor {
     if (this.sourceMode) {
       return;
     }
-    const collapsed = this.isCollapsed();
-    const current = this.activeMarks();
-    const nextValue = !current[key];
-
-    if (collapsed) {
-      this.pendingMarks = { ...current, [key]: nextValue };
+    if (this.isCollapsed()) {
+      const current = this.activeMarks();
+      this.pendingMarks = { ...current, [key]: !current[key] };
       this.sync();
       return;
     }
 
     const { from, to } = this.normalized();
-    const all = selectionHasMark(this.blocks, from, to, key);
-    const value = all ? false : true;
-    let blocks = this.blocks;
-
-    for (let index = from.block; index <= to.block; index += 1) {
-      const block = blocks[index];
-      if (!block || isAtomicBlock(block) || block.type === "code") {
-        continue;
-      }
-      const start = index === from.block ? from.offset : 0;
-      const end = index === to.block ? to.offset : blockLength(block);
-      blocks = blocks.slice();
+    const ranges = Array.from(selectedTextRanges(this.blocks, from, to))
+      .filter(({ block }) => block.type !== "code");
+    if (!ranges.length) {
+      return;
+    }
+    const value = !selectionHasMark(ranges, key);
+    const blocks = this.blocks.slice();
+    for (const { block, index, start, end } of ranges) {
       blocks[index] = { ...block, id: createBlockId(), runs: setMarkOnRuns(block.runs, start, end, key, value) };
     }
 
@@ -1453,7 +1439,7 @@ export class DocEditor {
   }
 
   insertImage(block) {
-    const deletion = this.selectionDeletion();
+    const deletion = this.selectionDeletion({ forInsertion: true });
     const blocks = deletion ? deletion.blocks : this.blocks;
     const index = deletion ? deletion.caret.block : this.focus.block;
     const offset = deletion ? deletion.caret.offset : this.focus.offset;
@@ -1662,7 +1648,7 @@ export class DocEditor {
       this.insertParagraph();
       return;
     }
-    const deletion = this.selectionDeletion();
+    const deletion = this.selectionDeletion({ forInsertion: true });
     const blocks = deletion ? deletion.blocks : this.blocks;
     const index = deletion ? deletion.caret.block : this.focus.block;
     const offset = deletion ? deletion.caret.offset : this.focus.offset;
@@ -1701,8 +1687,12 @@ export class DocEditor {
 
   moveWord(direction, extend) {
     this.lineHint = null;
-    const from = extend ? this.focus : this.normalized().from;
-    const next = stepWord(this.blocks, from, direction);
+    let start = this.focus;
+    if (!extend && !this.isCollapsed()) {
+      const { from, to } = this.normalized();
+      start = direction < 0 ? from : to;
+    }
+    const next = stepWord(this.blocks, start, direction);
     if (extend) {
       this.setSelection(this.anchor, next, { keepMarks: true });
     } else {
@@ -2830,25 +2820,31 @@ function lineRangeAt(text, offset) {
   return { start, end: next === -1 ? text.length : next + 1 };
 }
 
-function selectionHasMark(blocks, from, to, key) {
-  let hasText = false;
+function* selectedTextRanges(blocks, from, to) {
   for (let index = from.block; index <= to.block; index += 1) {
     const block = blocks[index];
-    if (!block || isAtomicBlock(block) || block.type === "code") {
-      continue;
-    }
     const start = index === from.block ? from.offset : 0;
     const end = index === to.block ? to.offset : blockLength(block);
-    const runs = runsInRange(block, start, end);
-    for (const run of runs) {
-      if (!run.text.trim()) {
-        continue;
-      }
-      hasText = true;
-      if (!run[key]) {
-        return false;
+    if (start < end) {
+      yield { block, index, start, end };
+    }
+  }
+}
+
+function selectionHasMark(ranges, key) {
+  let hasWords = false;
+  let allWhitespaceMarked = true;
+  for (const { block, start, end } of ranges) {
+    for (const run of runsInRange(block, start, end)) {
+      if (run.text.trim()) {
+        hasWords = true;
+        if (!run[key]) {
+          return false;
+        }
+      } else if (!run[key]) {
+        allWhitespaceMarked = false;
       }
     }
   }
-  return hasText;
+  return hasWords || allWhitespaceMarked;
 }

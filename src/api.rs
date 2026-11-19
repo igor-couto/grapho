@@ -634,17 +634,21 @@ async fn update_storage(
         ));
     };
 
-    let relocated = state
-        .store
-        .relocate(PathBuf::from(requested))
-        .await
-        .map_err(relocation_error)?;
-
-    // Remember the choice for the next start. When this fails the folder is
-    // already in use for this run, so say that plainly rather than report a
-    // change that appears not to have happened.
     {
+        // A simultaneous backup add must see the new library, or the move must
+        // see the new backup, before either one starts copying documents.
         let _guard = state.settings_lock.lock().await;
+        let target = PathBuf::from(requested);
+        state
+            .backups
+            .validate_data_folder(&target)
+            .await
+            .map_err(backup_error)?;
+        let relocated = state
+            .store
+            .relocate(target)
+            .await
+            .map_err(relocation_error)?;
         let mut saved = settings::read(&settings_file);
         saved.data_dir = Some(relocated.directory.clone());
         if let Err(error) = settings::write(&settings_file, &saved).await {
@@ -741,17 +745,16 @@ async fn add_and_remember(
         ));
     };
 
-    let location = state
-        .backups
-        .add(BackupLocation {
-            id: Uuid::new_v4(),
-            target,
-        })
-        .await
-        .map_err(backup_error)?;
-
     {
         let _guard = state.settings_lock.lock().await;
+        let location = state
+            .backups
+            .add(BackupLocation {
+                id: Uuid::new_v4(),
+                target,
+            })
+            .await
+            .map_err(backup_error)?;
         let mut saved = settings::read(&settings_file);
         saved.backups = state.backups.connectors().await;
         if let Err(error) = settings::write(&settings_file, &saved).await {
@@ -1484,6 +1487,14 @@ mod tests {
         password: Option<&str>,
         drive: Drive,
     ) -> (Router, PathBuf) {
+        let (app, directory, _) = test_app_with_mirror(password, drive).await;
+        (app, directory)
+    }
+
+    async fn test_app_with_mirror(
+        password: Option<&str>,
+        drive: Drive,
+    ) -> (Router, PathBuf, Arc<BackupMirror>) {
         let directory = std::env::temp_dir().join(format!("grapho-api-test-{}", Uuid::new_v4()));
         let store = Arc::new(
             Store::load(directory.clone())
@@ -1494,8 +1505,13 @@ mod tests {
         let settings_file = directory.join("test-settings.json");
         let drive = Arc::new(drive);
         let secrets = Arc::new(Secrets::load(Some(directory.join("test-secrets.json"))));
-        let backups =
-            BackupMirror::start(store.clone(), Vec::new(), drive.clone(), secrets.clone());
+        let backups = BackupMirror::start(
+            store.clone(),
+            Vec::new(),
+            drive.clone(),
+            secrets.clone(),
+            None,
+        );
         (
             router(
                 store,
@@ -1503,12 +1519,13 @@ mod tests {
                 ServerOptions {
                     data_dir_source: Source::Default,
                     settings_file: Some(settings_file),
-                    backups,
+                    backups: backups.clone(),
                     drive,
                     secrets,
                 },
             ),
             directory,
+            backups,
         )
     }
 
@@ -2090,6 +2107,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn regression_deleted_document_survives_moving_into_a_backup() {
+        let (app, original, mirror) = test_app_with_mirror(None, Drive::new()).await;
+        let backup_root =
+            std::env::temp_dir().join(format!("grapho-move-backup-{}", Uuid::new_v4()));
+        let backup = backup_root.join("copies");
+        let folder = serde_json::json!({ "path": backup });
+        let added = app
+            .clone()
+            .oneshot(post_json("/api/storage/backups", folder))
+            .await
+            .unwrap();
+        assert_eq!(added.status(), StatusCode::OK);
+        for target in [
+            backup.clone(),
+            backup.join("new-child"),
+            backup_root.clone(),
+        ] {
+            let moved = app
+                .clone()
+                .oneshot(put_json(
+                    "/api/storage",
+                    serde_json::json!({ "path": target }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(moved.status(), StatusCode::BAD_REQUEST);
+        }
+
+        let storage = json_body(app.clone().oneshot(get("/api/storage")).await.unwrap()).await;
+        let current = PathBuf::from(storage["path"].as_str().unwrap());
+        assert_eq!(current, original);
+        let id = Uuid::new_v4();
+        let doc = format!("/api/documents/{id}");
+        let created = app
+            .clone()
+            .oneshot(put_json(
+                &format!("{doc}/draft"),
+                serde_json::json!({
+                    "title": "After moving", "content": "<p>Keep this writing.</p>"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        assert!(mirror.flush(std::time::Duration::from_secs(5)).await);
+        let deleted = app.oneshot(delete_request(&doc)).await.unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        assert!(mirror.flush(std::time::Duration::from_secs(5)).await);
+
+        let reopened = Store::load(current).await.unwrap();
+        let restored = reopened.restore(id).await.unwrap();
+        tokio::fs::remove_dir_all(original).await.unwrap();
+        tokio::fs::remove_dir_all(backup_root).await.unwrap();
+        assert_eq!(
+            restored.as_ref().map(|doc| doc.content.as_str()),
+            Some("<p>Keep this writing.</p>"),
+            "Recently deleted must survive reopening the active data folder"
+        );
+    }
+
+    #[tokio::test]
+    async fn adding_a_backup_and_moving_into_it_cannot_both_succeed() {
+        let (app, directory) = test_app(None).await;
+        let target =
+            std::env::temp_dir().join(format!("grapho-concurrent-move-{}", Uuid::new_v4()));
+        let folder = serde_json::json!({ "path": target });
+        let (adding, moving) = tokio::join!(
+            app.clone()
+                .oneshot(post_json("/api/storage/backups", folder.clone())),
+            app.oneshot(put_json("/api/storage", folder))
+        );
+        let statuses = [adding.unwrap().status(), moving.unwrap().status()];
+        assert!(
+            statuses.contains(&StatusCode::OK) && statuses.contains(&StatusCode::BAD_REQUEST),
+            "{statuses:?}"
+        );
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+        tokio::fs::remove_dir_all(target).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn the_storage_page_reports_where_documents_live() {
         let (app, directory) = test_app(None).await;
 
@@ -2273,8 +2371,13 @@ mod tests {
         let settings_file = directory.join("test-settings.json");
         let drive = Arc::new(Drive::new());
         let secrets = Arc::new(Secrets::load(Some(directory.join("test-secrets.json"))));
-        let backups =
-            BackupMirror::start(store.clone(), Vec::new(), drive.clone(), secrets.clone());
+        let backups = BackupMirror::start(
+            store.clone(),
+            Vec::new(),
+            drive.clone(),
+            secrets.clone(),
+            None,
+        );
         let app = router(
             store,
             None,

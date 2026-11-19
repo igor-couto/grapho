@@ -851,6 +851,28 @@ function isBlankLine(block) {
   return block.type === "p" && block.source !== true && blockText(block).length === 0;
 }
 
+function listMarkerText(blocks, index) {
+  const block = blocks[index];
+  if (!block.ordered) {
+    return "\u2022";
+  }
+  let number = 1;
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const previous = blocks[cursor];
+    if (previous.type !== "list") {
+      break;
+    }
+    if (previous.depth > block.depth) {
+      continue;
+    }
+    if (previous.depth !== block.depth || !previous.ordered) {
+      break;
+    }
+    number += 1;
+  }
+  return number + ".";
+}
+
 function layoutPass(blocks, columnWidth, obstacles, pinned) {
   const laid = [];
   let y = DOC_TOP;
@@ -960,7 +982,11 @@ function layoutPass(blocks, columnWidth, obstacles, pinned) {
       quote: block.type === "quote",
       list: block.type === "list",
       marker: block.type === "list"
-        ? { x: (lines.length ? lines[0].x : indentFor(block)) - 14, y: lines.length ? lines[0].y : y }
+        ? {
+            x: (lines.length ? lines[0].x : indentFor(block)) - 14,
+            y: lines.length ? lines[0].y : y,
+            text: listMarkerText(blocks, index),
+          }
         : null,
     });
     y += height;

@@ -339,7 +339,7 @@ function renderPage(layout, page, pageIndex, freePages, images, names) {
     }
 
     if (entry.marker && entry.marker.y >= start && entry.marker.y < end) {
-      drawMarker(ops, layout, entry, start);
+      drawMarker(ops, entry, start);
     }
   }
 
@@ -430,8 +430,8 @@ function drawCodeLine(ops, line, start) {
   });
 }
 
-function drawMarker(ops, layout, entry, start) {
-  const text = markerText(layout, entry.index);
+function drawMarker(ops, entry, start) {
+  const text = entry.marker.text;
   const size = 17.5;
   const width = measure(encodeText(text), "Times-Roman", size * POINT) / POINT;
 
@@ -448,28 +448,6 @@ function drawMarker(ops, layout, entry, start) {
     strike: false,
     start,
   });
-}
-
-function markerText(layout, index) {
-  const block = layout.blocks[index].block;
-  if (!block.ordered) {
-    return "\u2022";
-  }
-
-  let number = 1;
-  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-    const previous = layout.blocks[cursor].block;
-    if (
-      !previous ||
-      previous.type !== "list" ||
-      previous.depth !== block.depth ||
-      !previous.ordered
-    ) {
-      break;
-    }
-    number += 1;
-  }
-  return number + ".";
 }
 
 function appendText(ops, run) {

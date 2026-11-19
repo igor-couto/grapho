@@ -119,6 +119,24 @@ fn full_path_message() -> &'static str {
     }
 }
 
+async fn folder_key(path: &Path) -> Result<PathBuf, BackupError> {
+    store::directory_key(path)
+        .await
+        .map_err(|error| BackupError::io(path, error))
+}
+
+fn separate_folders(data: &Path, backup: &Path) -> Result<(), BackupError> {
+    if data == backup {
+        Err(BackupError::SameAsDataFolder)
+    } else if backup.starts_with(data) {
+        Err(BackupError::InsideDataFolder)
+    } else if data.starts_with(backup) {
+        Err(BackupError::ContainsDataFolder)
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Change {
     Write(Uuid),
@@ -127,6 +145,7 @@ enum Change {
 
 enum Job {
     Sync(Uuid),
+    Forget(Uuid),
     /// Copy the whole library, used when a connector is added.
     Seed(BackupLocation, oneshot::Sender<Result<(), BackupError>>),
     /// Answers after everything queued before it, for shutdown and tests.
@@ -150,15 +169,27 @@ impl BackupMirror {
         backups: Vec<BackupLocation>,
         drive: std::sync::Arc<Drive>,
         secrets: std::sync::Arc<Secrets>,
+        retry_file: Option<PathBuf>,
     ) -> std::sync::Arc<Self> {
         let (jobs, receiver) = mpsc::unbounded_channel();
+        let mut retries: HashMap<Uuid, HashSet<Uuid>> = retry_file
+            .as_deref()
+            .and_then(|file| std::fs::read(file).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        retries.retain(|id, ids| !ids.is_empty() && backups.iter().any(|backup| backup.id == *id));
         let mirror = std::sync::Arc::new(Self {
             store,
             connectors: RwLock::new(backups.clone()),
             health: Mutex::new(
                 backups
                     .into_iter()
-                    .map(|backup| (backup.id, None))
+                    .map(|backup| {
+                        let error = retries.contains_key(&backup.id).then(|| {
+                            "Waiting to retry changes from a previous session.".to_owned()
+                        });
+                        (backup.id, error)
+                    })
                     .collect(),
             ),
             jobs,
@@ -166,7 +197,7 @@ impl BackupMirror {
             secrets,
         });
 
-        tokio::spawn(run(mirror.clone(), receiver));
+        tokio::spawn(run(mirror.clone(), receiver, retry_file, retries));
         mirror
     }
 
@@ -177,6 +208,30 @@ impl BackupMirror {
 
     pub async fn connectors(&self) -> Vec<BackupLocation> {
         self.connectors.read().await.clone()
+    }
+
+    pub async fn validate_data_folder(&self, path: &Path) -> Result<(), BackupError> {
+        if !path.is_absolute() {
+            return Err(BackupError::NotAbsolute);
+        }
+        let data = folder_key(path).await?;
+        for connector in self.connectors().await {
+            if let BackupTarget::Folder { path: backup } = connector.target {
+                // A disconnected drive can be impossible to resolve. Its saved
+                // path can still be checked, and the worker checks its actual
+                // destination again before touching any document.
+                let separation = match folder_key(&backup).await {
+                    Ok(key) => separate_folders(&data, &key),
+                    Err(_) => separate_folders(path, &backup),
+                };
+                if separation.is_err() {
+                    return Err(BackupError::invalid(
+                        "Choose a data folder separate from every backup folder.",
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn health(&self) -> HashMap<Uuid, Option<String>> {
@@ -205,32 +260,18 @@ impl BackupMirror {
             id: location.id,
             target,
         };
-        let data_dir = self.store.directory().await;
-
         match &location.target {
             BackupTarget::Folder { path } => {
-                if store::same_directory(&data_dir, path) {
-                    return Err(BackupError::SameAsDataFolder);
-                }
-                if path.starts_with(&data_dir) {
-                    return Err(BackupError::InsideDataFolder);
-                }
-                if data_dir.starts_with(path) {
-                    return Err(BackupError::ContainsDataFolder);
-                }
-                if self
-                    .connectors
-                    .read()
-                    .await
-                    .iter()
-                    .any(|backup| match &backup.target {
-                        BackupTarget::Folder { path: existing } => {
-                            store::same_directory(existing, path)
+                let backup = folder_key(path).await?;
+                separate_folders(&folder_key(&self.store.directory().await).await?, &backup)?;
+                for connector in self.connectors().await {
+                    if let BackupTarget::Folder { path: existing } = connector.target {
+                        if existing == *path
+                            || folder_key(&existing).await.is_ok_and(|key| key == backup)
+                        {
+                            return Err(BackupError::AlreadyABackup);
                         }
-                        _ => false,
-                    })
-                {
-                    return Err(BackupError::AlreadyABackup);
+                    }
                 }
             }
             BackupTarget::Ssh {
@@ -316,6 +357,7 @@ impl BackupMirror {
 
         if found {
             self.health.lock().expect("backup health lock").remove(&id);
+            let _ = self.jobs.send(Job::Forget(id));
         }
         found
     }
@@ -326,24 +368,69 @@ impl BackupMirror {
             .await
             .retain(|backup| backup.id != *id);
         self.health.lock().expect("backup health lock").remove(id);
+        let _ = self.jobs.send(Job::Forget(*id));
     }
 
-    async fn apply(&self, changes: &[Change]) {
-        if changes.is_empty() {
-            return;
-        }
-
+    async fn apply(&self, ids: &HashSet<Uuid>, retries: &mut HashMap<Uuid, HashSet<Uuid>>) -> bool {
+        let mut updated = false;
         for connector in self.connectors().await {
+            // Remote batches can fail partway through. Repeat the whole affected
+            // batch for this connector, deriving writes and removals afresh.
+            let mut batch = ids.clone();
+            if let Some(missed) = retries.get(&connector.id) {
+                batch.extend(missed);
+            }
+            let mut changes = Vec::with_capacity(batch.len());
+            for &id in &batch {
+                // An id from a different data folder has no state to mirror.
+                if let Some(deleted) = self.store.is_deleted(id).await {
+                    changes.push(if deleted {
+                        Change::Remove(id)
+                    } else {
+                        Change::Write(id)
+                    });
+                }
+            }
             let error = match &connector.target {
-                BackupTarget::Folder { path } => self.apply_folder(path, changes).await,
-                BackupTarget::Ssh { .. } => self.apply_ssh(&connector, changes).await,
-                BackupTarget::GoogleDrive { .. } => self.apply_google(&connector, changes).await,
+                BackupTarget::Folder { path } => {
+                    self.apply_folder(connector.id, path, &changes).await
+                }
+                BackupTarget::Ssh { .. } => self.apply_ssh(&connector, &changes).await,
+                BackupTarget::GoogleDrive { .. } => self.apply_google(&connector, &changes).await,
             };
+            if error.is_some() {
+                if retries.get(&connector.id) != Some(&batch) {
+                    retries.insert(connector.id, batch);
+                    updated = true;
+                }
+            } else {
+                updated |= retries.remove(&connector.id).is_some();
+            }
             self.set_health(connector.id, error);
         }
+        updated
     }
 
-    async fn apply_folder(&self, folder: &Path, changes: &[Change]) -> Option<String> {
+    async fn apply_folder(
+        &self,
+        connector_id: Uuid,
+        folder: &Path,
+        changes: &[Change],
+    ) -> Option<String> {
+        // Finish in-flight writes before removal allows this folder to be
+        // chosen as the new primary. A previously queued batch may arrive late.
+        let connectors = self.connectors.read().await;
+        if !connectors
+            .iter()
+            .any(|connector| connector.id == connector_id)
+        {
+            return None;
+        }
+        // A saved connector can predate the overlap check, or a symlink can
+        // change destination between runs. Never write into an active library.
+        if let Err(error) = self.check_folder_target(folder).await {
+            return Some(error.to_string());
+        }
         let mut last_error = None;
 
         for change in changes {
@@ -361,7 +448,13 @@ impl BackupMirror {
                     let path = folder.join(format!("{id}.json"));
                     match tokio::fs::remove_file(&path).await {
                         Ok(()) => {}
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        // A missing file is already removed. A missing drive
+                        // can still hold the file when it is reconnected.
+                        Err(error)
+                            if error.kind() == io::ErrorKind::NotFound
+                                && tokio::fs::metadata(folder)
+                                    .await
+                                    .is_ok_and(|entry| entry.is_dir()) => {}
                         Err(error) => {
                             eprintln!(
                                 "could not remove {} from {}: {error}",
@@ -379,36 +472,47 @@ impl BackupMirror {
         last_error
     }
 
+    async fn check_folder_target(&self, folder: &Path) -> Result<(), BackupError> {
+        let data = folder_key(&self.store.directory().await).await?;
+        separate_folders(&data, &folder_key(folder).await?)
+    }
+
     async fn apply_ssh(&self, connector: &BackupLocation, changes: &[Change]) -> Option<String> {
         let target = SftpTarget::from_settings(&connector.target)?;
         let data_dir = self.store.directory().await;
 
+        if changes.is_empty() {
+            return None;
+        }
         let mut script = sftp::mkdir(&target.dir);
-        let mut operations = 0;
+        let mut removals = HashSet::new();
         for change in changes {
             match change {
                 Change::Write(id) => {
                     let name = format!("{id}.json");
-                    // A document deleted since the save has nothing to upload;
-                    // its removal job follows in the queue.
-                    if tokio::fs::metadata(data_dir.join(&name)).await.is_err() {
-                        continue;
-                    }
                     script.push_str(&sftp::upload(&name, &sftp::remote_path(&target.dir, *id)));
-                    operations += 1;
                 }
                 Change::Remove(id) => {
+                    removals.insert(*id);
                     script.push_str(&sftp::remove(&sftp::remote_path(&target.dir, *id)));
-                    operations += 1;
                 }
             }
         }
 
-        if operations == 0 {
-            return None;
+        // sftp's idempotent -rm also ignores permission errors. A successful
+        // final listing proves the requested files are gone.
+        if !removals.is_empty() {
+            script.push_str(&sftp::list(&target.dir));
         }
-
         match sftp::run(&target, &data_dir, &script).await {
+            Ok(listing)
+                if !removals.is_empty()
+                    && sftp::parse_listing(&listing)
+                        .iter()
+                        .any(|id| removals.contains(id)) =>
+            {
+                Some("The SSH server still holds a deleted document.".to_owned())
+            }
             Ok(_) => None,
             Err(message) => {
                 eprintln!("backup to {} failed: {message}", target.label());
@@ -502,6 +606,7 @@ impl BackupMirror {
         tokio::fs::create_dir_all(folder)
             .await
             .map_err(|error| BackupError::io(folder, error))?;
+        self.check_folder_target(folder).await?;
 
         let known: HashSet<Uuid> = self
             .store
@@ -548,7 +653,9 @@ impl BackupMirror {
 
         // One connection proves the host, the account, and the folder, and
         // catches a server that already holds another library.
-        let listing = sftp::run(&target, &data_dir, &sftp::list(&target.dir))
+        // A missing folder is allowed for the initial seed. The upload batch
+        // will create it, and reports any error that prevents writing there.
+        let listing = sftp::run(&target, &data_dir, &format!("-{}", sftp::list(&target.dir)))
             .await
             .map_err(|message| BackupError::Ssh { message })?;
 
@@ -646,10 +753,9 @@ impl BackupMirror {
     }
 
     fn set_health(&self, id: Uuid, error: Option<String>) {
-        self.health
-            .lock()
-            .expect("backup health lock")
-            .insert(id, error);
+        if let Some(health) = self.health.lock().expect("backup health lock").get_mut(&id) {
+            *health = error;
+        }
     }
 }
 
@@ -900,25 +1006,29 @@ async fn remove_files(folder: &Path, ids: &[Uuid]) {
     }
 }
 
-async fn run(mirror: std::sync::Arc<BackupMirror>, mut jobs: mpsc::UnboundedReceiver<Job>) {
+async fn run(
+    mirror: std::sync::Arc<BackupMirror>,
+    mut jobs: mpsc::UnboundedReceiver<Job>,
+    retry_file: Option<PathBuf>,
+    mut retries: HashMap<Uuid, HashSet<Uuid>>,
+) {
+    let mut retries_changed = false;
     while let Some(job) = jobs.recv().await {
         let mut batch = vec![job];
         while let Ok(next) = jobs.try_recv() {
             batch.push(next);
         }
 
-        // Read the latest state once for each changed id. A restore can
-        // finish before an earlier delete request has queued its mirror job.
-        let mut order: Vec<Uuid> = Vec::new();
         let mut seen = HashSet::new();
         let mut barriers: Vec<oneshot::Sender<()>> = Vec::new();
 
         for job in batch {
             match job {
                 Job::Sync(id) => {
-                    if seen.insert(id) {
-                        order.push(id);
-                    }
+                    seen.insert(id);
+                }
+                Job::Forget(id) => {
+                    retries_changed |= retries.remove(&id).is_some();
                 }
                 Job::Seed(location, reply) => {
                     let result = mirror.seed(&location).await;
@@ -928,16 +1038,16 @@ async fn run(mirror: std::sync::Arc<BackupMirror>, mut jobs: mpsc::UnboundedRece
             }
         }
 
-        let mut changes = Vec::with_capacity(order.len());
-        for id in order {
-            changes.push(if mirror.store.contains_active(id).await {
-                Change::Write(id)
-            } else {
-                Change::Remove(id)
-            });
+        if !seen.is_empty() {
+            retries_changed |= mirror.apply(&seen, &mut retries).await;
         }
-
-        mirror.apply(&changes).await;
+        if let Some(file) = retry_file.as_ref().filter(|_| retries_changed) {
+            if let Err(error) = crate::settings::write_json(file, &retries).await {
+                eprintln!("could not remember pending backup retries: {error}");
+            } else {
+                retries_changed = false;
+            }
+        }
 
         for reply in barriers {
             let _ = reply.send(());
@@ -962,6 +1072,7 @@ mod tests {
             Vec::new(),
             Arc::new(Drive::new()),
             Arc::new(Secrets::load(None)),
+            None,
         );
         (mirror, directory)
     }
@@ -1117,6 +1228,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn regression_reconnected_backup_catches_up_on_the_next_save() {
+        let (mirror, directory) = test_mirror("reconnect").await;
+        let note = mirror.store.create().await.unwrap();
+        let target = folder("reconnect");
+        let connector = add_folder(&mirror, target.clone()).await.unwrap();
+        let offline = target.with_extension("offline");
+        tokio::fs::rename(&target, &offline).await.unwrap();
+
+        mirror
+            .store
+            .update(note.id, Some("Written offline".into()), None, None)
+            .await
+            .unwrap();
+        mirror.mirror_document(note.id);
+        flush(&mirror).await;
+        assert!(mirror.health().await[&connector.id].is_some());
+
+        tokio::fs::rename(&offline, &target).await.unwrap();
+        let other = mirror.store.create().await.unwrap();
+        mirror.mirror_document(other.id);
+        flush(&mirror).await;
+        assert!(target.join(format!("{}.json", other.id)).is_file());
+        let error = mirror.health().await[&connector.id].clone();
+        let copy = Store::load(target.clone())
+            .await
+            .unwrap()
+            .get(note.id)
+            .await
+            .unwrap();
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+        tokio::fs::remove_dir_all(target).await.unwrap();
+        assert!(
+            error.is_none(),
+            "the connector is healthy after catching up"
+        );
+        assert_eq!(
+            copy.title, "Written offline",
+            "connector error after reconnect: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missed_deletion_is_retried_after_restart() {
+        let directory = folder("restart-primary");
+        let target = folder("restart-drive");
+        let retry_dir = folder("restart-config");
+        let retry_file = retry_dir.join("backup-retries.json");
+        let start = |store, connectors| {
+            BackupMirror::start(
+                store,
+                connectors,
+                Arc::new(Drive::new()),
+                Arc::new(Secrets::load(None)),
+                Some(retry_file.clone()),
+            )
+        };
+        let mirror = start(
+            Arc::new(Store::load(directory.clone()).await.unwrap()),
+            vec![],
+        );
+        let document = mirror.store.create().await.unwrap();
+        let connector = add_folder(&mirror, target.clone()).await.unwrap();
+        let copied = target.join(format!("{}.json", document.id));
+        assert!(copied.exists());
+        assert!(!retry_file.exists());
+
+        let offline = target.with_extension("offline");
+        tokio::fs::rename(&target, &offline).await.unwrap();
+        mirror.store.delete(document.id).await.unwrap();
+        mirror.mirror_document(document.id);
+        flush(&mirror).await;
+        assert!(mirror.health().await[&connector.id].is_some());
+        drop(mirror);
+
+        let restarted = start(
+            Arc::new(Store::load(directory.clone()).await.unwrap()),
+            vec![connector.clone()],
+        );
+        assert!(restarted.health().await[&connector.id].is_some());
+        tokio::fs::rename(&offline, &target).await.unwrap();
+        let other = restarted.store.create().await.unwrap();
+        restarted.mirror_document(other.id);
+        flush(&restarted).await;
+        assert!(!copied.exists());
+        assert!(target.join(format!("{}.json", other.id)).exists());
+        assert!(restarted.health().await[&connector.id].is_none());
+        let saved = std::fs::read(retry_file).unwrap();
+        let pending: HashMap<Uuid, HashSet<Uuid>> = serde_json::from_slice(&saved).unwrap();
+        assert!(pending.is_empty());
+        for path in [directory, target, retry_dir] {
+            tokio::fs::remove_dir_all(path).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_remembered_backup_pointing_at_the_library_never_removes_a_document() {
+        let directory = folder("remembered-overlap");
+        let store = Arc::new(Store::load(directory.clone()).await.unwrap());
+        let child = directory.join("child");
+        tokio::fs::create_dir(&child).await.unwrap();
+        let connector = BackupLocation {
+            id: Uuid::new_v4(),
+            target: BackupTarget::Folder {
+                path: child.join(".."),
+            },
+        };
+        let mirror = BackupMirror::start(
+            store.clone(),
+            vec![connector.clone()],
+            Arc::new(Drive::new()),
+            Arc::new(Secrets::load(None)),
+            None,
+        );
+        let note = store.create().await.unwrap();
+        store.delete(note.id).await.unwrap();
+        mirror.mirror_document(note.id);
+        flush(&mirror).await;
+        assert!(mirror.health().await[&connector.id].is_some());
+        let reopened = Store::load(directory.clone()).await.unwrap();
+        assert!(reopened.restore(note.id).await.unwrap().is_some());
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_new_folder_beneath_a_symlink_to_the_library_is_refused() {
+        let (mirror, directory) = test_mirror("symlink").await;
+        let alias = folder("symlink-target");
+        std::os::unix::fs::symlink(&directory, &alias).unwrap();
+        let child = alias.join("new");
+        assert!(matches!(
+            add_folder(&mirror, child.clone()).await,
+            Err(BackupError::InsideDataFolder)
+        ));
+        assert!(!child.exists());
+        tokio::fs::remove_file(alias).await.unwrap();
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn the_data_folder_and_relative_paths_are_refused() {
         let (mirror, directory) = test_mirror("refuse").await;
 
@@ -1250,6 +1501,7 @@ mod tests {
             }],
             mirror.drive.clone(),
             mirror.secrets.clone(),
+            None,
         );
 
         assert!(matches!(
@@ -1305,6 +1557,7 @@ mod tests {
             }],
             mirror.drive.clone(),
             mirror.secrets.clone(),
+            None,
         );
 
         assert!(matches!(

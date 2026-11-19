@@ -293,11 +293,16 @@ fn usable(target: &BackupTarget) -> bool {
 /// Write the settings. The file is replaced through a temporary file so a crash
 /// cannot leave half a settings file behind.
 pub async fn write(file: &Path, settings: &Settings) -> io::Result<()> {
+    write_json(file, settings).await
+}
+
+/// Atomically write a JSON file in the configuration directory.
+pub(crate) async fn write_json(file: &Path, value: &impl Serialize) -> io::Result<()> {
     if let Some(parent) = file.parent() {
         fs::create_dir_all(parent).await?;
     }
 
-    let bytes = serde_json::to_vec_pretty(settings).expect("settings are always serialisable");
+    let bytes = serde_json::to_vec_pretty(value)?;
     let temporary = file.with_extension("json.tmp");
 
     let mut handle = fs::File::create(&temporary).await?;

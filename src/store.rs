@@ -227,7 +227,7 @@ impl Store {
             // Files can be edited by hand. Sanitise and normalise them again at
             // the trust boundary so a hand-edited library can never inject
             // markup into the editor.
-            document.content = sanitize_content(&document.content);
+            document.content = sanitize_document_content(document.content);
             document.title = normalize_title(&document.title);
             document.paper_width = document.paper_width.map(bounded_paper_width);
 
@@ -347,7 +347,16 @@ impl Store {
     }
 
     pub(crate) async fn contains_active(&self, id: Uuid) -> bool {
-        self.state.read().await.active_document(id).is_some()
+        self.is_deleted(id).await == Some(false)
+    }
+
+    pub(crate) async fn is_deleted(&self, id: Uuid) -> Option<bool> {
+        self.state
+            .read()
+            .await
+            .documents
+            .get(&id)
+            .map(|document| document.deleted_at.is_some())
     }
 
     pub async fn create(&self) -> Result<Document, StoreError> {
@@ -443,7 +452,7 @@ impl Store {
             .map(|value| normalize_title(&value))
             .unwrap_or_else(|| document.title.clone());
         let next_content = content
-            .map(|value| sanitize_content(&value))
+            .map(sanitize_document_content)
             .unwrap_or_else(|| document.content.clone());
         let next_paper_width = match paper_width {
             // The browser sends zero when the width snaps back to the default,
@@ -521,7 +530,14 @@ impl Store {
         }
 
         let mut state = self.state.write().await;
-        if same_directory(&state.directory, &target) {
+        let current_key = directory_key(&state.directory)
+            .await
+            .map_err(|error| RelocateError::io(&state.directory, error))?;
+        if current_key
+            == directory_key(&target)
+                .await
+                .map_err(|error| RelocateError::io(&target, error))?
+        {
             return Err(RelocateError::SameDirectory);
         }
 
@@ -609,30 +625,37 @@ pub(crate) async fn document_files(directory: &Path) -> Vec<(Uuid, u64)> {
     files
 }
 
-/// A typed path and the path the browser showed may differ in separators,
-/// trailing slashes, and letter case on Windows.
-pub(crate) fn same_directory(left: &Path, right: &Path) -> bool {
-    comparable_path(left) == comparable_path(right)
-}
-
-fn comparable_path(path: &Path) -> String {
-    let mut text = path.to_string_lossy().into_owned();
-
-    while text.len() > 1 && (text.ends_with('/') || text.ends_with('\\')) {
-        let trimmed = &text[..text.len() - 1];
-        if trimmed.ends_with(':') {
-            break;
+/// Resolve aliases before comparing folders. Newly chosen folders can have
+/// missing components, including a missing child beneath an existing symlink.
+pub(crate) async fn directory_key(path: &Path) -> io::Result<PathBuf> {
+    let mut resolved = match fs::canonicalize(path).await {
+        Ok(real) => real,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut prefix = PathBuf::new();
+            for component in path.components() {
+                match component {
+                    std::path::Component::ParentDir => {
+                        prefix.pop();
+                    }
+                    std::path::Component::Normal(name) => {
+                        prefix.push(name);
+                        match fs::canonicalize(&prefix).await {
+                            Ok(real) => prefix = real,
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    _ => prefix.push(component),
+                }
+            }
+            prefix
         }
-        text.pop();
+        Err(error) => return Err(error),
+    };
+    if cfg!(windows) {
+        resolved.as_mut_os_string().make_ascii_lowercase();
     }
-
-    #[cfg(windows)]
-    {
-        text = text.replace('/', "\\");
-        text.make_ascii_lowercase();
-    }
-
-    text
+    Ok(resolved)
 }
 
 /// Best effort: the documents that were copied before a failure go away again,
@@ -867,7 +890,24 @@ pub fn sanitize_content(html: &str) -> String {
         .clean(html)
         .to_string();
 
-    demote_heading_four(clean)
+    protect_code_newlines(demote_heading_four(clean))
+}
+
+/// In Grapho's serialized HTML, text and attribute values have their angle
+/// brackets escaped. A newline here is the first character of a code block.
+/// HTML parsers discard it immediately after <pre>, but keep it in a span.
+fn protect_code_newlines(html: String) -> String {
+    if html.contains("<pre>\n") {
+        html.replace("<pre>\n", "<pre><span>\n</span>")
+    } else {
+        html
+    }
+}
+
+fn sanitize_document_content(html: String) -> String {
+    // Older files and still-open editor tabs put the first newline directly
+    // after <pre>. Preserve it before the HTML parser reads the document.
+    sanitize_content(&protect_code_newlines(html))
 }
 
 /// Heading levels stop at three. A document written by an older version may
@@ -1146,7 +1186,7 @@ fn preview_html(html: &str) -> String {
         output.push('>');
     }
 
-    output
+    protect_code_newlines(output)
 }
 
 /// The tags a preview keeps, normalised. Inline versus block matters for the
@@ -1498,6 +1538,54 @@ mod tests {
         );
         assert!(clean.contains("tab\there"), "a tab survives: {clean}");
         assert!(clean.contains("a<br><br>b"), "hard breaks survive: {clean}");
+    }
+
+    #[test]
+    fn regression_code_block_spacing_survives_reopening() {
+        for text in ["\n", "\n\n", "\n\nreturn 42;\n"] {
+            // Store input from the current editor, then sanitize it again
+            // as on reopen. The first newline is inside a neutral span.
+            let saved = format!("<pre><span>\n</span>{}</pre>", &text[1..]);
+            assert_eq!(sanitize_content(&saved), saved);
+        }
+        // Cleaning imported HTML can itself expose a leading newline, for
+        // example when a comment before the newline is removed.
+        let saved = sanitize_content("<pre><!-- a comment -->\n\nreturn 42;</pre>");
+        assert_eq!(saved, "<pre><span>\n</span>\nreturn 42;</pre>");
+        assert_eq!(sanitize_content(&saved), saved);
+        assert_eq!(preview_html(&saved), saved);
+    }
+
+    #[tokio::test]
+    async fn older_code_blocks_keep_the_newlines_still_present_on_disk() {
+        let directory = temp_directory("legacy-code");
+        fs::create_dir_all(&directory).await.unwrap();
+        let mut document = Document::blank(Uuid::new_v4());
+        document.content = "<pre>\n\nreturn 42;</pre>".into();
+        persist_document(&directory, &document).await.unwrap();
+
+        let expected = "<pre><span>\n</span>\nreturn 42;</pre>";
+        let store = Store::load(directory.clone()).await.unwrap();
+        assert_eq!(store.get(document.id).await.unwrap().content, expected);
+        store
+            .update(document.id, Some("Renamed".into()), None, None)
+            .await
+            .unwrap();
+        let reopened = Store::load(directory.clone()).await.unwrap();
+        assert_eq!(reopened.get(document.id).await.unwrap().content, expected);
+        let older_tab = "<pre>\n\nreturn 7;</pre>";
+        let edited = reopened
+            .update(document.id, None, Some(older_tab.into()), None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(edited.content, "<pre><span>\n</span>\nreturn 7;</pre>");
+        let reopened = Store::load(directory.clone()).await.unwrap();
+        assert_eq!(
+            reopened.get(document.id).await.unwrap().content,
+            edited.content
+        );
+        fs::remove_dir_all(directory).await.unwrap();
     }
 
     #[test]

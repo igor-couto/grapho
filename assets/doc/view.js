@@ -32,6 +32,7 @@ export class EditorView {
   }
 
   setLayout(layout, blocks) {
+    const previousBlocks = this.blocks;
     this.layout = layout;
     this.blocks = blocks;
     this.root.style.height = layout.height + "px";
@@ -51,8 +52,10 @@ export class EditorView {
         this.content.appendChild(view.element);
       }
 
-      if (view.signature !== signature) {
-        this.paintBlock(view, entry, blocks[index], index);
+      // Image edits replace the block. Comparing its identity catches pixel
+      // and alt-text changes without hashing a data URL on every keystroke.
+      if (view.signature !== signature || (entry.image && previousBlocks?.[index] !== blocks[index])) {
+        this.paintBlock(view, entry, blocks[index]);
         view.signature = signature;
       }
     });
@@ -81,8 +84,6 @@ export class EditorView {
         entry.image.y,
         entry.image.width,
         entry.image.height,
-        block.src.slice(0, 24),
-        block.src.length,
         imageRadius(block),
       );
     }
@@ -105,11 +106,11 @@ export class EditorView {
         );
       }
     }
-    parts.push(entry.marker ? "m" + this.markerText(block, entry.index) : "");
+    parts.push(entry.marker ? "m" + entry.marker.text : "");
     return parts.join("\u0001");
   }
 
-  paintBlock(view, entry, block, index) {
+  paintBlock(view, entry, block) {
     const element = view.element;
     element.className = "doc-block" + (entry.quote ? " is-quote" : "") + (entry.divider ? " is-divider" : "");
     element.style.top = entry.top + "px";
@@ -190,39 +191,12 @@ export class EditorView {
     if (entry.marker) {
       const marker = document.createElement("div");
       marker.className = "doc-marker" + (block.ordered ? " is-number" : "");
-      const text = this.markerText(block, index);
+      const text = entry.marker.text;
       marker.textContent = text;
       marker.style.left = entry.marker.x - textWidth(text, fontFor(block, null)) + "px";
       marker.style.top = entry.marker.y - entry.top + "px";
       element.appendChild(marker);
     }
-  }
-
-  markerText(block, index) {
-    if (!block || !block.ordered) {
-      return "•";
-    }
-
-    let number = 1;
-    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-      const previous = this.blocks[cursor];
-      if (!previous || previous.type !== "list") {
-        break;
-      }
-      if (previous.depth > block.depth) {
-        // A nested list belongs to the previous sibling; the numbers of this
-        // level continue after it.
-        continue;
-      }
-      if (previous.depth !== block.depth) {
-        break;
-      }
-      if (!previous.ordered) {
-        break;
-      }
-      number += 1;
-    }
-    return number + ".";
   }
 
   paintSelection(selection) {

@@ -13,9 +13,11 @@
 import {
   blockLength,
   createBlockId,
+  emptyParagraph,
   escapeText,
   parseDocument,
   runsInRange,
+  serializeCodeBlock,
   serializeDocument,
 } from "./model.js";
 
@@ -174,42 +176,28 @@ export function selectionHtml(blocks, from, to) {
     }
 
     const start = index === from.block ? from.offset : 0;
-    const end = index === to.block ? to.offset : blockLength(block);
-    if (end <= start && !(index > from.block && index < to.block)) {
-      continue;
+    const length = blockLength(block);
+    const end = index === to.block ? to.offset : length;
+    if (start === end) {
+      if (from.block === to.block) continue;
+      // Only the paragraph break was selected at this edge. Keep the break
+      // without bringing along an unselected heading or list item's style.
+      if (length > 0) {
+        copied.push(emptyParagraph());
+        continue;
+      }
     }
 
     const runs = runsInRange(block, start, end);
     const copy = { ...block, id: createBlockId(), runs };
-    if (start > 0 || end < blockLength(block)) {
+    if (start > 0 || end < length) {
       delete copy.align;
       delete copy.indent;
     }
     copied.push(copy);
   }
 
-  return copied.length ? serializeDocument(normalizeListDepths(copied)) : "";
-}
-
-// A copied nested list starts at its first item, not at its depth in the
-// document. Normalize each list run against its first item so serialization
-// keeps the relative nesting instead of inventing a parent item.
-function normalizeListDepths(blocks) {
-  let base = null;
-  let ordered = null;
-  return blocks.map((block) => {
-    if (block.type !== "list") {
-      base = null;
-      return block;
-    }
-    const isOrdered = Boolean(block.ordered);
-    if (base === null || isOrdered !== ordered) {
-      base = Number(block.depth) || 0;
-      ordered = isOrdered;
-    }
-    const depth = Math.max(0, (Number(block.depth) || 0) - base);
-    return depth === block.depth ? block : { ...block, depth };
-  });
+  return serializeDocument(copied);
 }
 
 /* --------------------------------------------------------------------------
@@ -304,7 +292,7 @@ function renderNode(node, context) {
     return renderImage(node);
   }
   if (tag === "pre") {
-    return "<pre>" + escapeText(preText(node)) + "</pre>";
+    return serializeCodeBlock(preText(node));
   }
   if (tag === "hr") {
     return "<hr>";
