@@ -4,8 +4,9 @@ Grapho is a small writing app that runs in the browser. It is one Rust binary wi
 no database, account system, or frontend build step. Documents are plain JSON
 files on disk.
 
-The home screen lists and searches documents, showing a preview of each one in
-grid view. The editor has the formatting I use most, holds images that can be
+The home screen searches document titles and full text, highlights matching
+passages, and shows previews in grid view. The editor has the formatting I use
+most, holds images that can be
 dragged into the text so the words flow around them and resized from their
 corners, saves as you type, and can export to HTML, Markdown, PDF, or plain
 text. The menu switches between a dark theme (the default) and a light one. Focus
@@ -85,7 +86,7 @@ backups — a folder, an SSH server, or a Google Drive folder — that receive a
 of every save.
 
 Every shortcut is listed on the **Shortcuts** page (the menu on any page). The
-most useful: `Ctrl+O` searches every document from any page, `Ctrl+S` saves now,
+most useful: `Ctrl+O` opens documents by title, `Ctrl+S` saves now,
 `Ctrl+K` adds a link, `Ctrl+B` / `Ctrl+I` / `Ctrl+U` format text,
 `Ctrl+Shift+F` toggles focus mode, `Ctrl+Shift+M` switches between Markdown mode
 and the normal rendered view, and `/` focuses the search box on the home screen.
@@ -282,8 +283,7 @@ and working notes.
 ## Current limits
 
 Single user. No sharing, real-time collaboration, comments, tables, or version
-history. Search covers a document's title and first page, not its whole text. The
-optional password signs one person in: there are no accounts, no TLS,
+history. The optional password signs one person in: there are no accounts, no TLS,
 and failed logins pause per address, so behind a reverse proxy they share the
 proxy's address and one pause. PDF downloads use A4
 pages and PDF's standard fonts; characters outside WinAnsi are replaced with

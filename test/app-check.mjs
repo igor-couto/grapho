@@ -3331,16 +3331,13 @@ async function main() {
       ).catch(() => null);
     }
 
-    // Search reads the text of the preview the listing already carries, not
-    // just the 220-character excerpt. Seed a document whose marker word sits
-    // past the excerpt but inside the preview, then type it into the library
-    // search: the card has to appear. The ampersand proves the preview's
-    // escaped entities are decoded before matching.
+    // Put the matching passage after the card preview. Search should find it,
+    // display the surrounding text, and highlight the original spelling.
     const searchFixture = await evaluate(
       cdp,
       `(async () => {
-        const filler = "filler words before the marker ".repeat(12);
-        const content = "<p>" + filler + "needleword and R&amp;D notes</p>";
+        const filler = "filler words before the marker ".repeat(75);
+        const content = "<p>" + filler + "</p><p>Needleword and R&amp;D notes</p>";
         const created = await fetch("/api/documents", { method: "POST" });
         if (!created.ok) throw new Error("create failed: " + created.status);
         const document = await created.json();
@@ -3354,18 +3351,16 @@ async function main() {
         const summary = listing.documents.find((entry) => entry.id === document.id);
         return {
           id: document.id,
-          excerptHasMarker: Boolean(summary && summary.excerpt.includes("needleword")),
-          previewHasMarker: Boolean(summary && summary.preview.includes("needleword")),
-          previewHasAmpersand: Boolean(summary && summary.preview.includes("R&amp;D")),
+          excerptHasMarker: Boolean(summary && summary.excerpt.includes("Needleword")),
+          previewHasMarker: Boolean(summary && summary.preview.includes("Needleword")),
         };
       })()`,
     );
     check(
-      "the search fixture's marker is past the excerpt and inside the preview",
+      "the search fixture's marker is past both the excerpt and the preview",
       Boolean(searchFixture.id) &&
         searchFixture.excerptHasMarker === false &&
-        searchFixture.previewHasMarker === true &&
-        searchFixture.previewHasAmpersand === true,
+        searchFixture.previewHasMarker === false,
       JSON.stringify(searchFixture),
     );
 
@@ -3391,6 +3386,8 @@ async function main() {
         `(() => ({
           value: document.getElementById("searchDocuments").value,
           ids: Array.from(document.querySelectorAll(".document-card")).map((card) => card.dataset.documentId),
+          excerpt: document.querySelector(".document-search-excerpt:not([hidden])")?.textContent,
+          match: document.querySelector(".document-search-excerpt mark")?.textContent,
           empty: !document.getElementById("emptyState").hidden,
         }))()`,
       );
@@ -3403,9 +3400,11 @@ async function main() {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     check(
-      "search finds a word past the 220-character excerpt",
+      "search finds and highlights a passage past the preview",
       deepSearch.value === "needleword" &&
         deepSearch.ids.includes(searchFixture.id) &&
+        deepSearch.excerpt?.includes("Needleword and R&D notes") &&
+        deepSearch.match === "Needleword" &&
         deepSearch.empty === false,
       JSON.stringify(deepSearch),
     );
@@ -3415,14 +3414,16 @@ async function main() {
     let ampersandSearch = null;
     for (let attempt = 0; attempt < 40; attempt += 1) {
       ampersandSearch = await readSearch();
-      if (ampersandSearch.ids.includes(searchFixture.id)) {
+      if (ampersandSearch.match === "R&D") {
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     check(
       "search matches an ampersand typed into the field",
-      ampersandSearch.value === "R&D" && ampersandSearch.ids.includes(searchFixture.id),
+      ampersandSearch.value === "R&D" &&
+        ampersandSearch.ids.includes(searchFixture.id) &&
+        ampersandSearch.match === "R&D",
       JSON.stringify(ampersandSearch),
     );
 
@@ -3994,11 +3995,15 @@ async function main() {
       `(() => {
         const dialog = document.querySelector("dialog.quick-open[open]");
         const input = document.getElementById("quickOpenInput");
-        return Boolean(dialog && input && document.activeElement === input);
+        return Boolean(
+          dialog?.getAttribute("aria-label") === "Open by title" &&
+          input?.placeholder === "Open by title" &&
+          document.activeElement === input,
+        );
       })()`,
       PAGE_TIMEOUT_MS,
     );
-    check("Ctrl+O opens the document search on the library", paletteOpened);
+    check("Ctrl+O opens Open by title on the library", paletteOpened);
 
     const listedPaletteDocuments = await waitForExpression(
       cdp,
@@ -4116,7 +4121,7 @@ async function main() {
         return Boolean(
           message &&
           !message.hidden &&
-          message.textContent.includes("No documents match"),
+          message.textContent.includes("No matching titles"),
         );
       })()`,
       5000,

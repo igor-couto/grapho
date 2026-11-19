@@ -4,13 +4,12 @@
   var state = {
     documents: [],
     cards: new Map(),
-    // Lowercased plain text of each document's preview, keyed by id. The
-    // listing already carries the preview for the grid miniature; reading its
-    // text makes search cover about a page of the document instead of the
-    // 220-character excerpt, with no extra request and no extra payload.
-    previewTexts: new Map(),
     previewObserver: null,
     query: "",
+    searchTimer: null,
+    searchRequest: null,
+    searchResults: null,
+    searchError: "",
     view: "list",
     sort: "modified",
     loaded: false,
@@ -125,23 +124,22 @@
   function bindStaticEvents() {
     els.newDocument.addEventListener("click", createDocument);
 
-    els.searchDocuments.addEventListener("input", function () {
-      state.query = els.searchDocuments.value.trim();
-      renderDocuments();
-    });
+    els.searchDocuments.addEventListener("input", updateSearch);
 
     els.searchDocuments.addEventListener("keydown", function (event) {
       if (event.key === "Escape" && els.searchDocuments.value) {
         event.preventDefault();
-        els.searchDocuments.value = "";
-        state.query = "";
-        renderDocuments();
+        clearSearch();
       }
     });
 
     els.emptyClearSearch.addEventListener("click", clearSearch);
     els.retryLoad.addEventListener("click", function () {
-      loadDocuments();
+      if (state.loaded) {
+        updateSearch();
+      } else {
+        loadDocuments();
+      }
     });
 
     els.viewToggle.addEventListener("click", toggleView);
@@ -272,17 +270,18 @@
     try {
       var payload = await request("/api/documents");
       state.documents = Array.isArray(payload.documents) ? payload.documents : [];
-      state.previewTexts.clear();
       state.loaded = true;
       els.signOut.hidden = !payload.auth_required;
       els.signOutRule.hidden = !payload.auth_required;
       applySort();
-      renderDocuments();
+      updateSearch();
     } catch (error) {
       showLoadError(error);
     } finally {
       state.busy = false;
-      els.documents.setAttribute("aria-busy", "false");
+      if (!state.loaded) {
+        els.documents.setAttribute("aria-busy", "false");
+      }
       els.searchDocuments.disabled = false;
     }
   }
@@ -345,34 +344,62 @@
     els.retryLoad.disabled = false;
   }
 
-  // The plain text of a document's preview, lowercased for the search filter.
-  // The preview is the card's miniature: the server strips links, images, and
-  // attributes from the stored HTML and stops after about one page of text, so
-  // its words are the document's own. Cached per document because it only
-  // changes when the writing does; a rename does not invalidate it.
-  function previewSearchText(document) {
-    var cached = state.previewTexts.get(document.id);
-    if (cached && cached.preview === document.preview) {
-      return cached.text;
+  function cancelSearch() {
+    window.clearTimeout(state.searchTimer);
+    if (state.searchRequest) {
+      state.searchRequest.abort();
+      state.searchRequest = null;
     }
-    var text = plainPreviewText(document.preview).toLocaleLowerCase();
-    state.previewTexts.set(document.id, { preview: document.preview, text: text });
-    return text;
   }
 
-  // `preview_html` only writes the tags it lists, and no attributes except the
-  // image placeholder's class, so stripping tags is enough. Block tags become
-  // spaces so a query cannot match across two paragraphs, the three entities
-  // the server escapes are decoded so a typed "&" matches, and whitespace
-  // collapses the way the server's own text extraction collapses it.
-  function plainPreviewText(preview) {
-    return String(preview || "")
-      .replace(/<[^>]*>/g, " ")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&amp;/g, "&")
-      .replace(/\s+/g, " ")
-      .trim();
+  function updateSearch() {
+    if (!state.loaded) {
+      return;
+    }
+    cancelSearch();
+    state.query = els.searchDocuments.value.trim();
+    state.searchResults = null;
+    state.searchError = "";
+    renderDocuments();
+    if (state.query) {
+      state.searchTimer = window.setTimeout(searchDocuments, 230);
+    }
+  }
+
+  async function searchDocuments() {
+    cancelSearch();
+    var controller = new AbortController();
+    state.searchRequest = controller;
+    var params = new URLSearchParams({ q: state.query });
+
+    try {
+      var payload = await request("/api/documents/search?" + params, {
+        signal: controller.signal,
+      });
+      if (state.searchRequest !== controller) {
+        return;
+      }
+      state.searchResults = payload.matches;
+      state.searchError = "";
+    } catch (error) {
+      if (state.searchRequest !== controller) {
+        return;
+      }
+      state.searchResults = null;
+      state.searchError =
+        "Couldn't search your documents. " +
+        (error.userMessage || "Try again.");
+    }
+    state.searchRequest = null;
+    renderDocuments();
+  }
+
+  async function refreshAfterChange() {
+    if (state.query) {
+      await searchDocuments();
+    } else {
+      renderDocuments();
+    }
   }
 
   function renderDocuments() {
@@ -382,21 +409,22 @@
       return;
     }
 
-    var query = state.query.toLocaleLowerCase();
-    var visible = state.documents.filter(function (document) {
-      if (!query) {
-        return true;
-      }
-      return (
-        document.title.toLocaleLowerCase().includes(query) ||
-        document.excerpt.toLocaleLowerCase().includes(query) ||
-        previewSearchText(document).includes(query)
-      );
-    });
+    var searching = Boolean(state.query);
+    var waiting = searching && !state.searchResults && !state.searchError;
+    els.documents.setAttribute("aria-busy", String(waiting));
+    els.libraryMessage.classList.toggle("is-searching", waiting);
+    els.libraryMessage.hidden = !waiting && !state.searchError;
+    els.libraryMessageText.textContent = waiting ? "Searching…" : state.searchError;
+    els.retryLoad.hidden = !state.searchError;
+    els.retryLoad.disabled = !state.searchError;
+    els.documents.classList.toggle("is-search-results", searching);
 
-    els.libraryToolbar.hidden = state.documents.length === 0;
+    var visible = searching
+      ? (state.searchResults || []).slice().sort(compareDocuments)
+      : state.documents;
+    els.libraryToolbar.hidden = state.documents.length === 0 && visible.length === 0;
 
-    if (state.documents.length === 0) {
+    if (!searching && state.documents.length === 0) {
       forgetCards();
       els.documents.replaceChildren();
       els.documents.hidden = true;
@@ -408,7 +436,11 @@
       state.cards.forEach(stopObservingCard);
       els.documents.replaceChildren();
       els.documents.hidden = true;
-      showEmptyState(true);
+      if (waiting || state.searchError) {
+        els.emptyState.hidden = true;
+      } else {
+        showEmptyState(true);
+      }
       return;
     }
 
@@ -419,7 +451,7 @@
     // Cards are kept between renders so filtering by search does not rebuild
     // them (and their previews, which are the expensive part of a card).
     var known = new Set(
-      state.documents.map(function (document) {
+      state.documents.concat(visible).map(function (document) {
         return document.id;
       }),
     );
@@ -478,6 +510,7 @@
       link: fragment.querySelector(".document-card-link"),
       preview: fragment.querySelector(".document-preview"),
       title: fragment.querySelector(".document-card-title"),
+      excerpt: fragment.querySelector(".document-search-excerpt"),
       edited: fragment.querySelector(".document-edited"),
       previewFilled: false,
     };
@@ -551,7 +584,20 @@
     card.document = document;
     card.link.href = "/doc/" + encodeURIComponent(document.id);
     card.link.setAttribute("aria-label", "Open " + document.title);
-    card.title.textContent = document.title;
+    card.title.title = document.title_match ? document.title : "";
+    if (document.title_match) {
+      showMatch(card.title, document.title_match);
+    } else {
+      card.title.textContent = document.title;
+    }
+    if (document.body_match) {
+      showMatch(card.excerpt, document.body_match);
+      card.link.setAttribute("aria-description", card.excerpt.textContent);
+    } else {
+      card.excerpt.textContent = "";
+      card.link.removeAttribute("aria-description");
+    }
+    card.excerpt.hidden = !document.body_match;
     card.openItem.href = card.link.href;
 
     var updated = new Date(document.updated_at);
@@ -560,6 +606,12 @@
         ? "Edited " + relativeTime(document.updated_at)
         : dateFormatter.format(updated);
     card.edited.title = "Edited " + dateTimeFormatter.format(updated);
+  }
+
+  function showMatch(element, excerpt) {
+    var mark = document.createElement("mark");
+    mark.textContent = excerpt.matched;
+    element.replaceChildren(excerpt.before, mark, excerpt.after);
   }
 
   function previewSeen(entries) {
@@ -666,7 +718,7 @@
       );
       state.documents.push(copy);
       applySort();
-      renderDocuments();
+      await refreshAfterChange();
       showToast("Document duplicated.");
       focusCard(copy.id);
     } catch (error) {
@@ -794,9 +846,9 @@
           };
         });
         applySort();
-        renderDocuments();
         state.returnFocus = null;
         closeActionDialog();
+        await refreshAfterChange();
         showToast("Document renamed.");
         focusCard(pending.document.id);
       } else {
@@ -807,10 +859,9 @@
         state.documents = state.documents.filter(function (document) {
           return document.id !== pending.document.id;
         });
-        state.previewTexts.delete(pending.document.id);
-        renderDocuments();
         state.returnFocus = null;
         closeActionDialog();
+        await refreshAfterChange();
         showToast("“" + pending.document.title + "” was deleted.");
         if (!els.searchDocuments.disabled) {
           els.searchDocuments.focus();
@@ -950,8 +1001,7 @@
 
   function clearSearch() {
     els.searchDocuments.value = "";
-    state.query = "";
-    renderDocuments();
+    updateSearch();
     els.searchDocuments.focus();
   }
 
@@ -1008,12 +1058,16 @@
     try {
       response = await fetch(path, fetchOptions);
     } catch (networkError) {
+      if (fetchOptions.signal && fetchOptions.signal.aborted) {
+        throw networkError;
+      }
       var offline = new Error("Network request failed");
       offline.userMessage =
         "Couldn't reach Grapho. Check that the server is still running.";
       throw offline;
     }
 
+    fetchOptions.signal?.throwIfAborted();
     if (!response.ok) {
       if (response.status === 401) {
         window.location.assign(loginUrl());

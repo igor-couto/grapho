@@ -569,6 +569,12 @@ html[data-theme="dark"] .new-document-button:hover:not(:disabled) {
   font-size: 13px;
 }
 
+.library-message.is-searching {
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--muted);
+}
+
 .library-toolbar {
   display: flex;
   align-items: center;
@@ -808,6 +814,11 @@ html[data-theme="dark"] .new-document-button:hover:not(:disabled) {
   flex-direction: column;
 }
 
+.document-label {
+  display: block;
+  min-width: 0;
+}
+
 .document-card-title {
   display: -webkit-box;
   overflow: hidden;
@@ -821,6 +832,24 @@ html[data-theme="dark"] .new-document-button:hover:not(:disabled) {
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+
+.document-search-excerpt {
+  display: -webkit-box;
+  overflow: hidden;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.document-label mark {
+  background: transparent;
+  color: var(--accent-strong);
+  font-weight: 650;
 }
 
 .document-meta {
@@ -1297,6 +1326,10 @@ html[data-theme="dark"] .skeleton {
   gap: 18px;
 }
 
+.documents.is-list .document-label {
+  flex: 1;
+}
+
 .documents.is-list .document-card-title {
   display: block;
   flex: 1;
@@ -1309,6 +1342,11 @@ html[data-theme="dark"] .skeleton {
   line-height: 1.5;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.documents.is-list.is-search-results .document-card-title {
+  display: -webkit-box;
+  white-space: normal;
 }
 
 .documents.is-list .document-meta {

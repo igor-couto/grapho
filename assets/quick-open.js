@@ -1,4 +1,4 @@
-// Ctrl+O opens a search over the library from any page except the password
+// Ctrl+O opens a title picker from any page except the password
 // gate. The listing is read when the search opens, so the editor, storage,
 // version, shortcuts, and not-found pages get the whole library without
 // loading it in the background. Filtering stays local: one request per
@@ -207,7 +207,7 @@
 
     var dialog = document.createElement("dialog");
     dialog.className = "quick-open";
-    dialog.setAttribute("aria-label", "Search documents");
+    dialog.setAttribute("aria-label", "Open by title");
 
     var search = document.createElement("div");
     search.className = "quick-open-search";
@@ -217,12 +217,12 @@
     input.id = "quickOpenInput";
     input.className = "quick-open-input";
     input.type = "text";
-    input.placeholder = "Search documents";
+    input.placeholder = "Open by title";
     input.autocomplete = "off";
     input.spellcheck = false;
     input.setAttribute("autocapitalize", "off");
     input.setAttribute("role", "combobox");
-    input.setAttribute("aria-label", "Search documents");
+    input.setAttribute("aria-label", "Open by title");
     input.setAttribute("aria-autocomplete", "list");
     input.setAttribute("aria-expanded", "true");
     input.setAttribute("aria-controls", "quickOpenList");
@@ -447,7 +447,7 @@
     if (visible.length === 0) {
       showMessage(
         state.query.trim()
-          ? "No documents match that search."
+          ? "No matching titles. Search document text in the library."
           : "No documents yet.",
       );
       setCount(countLabel(0, state.documents.length));

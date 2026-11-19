@@ -59,6 +59,23 @@ pub struct DocumentSummary {
     pub updated_at: u64,
 }
 
+#[derive(Serialize)]
+pub struct DocumentMatch {
+    #[serde(flatten)]
+    summary: DocumentSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title_match: Option<SearchExcerpt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body_match: Option<SearchExcerpt>,
+}
+
+#[derive(Serialize)]
+struct SearchExcerpt {
+    before: String,
+    matched: String,
+    after: String,
+}
+
 #[derive(Debug)]
 pub enum StoreError {
     Io(io::Error),
@@ -219,6 +236,32 @@ impl Store {
                 .then_with(|| left.title.cmp(&right.title))
         });
         summaries
+    }
+
+    pub async fn search(&self, query: &str) -> Vec<DocumentMatch> {
+        let query = fold_for_search(&query.split_whitespace().collect::<Vec<_>>().join(" "));
+        if query.is_empty() {
+            return Vec::new();
+        }
+
+        let state = self.state.read().await;
+        state
+            .documents
+            .values()
+            .filter_map(|document| {
+                let text = html_to_text(&document.content);
+                let title_match = search_excerpt(&document.title, &query);
+                let body_match = search_excerpt(&text, &query);
+                if title_match.is_none() && body_match.is_none() {
+                    return None;
+                }
+                Some(DocumentMatch {
+                    summary: summarize(document, &text),
+                    title_match,
+                    body_match,
+                })
+            })
+            .collect()
     }
 
     pub async fn get(&self, id: Uuid) -> Option<Document> {
@@ -774,9 +817,9 @@ fn is_embedded_image(value: &str) -> bool {
         .any(|prefix| value.len() > prefix.len() && value.starts_with(prefix))
 }
 
-/// Convert safe stored HTML into text for summaries and word counts.
+/// Convert safe stored HTML into text for summaries, word counts, and search.
 pub fn html_to_text(html: &str) -> String {
-    let mut raw = String::with_capacity(html.len());
+    let mut raw = String::new();
     let mut index = 0;
 
     while index < html.len() {
@@ -787,8 +830,11 @@ pub fn html_to_text(html: &str) -> String {
 
         if character == '<' {
             if let Some(relative_end) = rest.find('>') {
-                let tag = rest[1..relative_end].trim().to_ascii_lowercase();
-                if is_line_break_tag(&tag) {
+                // Attributes can contain megabytes of embedded image data.
+                // Only the name determines how to join the surrounding words.
+                let tag = &rest[1..relative_end];
+                let name = tag.split_ascii_whitespace().next().unwrap_or("");
+                if is_line_break_tag(name.trim_end_matches('/')) {
                     raw.push('\n');
                 }
                 index += relative_end + 1;
@@ -801,48 +847,94 @@ pub fn html_to_text(html: &str) -> String {
     }
 
     let decoded = html_escape::decode_html_entities(&raw);
-    decoded
-        .replace('\u{00a0}', " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    decoded.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn is_line_break_tag(tag: &str) -> bool {
-    tag == "br"
-        || tag == "br/"
-        || tag.starts_with("br ")
-        || tag.starts_with("img")
-        || tag == "hr"
-        || tag == "hr/"
-        || tag.starts_with("hr ")
-        || [
-            "/p",
-            "/div",
-            "/h1",
-            "/h2",
-            "/h3",
-            "/li",
-            "/blockquote",
-            "/pre",
-        ]
-        .iter()
-        .any(|prefix| tag.starts_with(prefix))
+    matches!(
+        tag,
+        "br" | "img"
+            | "hr"
+            | "/p"
+            | "/div"
+            | "/h1"
+            | "/h2"
+            | "/h3"
+            | "/li"
+            | "/blockquote"
+            | "/pre"
+    )
+}
+
+fn fold_for_search(text: &str) -> String {
+    text.chars().flat_map(char::to_lowercase).collect()
+}
+
+fn search_excerpt(text: &str, query: &str) -> Option<SearchExcerpt> {
+    let folded_start = fold_for_search(text).find(query)?;
+    let folded_end = folded_start + query.len();
+    let mut folded_offset = 0;
+    let mut start = 0;
+    let mut end = text.len();
+
+    // Lowercasing can change a character's length (for example, İ becomes
+    // i plus a combining dot). Find the original character boundaries.
+    for (offset, character) in text.char_indices() {
+        if folded_offset >= folded_end {
+            end = offset;
+            break;
+        }
+        if folded_offset <= folded_start {
+            start = offset;
+        }
+        folded_offset += character.to_lowercase().map(char::len_utf8).sum::<usize>();
+    }
+
+    let prefix = &text[..start];
+    let suffix = &text[end..];
+    let before = match prefix.char_indices().rev().nth(40) {
+        Some((cut, character)) => {
+            let tail = &prefix[cut + character.len_utf8()..];
+            let tail = tail.split_once(' ').map_or(tail, |(_, words)| words);
+            format!("…{tail}")
+        }
+        None => prefix.to_owned(),
+    };
+    let matched = match text[start..end].char_indices().nth(120) {
+        Some((cut, _)) => format!("{}…", &text[start..start + cut]),
+        None => text[start..end].to_owned(),
+    };
+    let after = match suffix.char_indices().nth(65) {
+        Some((cut, _)) => {
+            let head = &suffix[..cut];
+            let head = head.rsplit_once(' ').map_or(head, |(words, _)| words);
+            format!("{head}…")
+        }
+        None => suffix.to_owned(),
+    };
+    Some(SearchExcerpt {
+        before,
+        matched,
+        after,
+    })
 }
 
 pub(crate) fn summary_for(document: &Document) -> DocumentSummary {
-    let text = html_to_text(&document.content);
+    summarize(document, &html_to_text(&document.content))
+}
+
+fn summarize(document: &Document, text: &str) -> DocumentSummary {
     let mut preview = preview_html(&document.content);
     if preview.is_empty() && !text.is_empty() {
         // The markup started with something larger than the preview's scan
         // window (a document that opens with a big embedded image, say). The
         // text is already here, so the card still shows the writing.
-        preview = text_preview(&text);
+        preview = text_preview(text);
     }
     DocumentSummary {
         id: document.id,
         title: document.title.clone(),
-        excerpt: make_excerpt(&text),
+        excerpt: make_excerpt(text),
         preview,
         word_count: text.split_whitespace().count(),
         created_at: document.created_at,

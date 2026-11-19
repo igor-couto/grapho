@@ -96,7 +96,7 @@
           <circle cx="10.8" cy="10.8" r="6.3" stroke="currentColor" stroke-width="1.7"/>
           <path d="m15.5 15.5 4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
         </svg>
-        <input id="searchDocuments" type="search" placeholder="Search documents" autocomplete="off" spellcheck="false" aria-label="Search documents">
+        <input id="searchDocuments" type="search" placeholder="Search titles and text" autocomplete="off" spellcheck="false" aria-label="Search document titles and text">
         <kbd aria-hidden="true">/</kbd>
       </label>
     </div>
@@ -189,7 +189,10 @@
           <div class="document-preview"></div>
         </div>
         <span class="document-copy">
-          <span class="document-card-title"></span>
+          <span class="document-label">
+            <span class="document-card-title"></span>
+            <span class="document-search-excerpt" hidden></span>
+          </span>
           <span class="document-meta">
             <span class="document-edited"></span>
           </span>

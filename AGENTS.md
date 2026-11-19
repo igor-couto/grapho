@@ -24,8 +24,9 @@ roles, no per-document permissions. Keep it that way.
   code can do clearly.
 - No JavaScript framework, CSS framework, bundler, icon package, remote font, or
   CDN. The UI is plain HTML/CSS/JS, and the fonts are bundled locally.
-- Do not add polling, background sync, or extra requests. The library loads once,
-  and the editor saves only after content changes.
+- Do not add polling, background sync, or speculative requests. The library
+  loads once, search waits for a pause in typing, and the editor saves only
+  after content changes.
 - Keep keystroke work cheap. Client-side word counts are local; saves are
   debounced. Do not turn typing into synchronous I/O or a request per keystroke.
 - Do not optimize on instinct. The realistic target is a person with a few hundred
@@ -209,15 +210,17 @@ text. The card uses the editor's proportions and is sized with container units,
 so ordinary browser text wrapping paints the miniature; a soft fade at the
 bottom stands in for the page break Grapho does not have. `home.js` fills a
 card's preview only when the card comes near the viewport and keeps card
-elements between renders, so search filtering never rebuilds them. List rows
-show no preview. Search matches a document's title, its excerpt, and the text of
-its preview, so any word on the document's first page finds it; `home.js` strips
-the preview's markup once per document and caches the lowercase text, so typing
-stays a few `indexOf` calls. Text past that first page is not searched: the
-listing deliberately carries no more of the document than the cards already
-need, which is what keeps search request-free. A word beyond the first page
-needs the server-side search design instead, which trades one debounced request
-for full-text coverage.
+elements between renders. List rows show no miniature.
+
+Library search sends one debounced request to `/api/documents/search?q=…`
+and cancels stale requests. The server scans titles and the full plain text
+of the current in-memory documents for a case-insensitive phrase, treating runs
+of whitespace as a space. It uses the same HTML text extraction as the listing
+and ignores markup and image data. Results carry the usual card summary and
+plain-text excerpts split around the matching title or passage. The browser
+highlights the match in either view, keeps the selected sort, and refreshes
+active results after a rename, duplicate, or delete. Clearing the query returns
+to the already loaded listing.
 
 Each card's ⋯ menu opens the document, renames it, duplicates it, or deletes it.
 A duplicate is made by the server, not by replaying the document through the
@@ -245,7 +248,7 @@ its own; `menu.js` and `app.css` do the work. The home, editor, and page menus
 link to it, so update it when a key handler changes.
 
 Every page except the password gate loads `assets/quick-open.js`. `Ctrl+O` opens
-a centered search over the whole library: the script reads `/api/documents` when
+the centered Open by title palette. The script reads `/api/documents` when
 the palette opens, so there is no background refresh and no request per
 keystroke, and it filters titles locally. Enter opens the highlighted document,
 Shift+Enter opens it in a new tab and switches there, and Escape or a backdrop

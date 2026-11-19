@@ -23,7 +23,7 @@ use crate::drive::{self, Drive, OAuthStore, Pending};
 use crate::secrets::{Secret, Secrets};
 use crate::settings::{self, BackupLocation, BackupTarget, Source};
 use crate::store::{
-    summary_for, Document, DocumentSummary, RelocateError, SharedStore, StoreError,
+    summary_for, Document, DocumentMatch, DocumentSummary, RelocateError, SharedStore, StoreError,
 };
 
 const BODY_LIMIT_BYTES: usize = 24 * 1024 * 1024;
@@ -118,6 +118,7 @@ pub fn router(store: SharedStore, auth: Option<Arc<Auth>>, options: ServerOption
         .route("/api/storage/backups/google", post(start_google_backup))
         .route("/api/storage/backups/{id}", delete(remove_backup))
         .route("/api/documents", get(list_documents).post(create_document))
+        .route("/api/documents/search", get(search_documents))
         .route(
             "/api/documents/{id}",
             get(get_document)
@@ -286,6 +287,25 @@ async fn list_documents(State(state): State<AppState>) -> Json<DocumentList> {
     Json(DocumentList {
         documents: state.store.list().await,
         auth_required: state.auth.is_some(),
+    })
+}
+
+#[derive(Deserialize)]
+struct DocumentSearch {
+    q: String,
+}
+
+#[derive(Serialize)]
+struct DocumentSearchResults {
+    matches: Vec<DocumentMatch>,
+}
+
+async fn search_documents(
+    State(state): State<AppState>,
+    Query(query): Query<DocumentSearch>,
+) -> Json<DocumentSearchResults> {
+    Json(DocumentSearchResults {
+        matches: state.store.search(&query.q).await,
     })
 }
 
@@ -1490,12 +1510,14 @@ mod tests {
     async fn private_routes_ask_for_a_password() {
         let (app, directory) = test_app(Some("a password long enough")).await;
 
-        let response = app.clone().oneshot(get("/api/documents")).await.unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            response.headers().get(header::CACHE_CONTROL).unwrap(),
-            "no-store"
-        );
+        for path in ["/api/documents", "/api/documents/search?q=notes"] {
+            let response = app.clone().oneshot(get(path)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL).unwrap(),
+                "no-store"
+            );
+        }
 
         let response = app
             .clone()
@@ -2449,6 +2471,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+
+    #[tokio::test]
+    async fn library_search_reads_full_text_and_returns_the_matching_passage() {
+        let (app, directory) = test_app(None).await;
+        let created = app
+            .clone()
+            .oneshot(create_document_request())
+            .await
+            .unwrap();
+        let id = json_body(created).await["id"].as_str().unwrap().to_owned();
+        let path = format!("/api/documents/{id}");
+        let content = format!(
+            "<p>{}</p><p>Then we found <b>İZ</b>&nbsp;R&amp;D in the archive.</p>",
+            "Opening words. ".repeat(200)
+        );
+        let saved = app
+            .clone()
+            .oneshot(put_json(
+                &path,
+                serde_json::json!({ "title": "Meeting notes", "content": content }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), StatusCode::OK);
+
+        let search = |query: &str| {
+            app.clone().oneshot(get(&format!(
+                "/api/documents/search?q={}",
+                encode_query_value(query)
+            )))
+        };
+        let body = json_body(search("i\u{0307}z   r&d").await.unwrap()).await;
+        let hits = body["matches"].as_array().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["id"], id);
+        assert_eq!(hits[0]["body_match"]["matched"], "İZ R&D");
+        assert_eq!(hits[0]["body_match"]["after"], " in the archive.");
+        assert!(!hits[0]["preview"].as_str().unwrap().contains("archive"));
+        assert!(hits[0].get("title_match").is_none());
+
+        let body = json_body(search("NOTES").await.unwrap()).await;
+        assert_eq!(body["matches"][0]["title_match"]["matched"], "notes");
+        assert!(body["matches"][0].get("body_match").is_none());
+
+        let deleted = app.clone().oneshot(delete_request(&path)).await.unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        let body = json_body(search("archive").await.unwrap()).await;
+        assert_eq!(body["matches"], serde_json::json!([]));
 
         let _ = tokio::fs::remove_dir_all(directory).await;
     }
