@@ -2932,6 +2932,16 @@ test("clipboard: paste drops scripts, styles, unsafe links, and remote images", 
   }
 });
 
+test("clipboard: an AVIF picture is kept as an embedded image", async () => {
+  const avif = "data:image/avif;base64,AAAA";
+  await load("<p></p>");
+  pasteClipboard('<img width="16" height="16" alt="Still" src="' + avif + '">');
+  const blocks = editor.getDocument();
+  assertEqual(blocks[0].type, "image", "the pasted AVIF is an image block");
+  assertEqual(blocks[0].src, avif, "the AVIF bytes are kept as they came");
+  assertEqual(blocks[0].alt, "Still", "the alt text survives");
+});
+
 test("clipboard: pasting paragraphs into the middle joins the outer lines", async () => {
   await load("<p>alpha beta</p>");
   editor.collapseTo({ block: 0, offset: 5 });

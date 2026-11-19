@@ -487,8 +487,8 @@ These should not be casually changed:
 - Stored HTML is sanitized on save and again on load. The allowlist in
   `store.rs` is the trust boundary.
 - Images are embedded in that HTML as base64 data URLs. The sanitizer accepts only
-  PNG, JPEG, WebP, and GIF data URLs on `img src`, never remote URLs: opening a
-  document must not touch the network.
+  PNG, JPEG, WebP, GIF, and AVIF data URLs on `img src`, never remote URLs:
+  opening a document must not touch the network.
 - Markdown mode is a view over the stored HTML, never a storage format. Saving
   and exporting go through `documentBlocks()`, which parses the source back
   before the payload is built; source lines never contain images, and the

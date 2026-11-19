@@ -95,6 +95,7 @@ const IMAGE_DOWNLOAD_EXTENSIONS = {
   "image/jpeg": "jpg",
   "image/webp": "webp",
   "image/gif": "gif",
+  "image/avif": "avif",
 };
 const PAPER_MIN_WIDTH = 360;
 const PAPER_DEFAULT_WIDTH = 900; // Keep in sync with .editor-column in app.css.
@@ -1613,8 +1614,8 @@ async function addImages(files) {
 }
 
 async function prepareImage(file) {
-  if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) {
-    throw new Error("Use a PNG, JPEG, WebP, or GIF image.");
+  if (!/^image\/(png|jpeg|webp|gif|avif)$/.test(file.type)) {
+    throw new Error("Use a PNG, JPEG, WebP, GIF, or AVIF image.");
   }
 
   const alt = imageAltFromName(file.name);
@@ -1981,7 +1982,7 @@ function handleImageRadiusBlur() {
 
 function downloadImage(block) {
   const src = String((block && block.src) || "");
-  const match = /^data:(image\/(?:png|jpeg|webp|gif));base64,(.*)$/.exec(src);
+  const match = /^data:(image\/(?:png|jpeg|webp|gif|avif));base64,(.*)$/.exec(src);
   if (!match) {
     showToast("That image can't be downloaded.", true);
     return;

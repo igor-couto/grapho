@@ -1411,6 +1411,12 @@ async function main() {
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
       "base64",
     );
+    // A real 16x16 AVIF, embedded as base64 so the check needs no image tool.
+    // It is small enough to be stored as it was read, unlike the noise PNG.
+    const tinyAvif = Buffer.from(
+      "AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAAD5bWV0YQAAAAAAAAAvaGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAAAFBpY3R1cmVIYW5kbGVyAAAAAA5waXRtAAAAAAABAAAAHmlsb2MAAAAARAAAAQABAAAAAQAAASEAAAAeAAAAKGlpbmYAAAAAAAEAAAAaaW5mZQIAAAAAAQAAYXYwMUNvbG9yAAAAAGppcHJwAAAAS2lwY28AAAAUaXNwZQAAAAAAAAAQAAAAEAAAABBwaXhpAAAAAAMICAgAAAAMYXYxQ4EADAAAAAATY29scm5jbHgAAgACAAIAAAAAF2lwbWEAAAAAAAAAAQABBAECgwQAAAAmbWRhdAoGGAz/2wCAMhQVAAAASAAAQKPLgPoMSdol1iPasA==",
+      "base64",
+    );
     const noisePng = await evaluate(
       cdp,
       `(() => {
@@ -1439,8 +1445,10 @@ async function main() {
     );
     imageDir = await mkdtemp(path.join(os.tmpdir(), "grapho-picker-"));
     const tinyPath = path.join(imageDir, "tiny.png");
+    const avifPath = path.join(imageDir, "tiny.avif");
     const noisePath = path.join(imageDir, "noise.png");
     await writeFile(tinyPath, tinyPng);
+    await writeFile(avifPath, tinyAvif);
     await writeFile(noisePath, noiseBytes);
 
     const pickerDocumentId = await evaluate(
@@ -1502,26 +1510,144 @@ async function main() {
       );
     };
 
+    // AVIF is one more format the picker has to take. A small one is stored as
+    // it was read, so its data URL keeps the image/avif type through the
+    // sanitizer. It goes in while it is the only picture in the document: a
+    // wrapped neighbour would share its hit area, and the download check below
+    // needs a point that can only land on the AVIF.
+    await pickFile(avifPath);
+    const avifTags = await waitForStoredImages(1);
+    const storedAvifTag = avifTags.find((tag) => /src="data:image\/avif;base64,/.test(tag)) || "";
+    check(
+      "picking an AVIF picture embeds its bytes as they were read",
+      /width="16"/.test(storedAvifTag) &&
+        /height="16"/.test(storedAvifTag) &&
+        /alt="tiny"/.test(storedAvifTag),
+      avifTags.join(" "),
+    );
+    const avifPainted = await evaluate(
+      cdp,
+      `(() => {
+        const image = document.querySelector(".doc-image");
+        if (!image) return null;
+        const box = image.getBoundingClientRect();
+        return {
+          avif: image.src.startsWith("data:image/avif"),
+          width: Math.round(box.width),
+          height: Math.round(box.height),
+          x: box.x + box.width / 2,
+          y: box.y + box.height / 2,
+        };
+      })()`,
+    );
+    check(
+      "the AVIF picture is painted from its stored bytes",
+      Boolean(
+        avifPainted &&
+          avifPainted.avif &&
+          avifPainted.width > 0 &&
+          avifPainted.height === avifPainted.width,
+      ),
+      JSON.stringify(avifPainted),
+    );
+
+    // Download image hands the saved AVIF bytes back out under its own
+    // extension; the capture is the same one the image document check uses.
+    await rightClickAt({
+      x: avifPainted ? avifPainted.x : 0,
+      y: avifPainted ? avifPainted.y : 0,
+    });
+    await evaluate(
+      cdp,
+      `(() => {
+        window.__graphoDownload = null;
+        window.__graphoCreateObjectURL = URL.createObjectURL;
+        URL.createObjectURL = function (blob) {
+          window.__graphoDownload = { blob, type: blob.type, size: blob.size };
+          return window.__graphoCreateObjectURL.call(URL, blob);
+        };
+        window.__graphoAnchorClick = HTMLAnchorElement.prototype.click;
+        HTMLAnchorElement.prototype.click = function () {
+          if (this.download && window.__graphoDownload) {
+            window.__graphoDownload.filename = this.download;
+            return;
+          }
+          return window.__graphoAnchorClick.call(this);
+        };
+        return true;
+      })()`,
+    );
+    const avifDownloadPoint = await evaluate(
+      cdp,
+      `(() => {
+        const button = document.querySelector('[data-image-action="download"]');
+        const menu = document.getElementById("imageMenu");
+        if (!button || !menu || menu.hidden) return null;
+        const box = button.getBoundingClientRect();
+        return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      })()`,
+    );
+    check(
+      "right-clicking the AVIF picture opens its menu",
+      Boolean(avifDownloadPoint),
+      JSON.stringify(avifDownloadPoint),
+    );
+    if (avifDownloadPoint) {
+      await clickAt(avifDownloadPoint);
+    }
+    const downloadedAvif = await evaluate(
+      cdp,
+      `(async () => {
+        const capture = window.__graphoDownload;
+        URL.createObjectURL = window.__graphoCreateObjectURL;
+        HTMLAnchorElement.prototype.click = window.__graphoAnchorClick;
+        if (!capture) return null;
+        const bytes = new Uint8Array(await capture.blob.arrayBuffer());
+        let binary = "";
+        for (let index = 0; index < bytes.length; index += 1) {
+          binary += String.fromCharCode(bytes[index]);
+        }
+        return {
+          filename: capture.filename,
+          type: capture.type,
+          size: capture.size,
+          base64: btoa(binary),
+        };
+      })()`,
+    );
+    check(
+      "the image menu downloads an AVIF picture as an .avif file",
+      Boolean(downloadedAvif) &&
+        downloadedAvif.filename === "tiny.avif" &&
+        downloadedAvif.type === "image/avif" &&
+        downloadedAvif.size === tinyAvif.length &&
+        downloadedAvif.base64 === tinyAvif.toString("base64"),
+      JSON.stringify({
+        filename: downloadedAvif && downloadedAvif.filename,
+        type: downloadedAvif && downloadedAvif.type,
+        size: downloadedAvif && downloadedAvif.size,
+        expectedSize: tinyAvif.length,
+      }),
+    );
+
     await pickFile(noisePath);
-    const largeTags = await waitForStoredImages(1);
+    const largeTags = await waitForStoredImages(2);
+    const storedNoiseTag = largeTags.find((tag) => /width="600"/.test(tag)) || "";
     check(
       "picking a large picture re-encodes it and embeds it",
-      largeTags.length === 1 &&
-        /width="600"/.test(largeTags[0]) &&
-        /height="450"/.test(largeTags[0]) &&
-        /src="data:image\//.test(largeTags[0]),
+      /height="450"/.test(storedNoiseTag) && /src="data:image\//.test(storedNoiseTag),
       largeTags.join(" "),
     );
 
     await pickFile(tinyPath);
-    const pickedTags = await waitForStoredImages(2);
+    const pickedTags = await waitForStoredImages(3);
     check(
       "picking a small picture keeps its natural size",
       pickedTags.some((tag) => /width="1"/.test(tag) && /height="1"/.test(tag)),
       pickedTags.join(" "),
     );
     const pickedPainted = await evaluate(cdp, `document.querySelectorAll(".doc-image").length`);
-    check("the picked pictures are painted", pickedPainted === 2, String(pickedPainted));
+    check("the picked pictures are painted", pickedPainted === 3, String(pickedPainted));
 
     await evaluate(cdp, `fetch("/api/documents/${pickerDocumentId}", { method: "DELETE" })`).catch(
       () => null,

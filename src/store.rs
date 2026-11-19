@@ -761,11 +761,12 @@ fn demote_heading_four(html: String) -> String {
 /// Images are stored inline as base64 data URLs. Only the bitmap formats the
 /// editor writes are accepted; an SVG data URL is markup and stays out.
 fn is_embedded_image(value: &str) -> bool {
-    const PREFIXES: [&str; 4] = [
+    const PREFIXES: [&str; 5] = [
         "data:image/png;base64,",
         "data:image/jpeg;base64,",
         "data:image/webp;base64,",
         "data:image/gif;base64,",
+        "data:image/avif;base64,",
     ];
     PREFIXES
         .iter()
@@ -1123,10 +1124,12 @@ mod tests {
     #[test]
     fn images_must_be_embedded_bitmaps() {
         let pixel = "data:image/png;base64,iVBORw0KGgo=";
+        let avif = "data:image/avif;base64,AAAA";
         let dirty = format!(
             concat!(
                 "<p>Before</p>",
                 "<p><img src=\"{}\" alt=\"A pixel\" width=\"640\" height=\"480\"></p>",
+                "<p><img src=\"{}\" alt=\"An AVIF\"></p>",
                 "<p><img src=\"data:image/svg+xml;base64,PHN2Zz4=\" alt=\"svg\"></p>",
                 "<p><img src=\"data:text/html;base64,PHNjcmlwdD4=\" alt=\"html\"></p>",
                 "<p><img src=\"https://example.com/tracker.png\" alt=\"remote\"></p>",
@@ -1134,13 +1137,15 @@ mod tests {
                 "<p><img src=\"{}\" class=\"free wrap-left\" data-x=\"120\" data-y=\"-40\" data-width=\"420\"></p>",
                 "<p><img src=\"{}\" class=\"free\" data-x=\"nope\" data-y=\"12;script\" data-width=\"0\"></p>"
             ),
-            pixel, pixel, pixel, pixel
+            pixel, avif, pixel, pixel, pixel
         );
         let clean = sanitize_content(&dirty);
 
         assert!(clean.contains("Before"));
         assert!(clean.contains(pixel));
+        assert!(clean.contains(avif));
         assert!(clean.contains("alt=\"A pixel\""));
+        assert!(clean.contains("alt=\"An AVIF\""));
         assert!(clean.contains("width=\"640\""));
         assert!(clean.contains("height=\"480\""));
         assert!(clean.contains("data-x=\"120\""));

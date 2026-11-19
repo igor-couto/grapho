@@ -135,6 +135,7 @@ const EMBEDDED_IMAGE_PREFIXES = [
   "data:image/jpeg;base64,",
   "data:image/webp;base64,",
   "data:image/gif;base64,",
+  "data:image/avif;base64,",
 ];
 
 // CSS values that mean "whatever the parent said": they leave an inherited mark
