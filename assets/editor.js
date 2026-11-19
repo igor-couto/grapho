@@ -115,6 +115,8 @@ async function init() {
   els.markdownMenuItemLabel = document.getElementById("markdownMenuItemLabel");
   els.copyHeadingLink = document.getElementById("copyHeadingLink");
   els.formatToolbar = document.getElementById("formatToolbar");
+  els.moreFormattingButton = document.getElementById("moreFormattingButton");
+  els.moreFormattingMenu = document.getElementById("moreFormattingMenu");
   els.styleButton = document.getElementById("styleButton");
   els.styleButtonLabel = document.getElementById("styleButtonLabel");
   els.styleMenu = document.getElementById("styleMenu");
@@ -199,6 +201,7 @@ async function applyDocument(document) {
 
   els.documentTitle.value = document.title || "Untitled document";
   els.documentTitle.disabled = false;
+  updateTitleDisplay();
   els.paper.setAttribute("aria-busy", "false");
   applyPaperWidth(paperWidthFrom(document.paper_width));
 
@@ -216,7 +219,6 @@ async function applyDocument(document) {
   els.documentMenuButton.disabled = false;
   els.saveStatus.disabled = false;
 
-  updatePageTitle();
   updateEditorPlaceholder();
   hideSaveStatus();
   scrollToLocationAnchor({ smooth: false });
@@ -340,14 +342,15 @@ function normalizeTitleField() {
   const normalized = normalizeTitle(els.documentTitle.value);
   if (els.documentTitle.value !== normalized) {
     els.documentTitle.value = normalized;
-    updatePageTitle();
+    updateTitleDisplay();
     markDirty();
   }
 }
 
-function updatePageTitle() {
-  const title = String(els.documentTitle.value || "").trim() || "Untitled document";
-  document.title = title + " - Grapho";
+function updateTitleDisplay() {
+  const value = els.documentTitle.value;
+  els.documentTitle.parentElement.dataset.title = value;
+  document.title = (value.trim() || "Untitled document") + " - Grapho";
 }
 
 function updateEditorPlaceholder() {
@@ -552,13 +555,13 @@ function bindEvents() {
     if (!state.loaded) {
       return;
     }
-    updatePageTitle();
+    updateTitleDisplay();
     markDirty();
   });
 
   els.documentTitle.addEventListener("blur", normalizeTitleField);
   els.documentTitle.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && state.loaded) {
+    if (event.key === "Enter" && !event.isComposing && state.loaded) {
       event.preventDefault();
       editor.focusEditor();
       editor.moveToDocumentEdge(true);
@@ -585,9 +588,11 @@ function bindEvents() {
     if (!button || button.disabled) {
       return;
     }
+    closeMoreFormatting();
     runCommand(button.dataset.command);
   });
 
+  bindFormattingOverflow();
   els.styleButton.addEventListener("click", toggleStyleMenu);
   els.styleMenu.addEventListener("click", handleStyleMenuClick);
   els.styleMenu.addEventListener("keydown", handleStyleMenuKeydown);
@@ -940,6 +945,71 @@ function setPressed(command, pressed) {
   }
 }
 
+function bindFormattingOverflow() {
+  // Keep this in sync with the compact toolbar in app.css. Move the controls
+  // across the breakpoint so both layouts use the same command and state.
+  const compact = window.matchMedia("(max-width: 640px)");
+  const controls = Array.from(els.formatToolbar.querySelectorAll("[data-toolbar-overflow]"), (button) => ({
+    button,
+    parent: button.parentElement,
+    next: button.nextElementSibling,
+  }));
+  const updateLayout = () => {
+    closeMoreFormatting();
+    closeAlignMenu();
+    if (compact.matches) {
+      els.moreFormattingMenu.append(...controls.map(({ button }) => button));
+    } else {
+      for (const { button, parent, next } of [...controls].reverse()) {
+        parent.insertBefore(button, next);
+      }
+    }
+  };
+  compact.addEventListener("change", updateLayout);
+  if (compact.matches) {
+    updateLayout();
+  }
+
+  els.moreFormattingButton.addEventListener("click", (event) => {
+    if (!els.moreFormattingMenu.hidden) {
+      closeMoreFormatting(event.detail === 0);
+      return;
+    }
+    closeStyleMenu();
+    closeAlignMenu();
+    closeImageMenu();
+    closeDocumentMenu();
+    els.moreFormattingMenu.hidden = false;
+    els.moreFormattingButton.setAttribute("aria-expanded", "true");
+    // A tap can keep the editor focused, including its on-screen keyboard.
+    if (event.detail === 0) {
+      els.moreFormattingMenu.querySelector("button:not(:disabled)")?.focus({ preventScroll: true });
+    }
+  });
+
+  els.formatToolbar.addEventListener("focusout", (event) => {
+    const { target, relatedTarget } = event;
+    if (
+      (target === els.moreFormattingButton || els.moreFormattingMenu.contains(target)) &&
+      relatedTarget !== els.moreFormattingButton &&
+      !els.moreFormattingMenu.contains(relatedTarget)
+    ) {
+      closeMoreFormatting();
+    }
+  });
+}
+
+function closeMoreFormatting(restoreFocus) {
+  if (els.moreFormattingMenu.hidden) {
+    return;
+  }
+  els.moreFormattingMenu.hidden = true;
+  els.moreFormattingButton.setAttribute("aria-expanded", "false");
+  if (restoreFocus) {
+    els.moreFormattingButton.focus({ preventScroll: true });
+  }
+}
+
 /* --------------------------------------------------------------------------
    Paragraph style
    -------------------------------------------------------------------------- */
@@ -974,6 +1044,7 @@ function toggleStyleMenu() {
   closeAlignMenu();
   closeDocumentMenu();
   closeImageMenu();
+  closeMoreFormatting();
   els.styleMenu.hidden = false;
   els.styleButton.setAttribute("aria-expanded", "true");
   positionStyleMenu();
@@ -1082,6 +1153,7 @@ function toggleAlignMenu() {
   closeDocumentMenu();
   closeImageMenu();
   closeStyleMenu();
+  closeMoreFormatting();
   els.alignMenu.hidden = false;
   els.alignButton.setAttribute("aria-expanded", "true");
   positionAlignMenu();
@@ -1099,12 +1171,16 @@ function closeAlignMenu(restoreFocus) {
   els.alignMenu.hidden = true;
   els.alignButton.setAttribute("aria-expanded", "false");
   if (restoreFocus) {
-    els.alignButton.focus();
+    alignMenuAnchor().focus({ preventScroll: true });
   }
 }
 
+function alignMenuAnchor() {
+  return els.moreFormattingMenu.contains(els.alignButton) ? els.moreFormattingButton : els.alignButton;
+}
+
 function positionAlignMenu() {
-  const buttonRect = els.alignButton.getBoundingClientRect();
+  const buttonRect = alignMenuAnchor().getBoundingClientRect();
   const menuRect = els.alignMenu.getBoundingClientRect();
   const margin = 12;
   const gap = 8;
@@ -1168,6 +1244,7 @@ function openLinkDialog() {
   closeImageMenu();
   closeAlignMenu();
   closeStyleMenu();
+  closeMoreFormatting();
 
   const selection = editor.getSelection();
   const existing = state.markdownMode
@@ -1597,6 +1674,10 @@ function moveLinkSelection(delta) {
 function openImagePicker() {
   if (!state.loaded) {
     return;
+  }
+  if (!els.moreFormattingMenu.hidden) {
+    closeMoreFormatting();
+    editor.focusEditor();
   }
   els.imageInput.value = "";
   els.imageInput.click();
@@ -2069,6 +2150,9 @@ function handleDocumentPointer(event) {
   if (!els.styleMenu.hidden && !els.styleMenu.contains(event.target) && !event.target.closest("#styleButton")) {
     closeStyleMenu();
   }
+  if (!els.moreFormattingMenu.contains(event.target) && !els.moreFormattingButton.contains(event.target)) {
+    closeMoreFormatting();
+  }
 }
 
 /* --------------------------------------------------------------------------
@@ -2092,6 +2176,7 @@ function toggleDocumentMenu() {
   closeAlignMenu();
   closeImageMenu();
   closeStyleMenu();
+  closeMoreFormatting();
 }
 
 function closeDocumentMenu(restoreFocus) {
@@ -2212,6 +2297,7 @@ function enterFocusMode() {
   if (state.focusMode) {
     return;
   }
+  closeMoreFormatting();
   state.focusMode = true;
   document.body.classList.add("is-focus-mode");
   updateFocusMenuItem();
@@ -2303,6 +2389,7 @@ function enterMarkdownMode() {
   closeStyleMenu();
   closeAlignMenu();
   closeImageMenu();
+  closeMoreFormatting();
 
   const richBlocks = editor.getDocument();
   const selection = editor.getSelection();
@@ -2825,6 +2912,11 @@ async function deleteDocument() {
 
 function handleGlobalKeydown(event) {
   if (event.key === "Escape") {
+    if (!els.moreFormattingMenu.hidden) {
+      event.preventDefault();
+      closeMoreFormatting(els.moreFormattingMenu.contains(document.activeElement));
+      return;
+    }
     if (!els.styleMenu.hidden) {
       event.preventDefault();
       closeStyleMenu(true);

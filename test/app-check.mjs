@@ -424,6 +424,27 @@ async function main() {
       JSON.stringify(loadingGhost),
     );
 
+    const longTitle = "How we decide when a draft is ready for review";
+    const titleLayout = `(() => {
+      const field = document.getElementById("documentTitle");
+      return {
+        value: field.value,
+        lines: Math.round(field.clientHeight / parseFloat(getComputedStyle(field).lineHeight)),
+        fits: field.scrollHeight <= field.clientHeight + 1 && field.scrollWidth <= field.clientWidth + 1,
+      };
+    })()`;
+    equal("a short title takes one line", (await evaluate(cdp, titleLayout)).lines, 1);
+    await evaluate(cdp, `document.getElementById("documentTitle").select()`);
+    await cdp.send("Input.insertText", { text: longTitle });
+    const desktopTitle = await evaluate(cdp, titleLayout);
+    check(
+      "a long title grows to fit while editing on desktop",
+      desktopTitle.value === longTitle && desktopTitle.lines > 1 && desktopTitle.fits,
+      JSON.stringify(desktopTitle),
+    );
+    await pressKey("Enter", "Enter", 13);
+    equal("Enter moves from the title into the body", await evaluate(cdp, "document.activeElement.id"), "docInput");
+
     let blocks = await paintedBlocks(cdp);
     equal("editor paints every stored block", blocks.length, 12);
     equal("repeated spaces survive the sanitizer and reload", blocks[0].text, "First paragraph with  two  spaces.");
@@ -746,11 +767,12 @@ async function main() {
       })()`,
     );
 
-    async function pressKey(key, code, virtualKeyCode, modifiers) {
+    async function pressKey(key, code, virtualKeyCode, modifiers, text) {
       await cdp.send("Input.dispatchKeyEvent", {
         type: "keyDown",
         key,
         code,
+        text,
         modifiers: modifiers || 0,
         windowsVirtualKeyCode: virtualKeyCode,
         nativeVirtualKeyCode: virtualKeyCode,
@@ -910,6 +932,7 @@ async function main() {
       exportedHtml.includes("<p>    FirstQ paragraph with  two  spaces.</p>"),
       exportedHtml.slice(0, 400),
     );
+    check("the HTML export keeps the full title", exportedHtml.includes(`<h1>${longTitle}</h1>`));
     check(
       "the HTML export keeps leading spaces visible",
       exportedHtml.includes("white-space:pre-wrap"),
@@ -942,6 +965,12 @@ async function main() {
       `innerWidth ${mobile.innerWidth}, scrollWidth ${mobile.scrollWidth}`,
     );
     check("the editor still paints on a narrow viewport", mobile.blocks === 12 && mobile.lineCount > 0);
+    const mobileTitle = await evaluate(cdp, titleLayout);
+    check(
+      "the saved title wraps and fits on a 390px viewport",
+      mobileTitle.value === longTitle && mobileTitle.lines > desktopTitle.lines && mobileTitle.fits,
+      JSON.stringify(mobileTitle),
+    );
     await cdp.send("Emulation.clearDeviceMetricsOverride");
 
     // The image menu's transform buttons rewrite the picture itself, which sends
@@ -2723,8 +2752,73 @@ async function main() {
     await cdp.send("Page.navigate", { url: base + "/doc/" + linkPages.target });
     await waitForPage(cdp, base + "/doc/" + linkPages.target, PAGE_TIMEOUT_MS);
     await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+
+    const compactToolbar = await evaluate(cdp, `(() => {
+      const header = document.querySelector(".editor-header");
+      const toolbar = document.getElementById("formatToolbar");
+      const buttons = Array.from(toolbar.querySelectorAll("button")).filter((button) => {
+        const box = button.getBoundingClientRect();
+        return box.width > 0 && box.left >= 0 && box.right <= window.innerWidth;
+      });
+      return {
+        height: header.offsetHeight,
+        fits: toolbar.scrollWidth === toolbar.clientWidth,
+        actions: buttons.map((button) => button.dataset.command || button.id),
+      };
+    })()`);
+    check(
+      "the mobile toolbar fits its writing actions in one short row",
+      compactToolbar.height <= 90 && compactToolbar.fits &&
+        compactToolbar.actions.join(",") ===
+          "styleButton,bold,italic,insertUnorderedList,insertOrderedList,linkButton,moreFormattingButton",
+      JSON.stringify(compactToolbar),
+    );
+
+    async function tapToolbar(selector) {
+      const point = await evaluate(cdp, `(() => {
+        const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+        return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      })()`);
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    }
+
     await selectWholeDocument();
-    await openLinkDialogForTest();
+    await tapToolbar("#moreFormattingButton");
+    check(
+      "the overflow exposes the secondary actions and keeps the editor focused",
+      await evaluate(cdp, `(() => {
+        const menu = document.getElementById("moreFormattingMenu");
+        const box = menu.getBoundingClientRect();
+        return !menu.hidden && menu.querySelectorAll("button").length === 7 &&
+          box.left >= 0 && box.right <= window.innerWidth && document.activeElement.id === "docInput";
+      })()`),
+    );
+    await tapToolbar('[data-command="underline"]');
+    check(
+      "choosing underline formats the selection and dismisses the overflow",
+      await evaluate(cdp, `document.querySelector(".m-u")?.textContent === "Target body." &&
+        document.getElementById("moreFormattingMenu").hidden && document.activeElement.id === "docInput"`),
+    );
+    await tapToolbar("#moreFormattingButton");
+    await tapToolbar('[data-command="undo"]');
+    check("undo remains available from the overflow", await evaluate(cdp, `!document.querySelector(".m-u")`));
+
+    await evaluate(cdp, `document.getElementById("moreFormattingButton").focus()`);
+    await pressKey("Enter", "Enter", 13, 0, "\r");
+    check(
+      "keyboard activation focuses an overflow control",
+      await evaluate(cdp, `document.getElementById("moreFormattingMenu").contains(document.activeElement)`),
+    );
+    await pressKey("Escape", "Escape", 27);
+    check(
+      "Escape returns keyboard focus to More formatting",
+      await evaluate(cdp, `document.getElementById("moreFormattingMenu").hidden &&
+        document.activeElement.id === "moreFormattingButton"`),
+    );
+
+    await selectWholeDocument();
+    await tapToolbar("#linkButton");
     await waitForLinkResults();
     const narrowDialog = await evaluate(
       cdp,
@@ -2741,6 +2835,15 @@ async function main() {
     );
     await evaluate(cdp, `document.getElementById("linkCancel").click()`);
     await cdp.send("Emulation.clearDeviceMetricsOverride");
+    check(
+      "returning to desktop restores the direct formatting controls",
+      await waitForExpression(cdp, `(() => {
+        const toolbar = document.getElementById("formatToolbar");
+        return document.getElementById("moreFormattingButton").offsetWidth === 0 &&
+          document.getElementById("moreFormattingMenu").childElementCount === 0 &&
+          Array.from(toolbar.querySelectorAll("[data-toolbar-overflow]")).every((button) => button.offsetWidth > 0);
+      })()`, PAGE_TIMEOUT_MS),
+    );
     check(
       "the link dialog fits a narrow viewport",
       narrowDialog.height > 0 &&
@@ -3141,7 +3244,7 @@ async function main() {
       `(async () => {
         const sourceCard = Array.from(document.querySelectorAll(".document-card")).find(
           (candidate) =>
-            candidate.querySelector(".document-card-title").textContent === "Editor check",
+            candidate.querySelector(".document-card-title").textContent === ${JSON.stringify(longTitle)},
         );
         if (!sourceCard) return { error: "no source card" };
         sourceCard.querySelector(".card-menu-button").click();
@@ -3155,7 +3258,7 @@ async function main() {
           const copyCard = Array.from(document.querySelectorAll(".document-card")).find(
             (candidate) =>
               candidate.querySelector(".document-card-title").textContent ===
-              "Editor check (copy)",
+              ${JSON.stringify(longTitle + " (copy)")},
           );
           if (copyCard) {
             const copyId = copyCard.dataset.documentId;
@@ -3201,7 +3304,7 @@ async function main() {
         duplicated.menuOpen &&
         duplicated.label === "Duplicate document" &&
         duplicated.sameWriting &&
-        duplicated.copyTitle === "Editor check (copy)" &&
+        duplicated.copyTitle === longTitle + " (copy)" &&
         duplicated.copyId !== duplicated.sourceId &&
         duplicated.listed,
       JSON.stringify(duplicated),
