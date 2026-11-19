@@ -22,7 +22,9 @@ use crate::disk;
 use crate::drive::{self, Drive, OAuthStore, Pending};
 use crate::secrets::{Secret, Secrets};
 use crate::settings::{self, BackupLocation, BackupTarget, Source};
-use crate::store::{Document, DocumentSummary, RelocateError, SharedStore, StoreError};
+use crate::store::{
+    summary_for, Document, DocumentSummary, RelocateError, SharedStore, StoreError,
+};
 
 const BODY_LIMIT_BYTES: usize = 24 * 1024 * 1024;
 /// A login is one short JSON object, not a document.
@@ -122,6 +124,8 @@ pub fn router(store: SharedStore, auth: Option<Arc<Auth>>, options: ServerOption
                 .put(update_document)
                 .delete(delete_document),
         )
+        // A copy is a new document, so it is created with POST under its source.
+        .route("/api/documents/{id}/duplicate", post(duplicate_document))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let public = Router::new()
@@ -312,6 +316,26 @@ async fn create_document(State(state): State<AppState>) -> Result<impl IntoRespo
     let document = state.store.create().await?;
     state.backups.mirror_document(document.id);
     Ok((StatusCode::CREATED, Json(DocumentView::from(document))))
+}
+
+/// Copy a document into a new one.
+///
+/// The answer is the library summary of the copy rather than the full document:
+/// a copy is made from the home page, and the server already derives the
+/// preview and excerpt the listing shows, so the browser needs no second
+/// request to put the new card on screen.
+async fn duplicate_document(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
+    let document = state
+        .store
+        .duplicate(id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    state.backups.mirror_document(document.id);
+    Ok((StatusCode::CREATED, Json(summary_for(&document))))
 }
 
 async fn get_document(
@@ -1505,6 +1529,15 @@ mod tests {
             "no-store"
         );
 
+        let duplicate = Request::builder()
+            .method("POST")
+            .uri("/api/documents/3f0b3b0a-0c5a-4b8f-9a55-0d1f3b8a0000/duplicate")
+            .header(header::HOST, "127.0.0.1:25265")
+            .body(Body::empty())
+            .expect("valid test request");
+        let response = app.clone().oneshot(duplicate).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
         let _ = tokio::fs::remove_dir_all(directory).await;
     }
 
@@ -1856,6 +1889,15 @@ mod tests {
         Request::builder()
             .method("POST")
             .uri("/api/documents")
+            .header(header::HOST, "127.0.0.1:25265")
+            .body(Body::empty())
+            .expect("valid test request")
+    }
+
+    fn duplicate_request(id: &str) -> Request {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/documents/{id}/duplicate"))
             .header(header::HOST, "127.0.0.1:25265")
             .body(Body::empty())
             .expect("valid test request")
@@ -2323,6 +2365,92 @@ mod tests {
 
         let _ = tokio::fs::remove_dir_all(directory).await;
         let _ = tokio::fs::remove_dir_all(target).await;
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_is_a_new_document_with_the_same_writing() {
+        let (app, directory) = test_app(None).await;
+
+        let response = app
+            .clone()
+            .oneshot(create_document_request())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let id = json_body(response).await["id"]
+            .as_str()
+            .expect("a document id")
+            .to_owned();
+
+        let response = app
+            .clone()
+            .oneshot(put_json(
+                &format!("/api/documents/{id}"),
+                serde_json::json!({
+                    "title": "Field notes",
+                    "content": "<p>One <b>two</b>.</p>",
+                    "paper_width": 1180,
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app.clone().oneshot(duplicate_request(&id)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let copy = json_body(response).await;
+        let copy_id = copy["id"].as_str().expect("a copy id").to_owned();
+        assert_ne!(copy_id, id, "the copy is its own document");
+        assert_eq!(copy["title"], "Field notes (copy)");
+        // The answer is the shape the library listing uses, so the new card can
+        // be drawn without asking for the listing again.
+        assert_eq!(copy["excerpt"], "One two.");
+        assert_eq!(copy["preview"], "<p>One <b>two</b>.</p>");
+        assert_eq!(copy["word_count"], 2);
+
+        let stored = json_body(
+            app.clone()
+                .oneshot(get(&format!("/api/documents/{copy_id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(stored["content"], "<p>One <b>two</b>.</p>");
+        assert_eq!(stored["paper_width"], 1180);
+
+        // The source keeps its own name, and the library lists both documents.
+        let source = json_body(
+            app.clone()
+                .oneshot(get(&format!("/api/documents/{id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(source["title"], "Field notes");
+        let listing = json_body(app.clone().oneshot(get("/api/documents")).await.unwrap()).await;
+        assert_eq!(
+            listing["documents"]
+                .as_array()
+                .expect("a document list")
+                .len(),
+            2
+        );
+
+        // The copy is a file on disk like any other document.
+        assert!(directory.join(format!("{copy_id}.json")).exists());
+
+        // An unknown document has nothing to copy.
+        let response = app
+            .oneshot(duplicate_request(&Uuid::new_v4().to_string()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let _ = tokio::fs::remove_dir_all(directory).await;
     }
 }
 

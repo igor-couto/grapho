@@ -243,6 +243,45 @@ impl Store {
         Ok(document)
     }
 
+    /// Copy a document into a new file.
+    ///
+    /// The copy is a document in its own right: a fresh id and timestamps, its
+    /// own file on disk, and a title that says where it came from. It shares the
+    /// writing and the paper width with the source, and the source is not
+    /// touched. One write goes through the same path as every other save, so a
+    /// failure leaves the library exactly as it was.
+    pub async fn duplicate(&self, id: Uuid) -> Result<Option<Document>, StoreError> {
+        let mut state = self.state.write().await;
+        let Some(source) = state.documents.get(&id).cloned() else {
+            return Ok(None);
+        };
+
+        let now = now_millis();
+        // The copy's title is chosen from the titles the library already uses,
+        // so two copies of the same document never end up with one name.
+        let title = {
+            let taken: HashSet<&str> = state
+                .documents
+                .values()
+                .map(|document| document.title.as_str())
+                .collect();
+            copy_title(&source.title, &taken)
+        };
+        let document = Document {
+            version: SCHEMA_VERSION,
+            id: Uuid::new_v4(),
+            title,
+            content: source.content,
+            paper_width: source.paper_width,
+            created_at: now,
+            updated_at: now,
+        };
+
+        persist_document(&state.directory, &document).await?;
+        state.documents.insert(document.id, document.clone());
+        Ok(Some(document))
+    }
+
     /// Apply a partial update. Sanitisation and title normalisation happen here,
     /// at the trust boundary, rather than in the browser.
     pub async fn update(
@@ -478,6 +517,53 @@ pub fn normalize_title(raw: &str) -> String {
     } else {
         title
     }
+}
+
+/// The title of a copy: `Notes` becomes `Notes (copy)`, and copying a copy
+/// moves the number along (`Notes (copy 2)`) instead of stacking suffixes. A
+/// number whose title the library already uses is skipped, and the result
+/// always fits within `MAX_TITLE_CHARS`.
+fn copy_title(source: &str, taken: &HashSet<&str>) -> String {
+    let (base, mut number) = copy_base(source);
+
+    loop {
+        let suffix = if number == 1 {
+            " (copy)".to_owned()
+        } else {
+            format!(" (copy {number})")
+        };
+        let room = MAX_TITLE_CHARS.saturating_sub(suffix.chars().count());
+        let stem: String = base.chars().take(room).collect();
+        let stem = stem.trim_end();
+        let stem = if stem.is_empty() {
+            "Untitled document"
+        } else {
+            stem
+        };
+        let candidate = format!("{stem}{suffix}");
+        if !taken.contains(candidate.as_str()) {
+            return candidate;
+        }
+        number = number.saturating_add(1);
+    }
+}
+
+/// What a copy of `title` should be based on, and the first number to try.
+/// Only the suffix `copy_title` writes is understood, so an unrelated title
+/// that happens to end the same way is just used as the base.
+fn copy_base(title: &str) -> (&str, u64) {
+    if let Some(base) = title.strip_suffix(" (copy)") {
+        return (base, 2);
+    }
+    if let Some((base, tail)) = title.rsplit_once(" (copy ") {
+        if let Some(number) = tail
+            .strip_suffix(')')
+            .and_then(|digits| digits.parse::<u64>().ok())
+        {
+            return (base, number.saturating_add(1));
+        }
+    }
+    (title, 1)
 }
 
 /// Only the small, predictable subset of HTML the editor can produce is allowed
@@ -739,7 +825,7 @@ fn is_line_break_tag(tag: &str) -> bool {
         .any(|prefix| tag.starts_with(prefix))
 }
 
-fn summary_for(document: &Document) -> DocumentSummary {
+pub(crate) fn summary_for(document: &Document) -> DocumentSummary {
     let text = html_to_text(&document.content);
     let mut preview = preview_html(&document.content);
     if preview.is_empty() && !text.is_empty() {
@@ -979,6 +1065,34 @@ mod tests {
 
         let long = "é".repeat(MAX_TITLE_CHARS + 20);
         assert_eq!(normalize_title(&long).chars().count(), MAX_TITLE_CHARS);
+    }
+
+    #[test]
+    fn copy_titles_are_numbered_and_bounded() {
+        let taken = HashSet::new();
+        assert_eq!(copy_title("Notes", &taken), "Notes (copy)");
+        assert_eq!(copy_title("Notes (copy)", &taken), "Notes (copy 2)");
+        assert_eq!(copy_title("Notes (copy 7)", &taken), "Notes (copy 8)");
+        assert_eq!(
+            copy_title("Notes (copy 1)", &taken),
+            "Notes (copy 2)",
+            "the first copy of a title numbered by hand is not a duplicate name"
+        );
+
+        // The suffix never pushes a title past the storage limit, including the
+        // longer numbered suffix.
+        let long = "é".repeat(MAX_TITLE_CHARS);
+        for title in [
+            copy_title(&long, &taken),
+            copy_title(&format!("{long} (copy)"), &taken),
+        ] {
+            assert_eq!(title.chars().count(), MAX_TITLE_CHARS);
+            assert!(title.ends_with(" (copy)") || title.ends_with(" (copy 2)"));
+        }
+
+        // A name already in the library is skipped.
+        let taken = HashSet::from(["Notes (copy)", "Notes (copy 2)"]);
+        assert_eq!(copy_title("Notes", &taken), "Notes (copy 3)");
     }
 
     #[test]
@@ -1324,6 +1438,95 @@ mod tests {
         assert!(reloaded.delete(document.id).await.expect("delete succeeds"));
         assert!(reloaded.get(document.id).await.is_none());
         assert!(!directory.join(format!("{}.json", document.id)).exists());
+
+        let _ = fs::remove_dir_all(directory).await;
+    }
+
+    #[tokio::test]
+    async fn duplicating_a_document_makes_a_separate_copy() {
+        let directory = temp_directory("duplicate");
+        let store = Store::load(directory.clone()).await.expect("store loads");
+
+        let original = store.create().await.expect("document is created");
+        let original = store
+            .update(
+                original.id,
+                Some("A field note".to_owned()),
+                Some("<p>Hello <strong>there</strong></p>".to_owned()),
+                Some(1180),
+            )
+            .await
+            .expect("update succeeds")
+            .expect("document exists");
+
+        let copy = store
+            .duplicate(original.id)
+            .await
+            .expect("duplicate succeeds")
+            .expect("the source exists");
+        assert_ne!(copy.id, original.id, "a copy is a new document");
+        assert_eq!(copy.title, "A field note (copy)");
+        assert_eq!(copy.content, "<p>Hello <strong>there</strong></p>");
+        assert_eq!(copy.paper_width, Some(1180));
+        assert!(copy.created_at >= original.created_at);
+
+        // The source keeps its own name and content.
+        let source = store.get(original.id).await.expect("the source stays");
+        assert_eq!(source.title, "A field note");
+        assert_eq!(source.updated_at, original.updated_at);
+
+        // The copy is part of the library and has its own file.
+        assert_eq!(store.list().await.len(), 2);
+        assert!(directory.join(format!("{}.json", copy.id)).exists());
+
+        // Copying again numbers the title instead of stacking the suffix, and a
+        // copy of a copy continues the same series.
+        let second = store
+            .duplicate(original.id)
+            .await
+            .expect("duplicate succeeds")
+            .expect("the source exists");
+        assert_eq!(second.title, "A field note (copy 2)");
+        let third = store
+            .duplicate(copy.id)
+            .await
+            .expect("duplicate succeeds")
+            .expect("the copy exists");
+        assert_eq!(third.title, "A field note (copy 3)");
+
+        // Editing a copy does not touch the source or the other copies.
+        let edited = store
+            .update(copy.id, Some("A field note, edited".to_owned()), None, None)
+            .await
+            .expect("update succeeds")
+            .expect("the copy exists");
+        assert_eq!(edited.title, "A field note, edited");
+        assert_eq!(
+            store
+                .get(original.id)
+                .await
+                .expect("the source stays")
+                .title,
+            "A field note"
+        );
+        assert_eq!(
+            store.get(second.id).await.expect("the copy stays").title,
+            "A field note (copy 2)"
+        );
+
+        // A document that is not there has nothing to copy.
+        assert!(store
+            .duplicate(Uuid::new_v4())
+            .await
+            .expect("duplicate succeeds")
+            .is_none());
+
+        drop(store);
+        let reloaded = Store::load(directory.clone()).await.expect("store reloads");
+        assert_eq!(reloaded.list().await.len(), 4);
+        let restored = reloaded.get(copy.id).await.expect("the copy persists");
+        assert_eq!(restored.content, "<p>Hello <strong>there</strong></p>");
+        assert_eq!(restored.paper_width, Some(1180));
 
         let _ = fs::remove_dir_all(directory).await;
     }

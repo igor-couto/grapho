@@ -96,7 +96,7 @@ assets/doc/clipboard.js     rich copy/paste: selection HTML and sanitized pasted
 assets/doc/markdown.js      Markdown mode: rich blocks <-> editable source
 assets/doc/markdown-edit.js Markdown mode: toolbar commands edit the source
 assets/menu.js      the page menu on storage, version, shortcuts, and not-found
-assets/home.js      the library: listing, search, view, sort, rename, delete
+assets/home.js      the library: listing, search, view, sort, rename, duplicate, delete
 assets/quick-open.js  the Ctrl+O document search, shared by every page except the gate
 assets/shortcuts.html  the page listing every editor and app shortcut
 assets/storage.html  the page for the data folder and backup connectors
@@ -212,6 +212,14 @@ card's preview only when the card comes near the viewport and keeps card
 elements between renders, so search filtering never rebuilds them. List rows
 show no preview. The summary still carries the excerpt for search matching.
 
+Each card's ⋯ menu opens the document, renames it, duplicates it, or deletes it.
+A duplicate is made by the server, not by replaying the document through the
+browser: `POST /api/documents/{id}/duplicate` copies the stored HTML and paper
+width into a new file with its own id and timestamps, then answers with the same
+summary the listing carries, so `home.js` adds a card with no listing reload.
+The copy's title is its source's name plus ` (copy)`, numbered when a title is
+already taken, and the title limit still applies. The source is never touched.
+
 While the listing is in flight the home page shows placeholder rows or cards.
 `index.html` ships a few so the very first paint is not an empty library;
 `home.js` then rebuilds the set to cover the first screen in the current view
@@ -234,12 +242,15 @@ a centered search over the whole library: the script reads `/api/documents` when
 the palette opens, so there is no background refresh and no request per
 keystroke, and it filters titles locally. Enter opens the highlighted document,
 Shift+Enter opens it in a new tab and switches there, and Escape or a backdrop
-click closes the palette. The keyboard hints in the footer fade away after three
-seconds without moving the footer, and the next opening brings them back. The
-listing can answer 401 on the public version and not-found pages, so that case
-becomes a sign-in row instead of an error. The palette builds its own `<dialog>`
-on first use and `app.css` owns its look; a new page loads the script with
-`defer` unless it is the password gate.
+click closes the palette. The new-tab action follows a hidden
+`target="_blank"` link rather than calling `window.open`, because browsers may
+route a scripted window to a separate window; the browser's own link preference
+still decides between a tab and a window. The keyboard hints in the footer fade
+away after three seconds without moving the footer, and the next opening brings
+them back. The listing can answer 401 on the public version and not-found
+pages, so that case becomes a sign-in row instead of an error. The palette
+builds its own `<dialog>` on first use and `app.css` owns its look; a new page
+loads the script with `defer` unless it is the password gate.
 
 ## Editor architecture
 
@@ -335,9 +346,11 @@ hidden while the ghost stands in.
   alignment. Code blocks and images are outside paragraph alignment.
 - Enter inside a heading ends the heading: the text before the break keeps its
   heading style, and the line the caret lands on is an ordinary paragraph, so
-  writing a title continues in Normal text instead of another heading.
-  `Shift+Enter` is still a hard break inside the heading. This is rich-text
-  behavior only; Markdown source lines are plain blocks and keep their markers.
+  writing a title continues in Normal text instead of another heading. Enter at
+  the very start of a heading does not break it: it opens an ordinary empty line
+  above, so the heading can be moved down whole. `Shift+Enter` is still a hard
+  break inside the heading. This is rich-text behavior only; Markdown source
+  lines are plain blocks and keep their markers.
 - Markdown line shortcuts work in the rendered editor: typing `- ` at the start
   of a block starts a bullet item, and `# `, `## `, or `### ` starts Heading 1
   to 3. The space that completes the marker triggers the rule and both it and
@@ -406,7 +419,8 @@ hidden while the ghost stands in.
   the text between hard breaks (the whole block when it has none), including the
   hard break after it, so typing over the selection replaces the line instead of
   leaving an empty one. The line is selected whole even when it wraps on the
-  paper, and a picture has no line, so the gesture leaves its selection alone.
+  paper. A fourth quick click selects the whole document, the same as `Ctrl+A`;
+  a picture has no line, so the third click leaves its selection alone.
 - Focus mode hides the editor's bar and asks the browser for fullscreen, from
   the document menu (or `Ctrl+Shift+F`). The header stays in the DOM because its
   menu button is the way out: CSS takes it out of the flow, hides the start and

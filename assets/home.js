@@ -10,6 +10,7 @@
     sort: "modified",
     loaded: false,
     creating: false,
+    duplicating: new Set(),
     busy: false,
     pending: null,
     returnFocus: null,
@@ -447,6 +448,7 @@
     var menu = fragment.querySelector(".card-menu");
     var openItem = fragment.querySelector(".card-open");
     var renameItem = fragment.querySelector(".card-rename");
+    var duplicateItem = fragment.querySelector(".card-duplicate");
     var deleteItem = fragment.querySelector(".card-delete");
 
     card.element.dataset.documentId = document.id;
@@ -470,6 +472,10 @@
 
     renameItem.addEventListener("click", function () {
       openRenameDialog(card.document);
+    });
+
+    duplicateItem.addEventListener("click", function () {
+      duplicateDocument(card.document);
     });
 
     deleteItem.addEventListener("click", function () {
@@ -604,6 +610,41 @@
 
   function setCreatingState(isCreating) {
     els.newDocument.disabled = isCreating;
+  }
+
+  // A copy is a brand new document, made by the server and answered with the
+  // same summary the listing carries, so the new card can go straight into the
+  // library without fetching it again. The copy keeps its source's writing and
+  // name plus " (copy)", and gets its own id, file, and timestamps.
+  async function duplicateDocument(document) {
+    if (state.duplicating.has(document.id)) {
+      return;
+    }
+    state.duplicating.add(document.id);
+
+    try {
+      var copy = await request(
+        "/api/documents/" + encodeURIComponent(document.id) + "/duplicate",
+        { method: "POST" },
+      );
+      state.documents.push(copy);
+      applySort();
+      renderDocuments();
+      showToast("Document duplicated.");
+      focusCard(copy.id);
+    } catch (error) {
+      showToast(
+        error.userMessage ||
+          "The document couldn't be duplicated. Please try again.",
+        true,
+      );
+      var menuButton = cardMenuButton(document.id);
+      if (menuButton) {
+        menuButton.focus();
+      }
+    } finally {
+      state.duplicating.delete(document.id);
+    }
   }
 
   async function signOut() {

@@ -2791,6 +2791,102 @@ async function main() {
       }
     }
     check("the library lists the document as a card", libraryCards > 0);
+
+    // The card menu's Duplicate document makes a brand new document: the copy
+    // carries the same writing and its own id, and its card joins the library
+    // without a reload.
+    const duplicated = await evaluate(
+      cdp,
+      `(async () => {
+        const sourceCard = Array.from(document.querySelectorAll(".document-card")).find(
+          (candidate) =>
+            candidate.querySelector(".document-card-title").textContent === "Editor check",
+        );
+        if (!sourceCard) return { error: "no source card" };
+        sourceCard.querySelector(".card-menu-button").click();
+        const item = sourceCard.querySelector(".card-duplicate");
+        if (!item) return { error: "no duplicate item" };
+        const menuOpen = !sourceCard.querySelector(".card-menu").hidden;
+        const label = item.textContent.trim();
+        item.click();
+
+        for (let attempt = 0; attempt < 80; attempt += 1) {
+          const copyCard = Array.from(document.querySelectorAll(".document-card")).find(
+            (candidate) =>
+              candidate.querySelector(".document-card-title").textContent ===
+              "Editor check (copy)",
+          );
+          if (copyCard) {
+            const copyId = copyCard.dataset.documentId;
+            let focused = "";
+            for (let frame = 0; frame < 40; frame += 1) {
+              const active = document.activeElement;
+              focused =
+                active && active.closest(".document-card")
+                  ? active.closest(".document-card").dataset.documentId
+                  : "";
+              if (focused === copyId) break;
+              await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+            const source = await (await fetch("/api/documents/${documentId}")).json();
+            const copy = await (
+              await fetch("/api/documents/" + encodeURIComponent(copyId))
+            ).json();
+            const listing = await (await fetch("/api/documents")).json();
+            const toast = document.getElementById("toast");
+            return {
+              menuOpen,
+              label,
+              copyId,
+              sourceId: source.id,
+              copyTitle: copy.title,
+              sameWriting: copy.content === source.content,
+              listed: listing.documents.some((entry) => entry.id === copyId),
+              cardCount: document.querySelectorAll(".document-card").length,
+              firstCard: document.querySelector(".document-card").dataset.documentId,
+              focused,
+              toast: toast.textContent,
+              toastVisible: toast.classList.contains("is-visible"),
+            };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        return { error: "no copy card" };
+      })()`,
+    );
+    check(
+      "the card menu's Duplicate document creates a new document with the same writing",
+      !duplicated.error &&
+        duplicated.menuOpen &&
+        duplicated.label === "Duplicate document" &&
+        duplicated.sameWriting &&
+        duplicated.copyTitle === "Editor check (copy)" &&
+        duplicated.copyId !== duplicated.sourceId &&
+        duplicated.listed,
+      JSON.stringify(duplicated),
+    );
+    check(
+      "the duplicate gets its own card at the top of the library",
+      !duplicated.error &&
+        duplicated.firstCard === duplicated.copyId &&
+        duplicated.cardCount === libraryCards + 1,
+      JSON.stringify(duplicated),
+    );
+    check(
+      "duplicating announces the copy and focuses its card",
+      !duplicated.error &&
+        duplicated.toast === "Document duplicated." &&
+        duplicated.toastVisible &&
+        duplicated.focused === duplicated.copyId,
+      JSON.stringify(duplicated),
+    );
+    if (duplicated.copyId) {
+      await evaluate(
+        cdp,
+        `fetch("/api/documents/" + encodeURIComponent(${JSON.stringify(duplicated.copyId)}), { method: "DELETE" })`,
+      ).catch(() => null);
+    }
+
     const cardMenuShifts = await evaluate(
       cdp,
       `(() => {
@@ -3574,6 +3670,70 @@ async function main() {
       await fetch(`http://127.0.0.1:${devtoolsPort}/json/close/${newTab.id}`).catch(
         () => null,
       );
+    }
+
+    // CDP key events do not carry the user activation a real key press does,
+    // so the keyboard path above can only prove that a page opened. Chrome
+    // picks a tab in the same window only when the navigation has user
+    // activation; Runtime.evaluate's userGesture supplies it, and the row's
+    // click handler then runs the same choose(true) code a real gesture runs.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await pressKey("o", "KeyO", 79, 2);
+    await waitForExpression(
+      cdp,
+      `Boolean(
+        document.querySelector("dialog.quick-open[open]") &&
+        document.getElementById("quickOpenInput"),
+      )`,
+      PAGE_TIMEOUT_MS,
+    );
+    await evaluate(
+      cdp,
+      `(() => {
+        const input = document.getElementById("quickOpenInput");
+        input.value = "beta";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      })()`,
+    );
+    await waitForExpression(
+      cdp,
+      `document.querySelectorAll(".quick-open-option").length === 1`,
+      5000,
+    );
+    const currentWindow = await cdp.send("Browser.getWindowForTarget", {});
+    check(
+      "Shift+clicking a document starts a new tab",
+      await evaluate(
+        cdp,
+        `(() => {
+          const option = document.querySelector(".quick-open-option");
+          if (!option) return false;
+          option.dispatchEvent(
+            new MouseEvent("click", { bubbles: true, shiftKey: true }),
+          );
+          return true;
+        })()`,
+      ),
+    );
+    const shiftClickTab = await waitForNewPage(devtoolsPort, betaUrl, PAGE_TIMEOUT_MS);
+    check(
+      "Shift+clicking a document opens it in another tab",
+      Boolean(shiftClickTab),
+      JSON.stringify(shiftClickTab),
+    );
+    if (shiftClickTab) {
+      const tabWindow = await cdp.send("Browser.getWindowForTarget", {
+        targetId: shiftClickTab.id,
+      });
+      check(
+        "opening a document in another tab stays in the same browser window",
+        tabWindow.windowId === currentWindow.windowId,
+        JSON.stringify({ currentWindow, tabWindow }),
+      );
+      await fetch(
+        `http://127.0.0.1:${devtoolsPort}/json/close/${shiftClickTab.id}`,
+      ).catch(() => null);
+      await new Promise((resolve) => setTimeout(resolve, 300));
     }
 
     // The editor has its own keyboard handling, so the palette has to sit above

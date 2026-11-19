@@ -345,11 +345,10 @@ function doubleClickEventAt(x, y) {
   );
 }
 
-// The browser's three-click gesture: each click is a press and release followed
-// by a click carrying the running click count, and the second one also fires
-// dblclick.
-function tripleClickAt(x, y) {
-  for (let detail = 1; detail <= 3; detail += 1) {
+// A run of quick clicks: each click is a press and release followed by a click
+// carrying the running click count, and the second one also fires dblclick.
+function clicksAt(x, y, count) {
+  for (let detail = 1; detail <= count; detail += 1) {
     pointerDown(x, y);
     pointerUp(x, y);
     clickEventAt(x, y, detail);
@@ -838,7 +837,7 @@ test("pointer: triple-click selects the line under the pointer", async () => {
   const third = text.indexOf("third");
   const at = paintedOffsetX(0, second + 3);
   const point = caretPoint(entry(0), second + 3);
-  tripleClickAt(at, point.y + point.height / 2);
+  clicksAt(at, point.y + point.height / 2, 3);
   const selection = editor.getSelection();
   assertEqual(selection.anchor.block, 0, "the selection stays in the clicked block");
   assertEqual(selection.anchor.offset, second, "the line starts at the hard break");
@@ -862,7 +861,7 @@ test("pointer: triple-click selects a wrapped line, not just the painted row", a
   const offset = firstLine.offsetEnd - 3;
   const at = paintedOffsetX(0, offset);
   const point = caretPoint(entry(0), offset);
-  tripleClickAt(at, point.y + point.height / 2);
+  clicksAt(at, point.y + point.height / 2, 3);
   assertEqual(editor.selectionText(), sentence, "the whole written line is selected");
 });
 
@@ -872,8 +871,27 @@ test("pointer: triple-click selects one code line", async () => {
   const second = text.indexOf("let b");
   const at = paintedOffsetX(0, second + 2);
   const point = caretPoint(entry(0), second + 2);
-  tripleClickAt(at, point.y + point.height / 2);
+  clicksAt(at, point.y + point.height / 2, 3);
   assertEqual(editor.selectionText(), "let b = 2;", "the last code line is selected");
+});
+
+test("pointer: four clicks select the whole document like Ctrl+A", async () => {
+  await load("<p>first paragraph</p><p>second<br>hard break</p><pre>code line</pre>");
+  const blocks = editor.getDocument();
+  const expected = blocks.map((block) => blockText(block)).join("\n");
+  const point = caretPoint(entry(0), 3);
+  const at = paintedOffsetX(0, 3);
+  clicksAt(at, point.y + point.height / 2, 4);
+  const selection = editor.getSelection();
+  assertEqual(selection.anchor.block, 0, "the selection starts at the first block");
+  assertEqual(selection.anchor.offset, 0, "the selection starts at the first character");
+  assertEqual(selection.focus.block, blocks.length - 1, "the selection reaches the last block");
+  assertEqual(
+    selection.focus.offset,
+    blockLength(blocks[blocks.length - 1]),
+    "the selection reaches the last character",
+  );
+  assertEqual(editor.selectionText(), expected, "the whole document is selected");
 });
 
 test("undo: typing over a selection is one undo step", async () => {
@@ -1969,6 +1987,36 @@ test("headings: only a heading starts a normal paragraph at the break", async ()
   key("Enter");
   blocks = editor.getDocument();
   assertEqual(blocks[1].type, "quote", "another block style is unchanged by Enter");
+});
+
+test("headings: Enter at the start opens a line above and keeps the heading", async () => {
+  await load("<h2>A heading</h2>");
+  editor.collapseTo({ block: 0, offset: 0 });
+  editor.sync();
+  key("Enter");
+
+  let blocks = editor.getDocument();
+  assertEqual(blocks.length, 2, "Enter opens a line above the heading");
+  assertEqual(blocks[0].type, "p", "the new line is a normal paragraph");
+  assertEqual(blockText(blocks[0]), "", "the new line starts empty");
+  assertEqual(blocks[1].type, "h2", "the heading moves down whole");
+  assertEqual(blockText(blocks[1]), "A heading", "with its text");
+  assertEqual(editor.getSelection().focus.block, 0, "the caret lands on the line above");
+  assertEqual(editor.activeBlockType(), "p", "the toolbar reports Normal text");
+
+  typeText("Above");
+  blocks = editor.getDocument();
+  assertEqual(blockText(blocks[0]), "Above", "typing fills the new line");
+  assertEqual(blocks[1].type, "h2", "the heading below keeps its style");
+  assertEqual(blockText(blocks[1]), "A heading", "and its text");
+
+  editor.undo();
+  assertEqual(blockText(editor.getDocument()[0]), "", "undo takes back the typed text");
+  editor.undo();
+  blocks = editor.getDocument();
+  assertEqual(blocks.length, 1, "one more undo takes back the line above");
+  assertEqual(blocks[0].type, "h2", "the heading is left without a block around it");
+  assertEqual(blockText(blocks[0]), "A heading", "with its text");
 });
 
 test("shortcuts: a hyphen and a space start a bullet list", async () => {

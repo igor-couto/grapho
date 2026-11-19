@@ -140,7 +140,9 @@ export class DocEditor {
     this.root.addEventListener("dblclick", (event) => this.handleDoubleClick(event));
     // The browser does not emit a "tripleclick" event; a click's `detail` is
     // the running click count, which is the same count that drives dblclick.
-    this.root.addEventListener("click", (event) => this.handleTripleClick(event));
+    // A count of three selects the line under the pointer and anything beyond
+    // that selects the whole document.
+    this.root.addEventListener("click", (event) => this.handleClickCount(event));
 
     this.textarea.style.fontSize = "16px";
 
@@ -1014,6 +1016,19 @@ export class DocEditor {
       const next = blocks.slice();
       next.splice(index, 1, first, second);
       const caret = { block: index + 1, offset: 0 };
+      this.commit(next, caret, caret);
+      return;
+    }
+
+    // Enter at the very start of a heading opens an ordinary line above it
+    // instead of breaking the heading itself: the heading stays whole so it can
+    // be moved down, and the caret lands on the new empty line. Breaking after
+    // some heading text still ends the heading (below).
+    if (!this.sourceMode && HEADING_TYPES.has(block.type) && offset === 0 && blockLength(block) > 0) {
+      const paragraph = emptyParagraph();
+      const next = blocks.slice();
+      next.splice(index, 0, paragraph);
+      const caret = { block: index, offset: 0 };
       this.commit(next, caret, caret);
       return;
     }
@@ -2316,8 +2331,10 @@ export class DocEditor {
   // field does: the text between hard breaks, or the whole block when it has
   // none. The line's own hard break is part of the selection, so replacing the
   // selection replaces the line rather than leaving a blank one behind. A
-  // picture has no line to select, and Shift+click is still an ordinary extend.
-  handleTripleClick(event) {
+  // fourth click in the same gesture selects the whole document, like Ctrl+A.
+  // A picture has no line to select, and Shift+click is still an ordinary
+  // extend.
+  handleClickCount(event) {
     if (
       event.detail < 3 ||
       event.button !== 0 ||
@@ -2326,6 +2343,11 @@ export class DocEditor {
       event.metaKey ||
       event.altKey
     ) {
+      return;
+    }
+    if (event.detail > 3) {
+      this.selectAll();
+      this.focusEditor();
       return;
     }
     const position = this.positionFromEvent(event);

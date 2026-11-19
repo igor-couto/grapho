@@ -673,21 +673,7 @@
     var url = "/doc/" + encodeURIComponent(documentSummary.id);
 
     if (openInNewTab) {
-      // A user gesture lets the browser open the tab in the foreground; the
-      // focus call makes sure it also takes the reader there where the browser
-      // allows it. Severing `opener` keeps the new tab independent.
-      var opened = window.open(url, "_blank");
-      if (!opened) {
-        navigate(url);
-        return;
-      }
-      try {
-        opened.opener = null;
-      } catch (error) {
-        // The new tab is still usable even when its opener cannot be cleared.
-      }
-      closeSearch(false);
-      opened.focus();
+      openInNewTabWindow(url);
       return;
     }
 
@@ -697,6 +683,22 @@
       return;
     }
     navigate(url);
+  }
+
+  function openInNewTabWindow(url) {
+    // Browsers are free to treat window.open as a separate window, even with
+    // no features requested. A real target="_blank" link goes through the
+    // browser's own link handling instead, which is the path that normally
+    // opens a tab in the same window; running it inside the key gesture lets
+    // the browser switch to that tab as it does for any new-tab link.
+    var link = document.createElement("a");
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noopener";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    closeSearch(false);
   }
 
   function editedLabel(timestamp) {
