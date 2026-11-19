@@ -126,8 +126,7 @@ enum Change {
 }
 
 enum Job {
-    Write(Uuid),
-    Remove(Uuid),
+    Sync(Uuid),
     /// Copy the whole library, used when a connector is added.
     Seed(BackupLocation, oneshot::Sender<Result<(), BackupError>>),
     /// Answers after everything queued before it, for shutdown and tests.
@@ -171,14 +170,9 @@ impl BackupMirror {
         mirror
     }
 
-    /// Queue a copy of a document. The save request does not wait for it.
+    /// Queue a document's current state. The request does not wait for copies.
     pub fn mirror_document(&self, id: Uuid) {
-        let _ = self.jobs.send(Job::Write(id));
-    }
-
-    /// Queue the removal of a deleted document from every connector.
-    pub fn remove_document(&self, id: Uuid) {
-        let _ = self.jobs.send(Job::Remove(id));
+        let _ = self.jobs.send(Job::Sync(id));
     }
 
     pub async fn connectors(&self) -> Vec<BackupLocation> {
@@ -913,20 +907,18 @@ async fn run(mirror: std::sync::Arc<BackupMirror>, mut jobs: mpsc::UnboundedRece
             batch.push(next);
         }
 
-        // Only the last operation for a document matters: ten quick saves mean
-        // one write of the newest version, and a save followed by a delete means
-        // just the delete.
+        // Read the latest state once for each changed id. A restore can
+        // finish before an earlier delete request has queued its mirror job.
         let mut order: Vec<Uuid> = Vec::new();
-        let mut operations: HashMap<Uuid, Job> = HashMap::new();
+        let mut seen = HashSet::new();
         let mut barriers: Vec<oneshot::Sender<()>> = Vec::new();
 
         for job in batch {
             match job {
-                Job::Write(id) | Job::Remove(id) => {
-                    if !operations.contains_key(&id) {
+                Job::Sync(id) => {
+                    if seen.insert(id) {
                         order.push(id);
                     }
-                    operations.insert(id, job);
                 }
                 Job::Seed(location, reply) => {
                     let result = mirror.seed(&location).await;
@@ -936,14 +928,14 @@ async fn run(mirror: std::sync::Arc<BackupMirror>, mut jobs: mpsc::UnboundedRece
             }
         }
 
-        let changes: Vec<Change> = order
-            .into_iter()
-            .filter_map(|id| match operations.remove(&id) {
-                Some(Job::Remove(_)) => Some(Change::Remove(id)),
-                Some(Job::Write(_)) => Some(Change::Write(id)),
-                Some(Job::Seed(..)) | Some(Job::Barrier(_)) | None => None,
-            })
-            .collect();
+        let mut changes = Vec::with_capacity(order.len());
+        for id in order {
+            changes.push(if mirror.store.contains_active(id).await {
+                Change::Write(id)
+            } else {
+                Change::Remove(id)
+            });
+        }
 
         mirror.apply(&changes).await;
 
@@ -1054,7 +1046,7 @@ mod tests {
         assert!(copied.exists());
 
         store.delete(document.id).await.expect("delete succeeds");
-        mirror.remove_document(document.id);
+        mirror.mirror_document(document.id);
         flush(&mirror).await;
 
         assert!(!copied.exists(), "the copy goes away with the document");

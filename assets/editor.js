@@ -56,6 +56,7 @@ const state = {
   markdownMode: false,
   sourceDirty: false,
   richSnapshot: null,
+  richHistory: null,
   markdownConversion: null,
   savedContent: "",
 };
@@ -309,7 +310,7 @@ function handleEditorChange() {
     return;
   }
   if (state.markdownMode) {
-    state.sourceDirty = true;
+    state.sourceDirty = editor.getDocument() !== state.markdownConversion.blocks;
   }
   updateEditorPlaceholder();
   markDirty();
@@ -372,7 +373,10 @@ function documentBlocks() {
     return [];
   }
   const blocks = editor.getDocument();
-  return state.markdownMode ? sourceToRich(blocks).blocks : blocks;
+  if (!state.markdownMode) {
+    return blocks;
+  }
+  return state.sourceDirty ? sourceToRich(blocks).blocks : state.richSnapshot.blocks;
 }
 
 // The content string the document stores for a set of rich blocks. Empty and
@@ -708,6 +712,11 @@ function bindEvents() {
     deleteDocument();
   });
   els.deleteCancel.addEventListener("click", closeDeleteDialog);
+  els.deleteDialog.addEventListener("cancel", (event) => {
+    if (state.deleting) {
+      event.preventDefault();
+    }
+  });
   els.deleteDialog.addEventListener("close", restoreEditorFocus);
 
   document.addEventListener("keydown", handleGlobalKeydown);
@@ -2396,16 +2405,18 @@ function enterMarkdownMode() {
   // The conversion also carries the caret both ways, so switching the view
   // does not throw the writing position away.
   const conversion = richToSource(richBlocks);
-  const caret = mapRichCaretToSource(conversion, selection.focus);
-
-  state.richSnapshot = richBlocks;
+  state.richSnapshot = { blocks: richBlocks, anchor: selection.anchor, focus: selection.focus };
+  state.richHistory = editor.getHistory();
   state.markdownConversion = conversion;
   state.markdownMode = true;
   state.sourceDirty = false;
   document.body.classList.add("is-markdown-mode");
   updateMarkdownMenuItem();
   editor.setSourceMode(true);
-  editor.setDocument(conversion.blocks, { anchor: caret, focus: caret });
+  editor.setDocument(conversion.blocks, {
+    anchor: mapRichCaretToSource(conversion, selection.anchor),
+    focus: mapRichCaretToSource(conversion, selection.focus),
+  });
   editor.focusEditor();
   updateEditorPlaceholder();
 }
@@ -2417,32 +2428,36 @@ function exitMarkdownMode() {
 
   const sourceBlocks = editor.getDocument();
   const sourceSelection = editor.getSelection();
-  let richBlocks = state.richSnapshot || [];
-  let lineMap = state.markdownConversion ? state.markdownConversion.lineMap : null;
-  let imageTargets = state.markdownConversion ? state.markdownConversion.imageTargets : null;
+  const snapshot = state.richSnapshot;
+  const history = state.richHistory;
+  let richBlocks = snapshot.blocks;
+  let conversion = state.markdownConversion;
+  let undoFrom;
 
   // With no source edits, put the exact rich blocks back; that makes a toggle
   // that changed nothing a true no-op, even if a parser normalization would
   // have altered the markup. With edits, the source is the document now.
   if (state.sourceDirty) {
-    const conversion = sourceToRich(sourceBlocks);
-    richBlocks = conversion.blocks;
-    lineMap = conversion.lineMap;
-    imageTargets = conversion.imageTargets;
+    conversion = sourceToRich(sourceBlocks);
+    if (serializeDocument(conversion.blocks) !== serializeDocument(snapshot.blocks)) {
+      richBlocks = conversion.blocks;
+      undoFrom = snapshot;
+    }
   }
-
-  const caret = lineMap
-    ? mapSourceCaretToRich({ lineMap, imageTargets: imageTargets || [] }, sourceSelection.focus)
-    : { block: 0, offset: 0 };
+  const selection = {
+    anchor: mapSourceCaretToRich(conversion, sourceSelection.anchor),
+    focus: mapSourceCaretToRich(conversion, sourceSelection.focus),
+  };
 
   state.markdownMode = false;
   state.sourceDirty = false;
   state.richSnapshot = null;
+  state.richHistory = null;
   state.markdownConversion = null;
   document.body.classList.remove("is-markdown-mode");
   updateMarkdownMenuItem();
   editor.setSourceMode(false);
-  editor.setDocument(richBlocks, { anchor: caret, focus: caret });
+  editor.setDocument(richBlocks, selection, { history, undoFrom });
   editor.focusEditor();
   updateEditorPlaceholder();
 
@@ -2897,16 +2912,23 @@ async function deleteDocument() {
   els.deleteConfirm.textContent = "Deleting…";
 
   try {
+    if (!(await flushBeforeLeaving())) {
+      showToast("Your latest changes couldn't be saved. Try again before deleting.", true);
+      return;
+    }
     await request("/api/documents/" + encodeURIComponent(state.documentId), { method: "DELETE" });
     state.loaded = false;
     state.dirty = false;
     window.location.assign("/");
   } catch (error) {
-    state.deleting = false;
-    els.deleteConfirm.disabled = false;
-    els.deleteCancel.disabled = false;
-    els.deleteConfirm.textContent = "Delete";
     showToast(error.userMessage || "That document couldn't be deleted.", true);
+  } finally {
+    if (state.loaded) {
+      state.deleting = false;
+      els.deleteConfirm.disabled = false;
+      els.deleteCancel.disabled = false;
+      els.deleteConfirm.textContent = "Delete";
+    }
   }
 }
 

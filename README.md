@@ -195,8 +195,10 @@ base64 data URLs, so a document stays one self-contained file; photos are shrunk
 in the browser first. A save replaces the file through a temporary file, so a
 crash is unlikely to leave a half-written document.
 
-Copy the whole directory to back it up. Stop Grapho first if you want a
-consistent snapshot.
+Deleted documents stay in the data directory. Use **Recently deleted** in the
+library menu to restore them with their original links. Grapho keeps them until
+restored, and their files count toward the space used. Copy the whole directory
+to back it up. Stop Grapho first if you want a consistent snapshot.
 
 The folder is chosen in this order: `GRAPHO_DATA_DIR`, the folder saved on the
 Storage page, a `data/` folder in the working directory that already holds
@@ -208,8 +210,9 @@ already holds another library's documents is refused rather than merged; choose
 the previous folder again and Grapho updates its copies instead.
 
 Backup locations are listed on the same page and configured in the same file.
-Add one and Grapho copies the whole library in, then mirrors every later save and
-delete. Any folder works: a local one, a mounted network share, or a Google
+Add one and Grapho copies your active library. Saves replace the mirrored copies,
+deletions remove them, and restores copy the documents again. Use a local
+folder, a mounted network share, or a Google
 Drive, OneDrive, or Dropbox folder that its desktop app keeps in sync. Copies run
 in the background, so a slow share never delays a save (a copy still queued when
 Grapho stops gets a few seconds to finish). Removing a backup stops the mirroring

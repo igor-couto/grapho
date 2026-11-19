@@ -81,7 +81,7 @@
 
       <section class="storage-section backups" aria-labelledby="backupsTitle">
         <h2 id="backupsTitle">Backups</h2>
-        <p class="backups-intro">A second copy of every document, written again after each save.</p>
+        <p class="backups-intro">Each backup mirrors your library. Saving replaces the copy, deleting removes it, and restoring a document from Recently deleted copies it again.</p>
 
         <ul class="backup-list" id="backupList" hidden></ul>
         <p class="backups-empty" id="backupsEmpty">No backups yet.</p>
@@ -128,7 +128,7 @@
             <button class="button button-primary" type="submit" id="backupSave">Add backup</button>
             <button class="button button-quiet" type="button" id="backupCancel">Cancel</button>
           </div>
-          <p class="storage-hint" id="backupHint">Any folder works: a local one, a network share, or a Google Drive, OneDrive, or Dropbox folder that its desktop app keeps in sync. Documents are copied there now and kept in step after every save. Removing a backup never deletes the files already there.</p>
+          <p class="storage-hint" id="backupHint">Use a local folder, mounted network share, or a folder synced by Google Drive, OneDrive, or Dropbox. Disconnecting a backup leaves its existing files in place.</p>
         </form>
 
         <form class="backup-form" id="sshForm" hidden>

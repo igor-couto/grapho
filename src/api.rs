@@ -23,7 +23,8 @@ use crate::drive::{self, Drive, OAuthStore, Pending};
 use crate::secrets::{Secret, Secrets};
 use crate::settings::{self, BackupLocation, BackupTarget, Source};
 use crate::store::{
-    summary_for, Document, DocumentMatch, DocumentSummary, RelocateError, SharedStore, StoreError,
+    summary_for, DeletedDocument, Document, DocumentMatch, DocumentSummary, RelocateError,
+    SharedStore, StoreError,
 };
 
 const BODY_LIMIT_BYTES: usize = 24 * 1024 * 1024;
@@ -119,6 +120,7 @@ pub fn router(store: SharedStore, auth: Option<Arc<Auth>>, options: ServerOption
         .route("/api/storage/backups/{id}", delete(remove_backup))
         .route("/api/documents", get(list_documents).post(create_document))
         .route("/api/documents/search", get(search_documents))
+        .route("/api/documents/deleted", get(list_deleted_documents))
         .route(
             "/api/documents/{id}",
             get(get_document)
@@ -127,6 +129,7 @@ pub fn router(store: SharedStore, auth: Option<Arc<Auth>>, options: ServerOption
         )
         // A copy is a new document, so it is created with POST under its source.
         .route("/api/documents/{id}/duplicate", post(duplicate_document))
+        .route("/api/documents/{id}/restore", post(restore_document))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let public = Router::new()
@@ -290,6 +293,17 @@ async fn list_documents(State(state): State<AppState>) -> Json<DocumentList> {
     })
 }
 
+#[derive(Serialize)]
+struct DeletedDocumentList {
+    documents: Vec<DeletedDocument>,
+}
+
+async fn list_deleted_documents(State(state): State<AppState>) -> Json<DeletedDocumentList> {
+    Json(DeletedDocumentList {
+        documents: state.store.list_deleted().await,
+    })
+}
+
 #[derive(Deserialize)]
 struct DocumentSearch {
     q: String,
@@ -398,11 +412,25 @@ async fn delete_document(
 ) -> Result<StatusCode, ApiError> {
     let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
     if state.store.delete(id).await? {
-        state.backups.remove_document(id);
+        state.backups.mirror_document(id);
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found())
     }
+}
+
+async fn restore_document(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+) -> Result<Json<DocumentSummary>, ApiError> {
+    let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
+    let document = state
+        .store
+        .restore(id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    state.backups.mirror_document(id);
+    Ok(Json(summary_for(&document)))
 }
 
 /// One backup connector as the page shows it.
@@ -1510,7 +1538,11 @@ mod tests {
     async fn private_routes_ask_for_a_password() {
         let (app, directory) = test_app(Some("a password long enough")).await;
 
-        for path in ["/api/documents", "/api/documents/search?q=notes"] {
+        for path in [
+            "/api/documents",
+            "/api/documents/search?q=notes",
+            "/api/documents/deleted",
+        ] {
             let response = app.clone().oneshot(get(path)).await.unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
             assert_eq!(
@@ -2342,7 +2374,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn saves_and_deletes_reach_the_backup_folder() {
+    async fn saves_deletes_and_restores_reach_the_backup_folder() {
         let (app, directory) = test_app(None).await;
         let target =
             std::env::temp_dir().join(format!("grapho-api-backup-live-{}", Uuid::new_v4()));
@@ -2384,6 +2416,36 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         wait_for_removal(&copied).await;
+
+        let response = app
+            .clone()
+            .oneshot(get(&format!("/api/documents/{id}")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = json_body(
+            app.clone()
+                .oneshot(get("/api/documents/deleted"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(body["documents"][0]["id"], id);
+        assert_eq!(body["documents"][0]["title"], "Mirrored");
+
+        let response = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/documents/{id}/restore"),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["id"], id);
+        wait_for_file(&copied, "Mirrored").await;
+        let body = json_body(app.oneshot(get("/api/documents/deleted")).await.unwrap()).await;
+        assert_eq!(body["documents"], serde_json::json!([]));
 
         let _ = tokio::fs::remove_dir_all(directory).await;
         let _ = tokio::fs::remove_dir_all(target).await;

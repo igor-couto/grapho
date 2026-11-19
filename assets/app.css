@@ -1505,6 +1505,64 @@ html[data-theme="dark"] .skeleton {
   line-height: 1.6;
 }
 
+.recently-deleted {
+  width: min(500px, calc(100vw - 32px));
+}
+
+.recently-deleted-status {
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.recently-deleted-status:empty {
+  margin: 0;
+}
+
+.recently-deleted-status.is-error {
+  color: var(--danger);
+}
+
+.recently-deleted-list {
+  max-height: min(45vh, 360px);
+  margin: 12px 0 0;
+  padding: 0 3px;
+  overflow: auto;
+  list-style: none;
+}
+
+.recently-deleted-list:empty {
+  margin: 0;
+}
+
+.recently-deleted-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.recently-deleted-list li > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.recently-deleted-list button {
+  flex-shrink: 0;
+}
+
+.deleted-title {
+  font-size: 14px;
+  font-weight: 550;
+}
+
+.deleted-date {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .field {
   display: flex;
   flex-direction: column;

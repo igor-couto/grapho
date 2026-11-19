@@ -44,6 +44,10 @@
           </div>
           <div class="menu-rule" role="separator"></div>
           <p class="popover-label">Management</p>
+          <button class="menu-item" type="button" role="menuitem" id="recentlyDeletedButton" aria-haspopup="dialog" aria-controls="recentlyDeletedDialog">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 7h14M9 7V4.8h6V7M7 7l.8 12.2h8.4L17 7M10 11v4.5M14 11v4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Recently deleted
+          </button>
           <a class="menu-item" role="menuitem" href="/storage">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <ellipse cx="12" cy="6.1" rx="6.7" ry="2.7" stroke="currentColor" stroke-width="1.6"/>
@@ -244,6 +248,29 @@
       </div>
     </form>
   </dialog>
+
+  <dialog class="modal recently-deleted" id="recentlyDeletedDialog" aria-labelledby="recentlyDeletedTitle">
+    <div class="modal-panel">
+      <h2 id="recentlyDeletedTitle">Recently deleted</h2>
+      <p class="modal-description">Restore a document to return it to your library. Deleted documents stay here until restored.</p>
+      <p class="recently-deleted-status" id="recentlyDeletedStatus" role="status"></p>
+      <ul class="recently-deleted-list" id="recentlyDeletedList" aria-label="Deleted documents"></ul>
+      <form class="modal-actions" method="dialog">
+        <button class="button button-quiet" type="button" id="recentlyDeletedRetry" hidden>Try again</button>
+        <button class="button button-quiet" type="submit" id="recentlyDeletedClose" autofocus>Close</button>
+      </form>
+    </div>
+  </dialog>
+
+  <template id="recentlyDeletedRow">
+    <li>
+      <div>
+        <div class="deleted-title"></div>
+        <time class="deleted-date"></time>
+      </div>
+      <button class="button button-quiet" type="button">Restore</button>
+    </li>
+  </template>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 </body>

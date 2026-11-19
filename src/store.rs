@@ -45,6 +45,8 @@ pub struct Document {
     pub paper_width: Option<u32>,
     pub created_at: u64,
     pub updated_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deleted_at: Option<u64>,
 }
 
 /// The compact shape used by the home page.
@@ -57,6 +59,13 @@ pub struct DocumentSummary {
     pub word_count: usize,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+#[derive(Serialize)]
+pub struct DeletedDocument {
+    id: Uuid,
+    title: String,
+    deleted_at: u64,
 }
 
 #[derive(Serialize)]
@@ -222,13 +231,32 @@ impl Store {
     /// What the folder holds, counted from the files themselves rather than the
     /// in-memory map, so a hand-edited folder is reported honestly.
     pub async fn usage(&self) -> Usage {
-        let directory = self.directory().await;
-        scan_usage(&directory).await
+        let state = self.state.read().await;
+        let files = document_files(&state.directory).await;
+        Usage {
+            documents: files
+                .iter()
+                .filter(|(id, _)| {
+                    !state
+                        .documents
+                        .get(id)
+                        .is_some_and(|doc| doc.deleted_at.is_some())
+                })
+                .count(),
+            bytes: files
+                .iter()
+                .fold(0, |total: u64, (_, bytes)| total.saturating_add(*bytes)),
+        }
     }
 
     pub async fn list(&self) -> Vec<DocumentSummary> {
         let state = self.state.read().await;
-        let mut summaries: Vec<_> = state.documents.values().map(summary_for).collect();
+        let mut summaries: Vec<_> = state
+            .documents
+            .values()
+            .filter(|document| document.deleted_at.is_none())
+            .map(summary_for)
+            .collect();
         summaries.sort_by(|left, right| {
             right
                 .updated_at
@@ -236,6 +264,28 @@ impl Store {
                 .then_with(|| left.title.cmp(&right.title))
         });
         summaries
+    }
+
+    pub async fn list_deleted(&self) -> Vec<DeletedDocument> {
+        let state = self.state.read().await;
+        let mut documents: Vec<_> = state
+            .documents
+            .values()
+            .filter_map(|document| {
+                Some(DeletedDocument {
+                    id: document.id,
+                    deleted_at: document.deleted_at?,
+                    title: document.title.clone(),
+                })
+            })
+            .collect();
+        documents.sort_by(|left, right| {
+            right
+                .deleted_at
+                .cmp(&left.deleted_at)
+                .then_with(|| left.title.cmp(&right.title))
+        });
+        documents
     }
 
     pub async fn search(&self, query: &str) -> Vec<DocumentMatch> {
@@ -248,6 +298,7 @@ impl Store {
         state
             .documents
             .values()
+            .filter(|document| document.deleted_at.is_none())
             .filter_map(|document| {
                 let text = html_to_text(&document.content);
                 let title_match = search_excerpt(&document.title, &query);
@@ -265,7 +316,11 @@ impl Store {
     }
 
     pub async fn get(&self, id: Uuid) -> Option<Document> {
-        self.state.read().await.documents.get(&id).cloned()
+        self.state.read().await.active_document(id).cloned()
+    }
+
+    pub(crate) async fn contains_active(&self, id: Uuid) -> bool {
+        self.state.read().await.active_document(id).is_some()
     }
 
     pub async fn create(&self) -> Result<Document, StoreError> {
@@ -279,6 +334,7 @@ impl Store {
             paper_width: None,
             created_at: now,
             updated_at: now,
+            deleted_at: None,
         };
 
         persist_document(&state.directory, &document).await?;
@@ -295,7 +351,7 @@ impl Store {
     /// failure leaves the library exactly as it was.
     pub async fn duplicate(&self, id: Uuid) -> Result<Option<Document>, StoreError> {
         let mut state = self.state.write().await;
-        let Some(source) = state.documents.get(&id).cloned() else {
+        let Some(source) = state.active_document(id).cloned() else {
             return Ok(None);
         };
 
@@ -306,6 +362,7 @@ impl Store {
             let taken: HashSet<&str> = state
                 .documents
                 .values()
+                .filter(|document| document.deleted_at.is_none())
                 .map(|document| document.title.as_str())
                 .collect();
             copy_title(&source.title, &taken)
@@ -318,6 +375,7 @@ impl Store {
             paper_width: source.paper_width,
             created_at: now,
             updated_at: now,
+            deleted_at: None,
         };
 
         persist_document(&state.directory, &document).await?;
@@ -335,7 +393,7 @@ impl Store {
         paper_width: Option<u32>,
     ) -> Result<Option<Document>, StoreError> {
         let mut state = self.state.write().await;
-        let Some(existing) = state.documents.get(&id).cloned() else {
+        let Some(existing) = state.active_document(id).cloned() else {
             return Ok(None);
         };
 
@@ -370,6 +428,7 @@ impl Store {
             paper_width: next_paper_width,
             created_at: existing.created_at,
             updated_at,
+            deleted_at: None,
         };
 
         persist_document(&state.directory, &document).await?;
@@ -379,19 +438,26 @@ impl Store {
 
     pub async fn delete(&self, id: Uuid) -> Result<bool, StoreError> {
         let mut state = self.state.write().await;
-        if !state.documents.contains_key(&id) {
+        let Some(mut document) = state.active_document(id).cloned() else {
             return Ok(false);
-        }
+        };
 
-        let path = state.directory.join(format!("{id}.json"));
-        match fs::remove_file(&path).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(StoreError::Io(error)),
-        }
-
-        state.documents.remove(&id);
+        document.deleted_at = Some(now_millis());
+        persist_document(&state.directory, &document).await?;
+        state.documents.insert(id, document);
         Ok(true)
+    }
+
+    pub async fn restore(&self, id: Uuid) -> Result<Option<Document>, StoreError> {
+        let mut state = self.state.write().await;
+        let Some(mut document) = state.documents.get(&id).cloned() else {
+            return Ok(None);
+        };
+        if document.deleted_at.take().is_some() {
+            persist_document(&state.directory, &document).await?;
+            state.documents.insert(id, document.clone());
+        }
+        Ok(Some(document))
     }
 
     /// Move the library to another folder.
@@ -446,8 +512,20 @@ impl Store {
         state.directory = target.clone();
         Ok(Relocated {
             directory: target,
-            documents: state.documents.len(),
+            documents: state
+                .documents
+                .values()
+                .filter(|doc| doc.deleted_at.is_none())
+                .count(),
         })
+    }
+}
+
+impl State {
+    fn active_document(&self, id: Uuid) -> Option<&Document> {
+        self.documents
+            .get(&id)
+            .filter(|doc| doc.deleted_at.is_none())
     }
 }
 
@@ -462,16 +540,6 @@ pub(crate) fn document_file_id(path: &Path) -> Option<Uuid> {
         return None;
     }
     Uuid::parse_str(path.file_stem()?.to_str()?).ok()
-}
-
-async fn scan_usage(directory: &Path) -> Usage {
-    let files = document_files(directory).await;
-    Usage {
-        documents: files.len(),
-        bytes: files
-            .iter()
-            .fold(0, |total: u64, (_, bytes)| total.saturating_add(*bytes)),
-    }
 }
 
 /// Every document file in a folder, with its size. Names that are not UUID
@@ -1575,7 +1643,30 @@ mod tests {
 
         assert!(reloaded.delete(document.id).await.expect("delete succeeds"));
         assert!(reloaded.get(document.id).await.is_none());
-        assert!(!directory.join(format!("{}.json", document.id)).exists());
+        assert!(reloaded
+            .update(document.id, None, None, None)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(reloaded.duplicate(document.id).await.unwrap().is_none());
+        assert!(reloaded.list().await.is_empty());
+        assert!(reloaded.search("field note").await.is_empty());
+        assert_eq!(reloaded.usage().await.documents, 0);
+        assert!(reloaded.usage().await.bytes > 0);
+
+        drop(reloaded);
+        let reloaded = Store::load(directory.clone()).await.expect("store reloads");
+        let deleted = reloaded.list_deleted().await;
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].id, document.id);
+        assert_eq!(deleted[0].title, "A field note");
+        assert!(deleted[0].deleted_at > 0);
+        assert!(reloaded.get(document.id).await.is_none());
+        let restored = reloaded.restore(document.id).await.unwrap().unwrap();
+        assert_eq!(restored.content, cleared.content);
+        assert_eq!(restored.updated_at, cleared.updated_at);
+        assert_eq!(restored.paper_width, cleared.paper_width);
+        assert!(reloaded.list_deleted().await.is_empty());
 
         let _ = fs::remove_dir_all(directory).await;
     }
@@ -1745,15 +1836,20 @@ mod tests {
         assert!(!left_behind.contains("After moving"));
 
         assert!(store.delete(first.id).await.expect("delete succeeds"));
-        assert!(!new.join(format!("{}.json", first.id)).exists());
+        assert!(new.join(format!("{}.json", first.id)).exists());
         assert!(
             old.join(format!("{}.json", first.id)).exists(),
             "the old copy is never deleted"
         );
 
+        store
+            .relocate(old.clone())
+            .await
+            .expect("the library moves back");
         drop(store);
-        let reloaded = Store::load(new.clone()).await.expect("store reloads");
+        let reloaded = Store::load(old.clone()).await.expect("store reloads");
         assert_eq!(reloaded.list().await.len(), 1);
+        assert_eq!(reloaded.list_deleted().await[0].id, first.id);
         assert_eq!(reloaded.get(second.id).await.unwrap().title, "After moving");
 
         let _ = fs::remove_dir_all(old).await;

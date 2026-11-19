@@ -170,14 +170,17 @@ export class DocEditor {
      Document and selection state
      --------------------------------------------------------------------- */
 
-  setDocument(blocks, selection) {
+  setDocument(blocks, selection, { history, undoFrom } = {}) {
     this.blocks = blocks.length ? blocks : [emptyParagraph()];
     this.anchor = selection ? { ...selection.anchor } : { block: 0, offset: 0 };
     this.focus = selection ? { ...selection.focus } : { block: 0, offset: 0 };
     this.pendingMarks = null;
     this.pendingSourceMarks = null;
-    this.undoStack = [];
-    this.redoStack = [];
+    this.undoStack = history ? history.undo : [];
+    this.redoStack = history ? history.redo : [];
+    if (undoFrom) {
+      this.recordUndo(undoFrom);
+    }
     this.typing = null;
     this.lineHint = null;
     this.width = this.root.clientWidth || 640;
@@ -187,6 +190,10 @@ export class DocEditor {
 
   getDocument() {
     return this.blocks;
+  }
+
+  getHistory() {
+    return { undo: this.undoStack, redo: this.redoStack };
   }
 
   // Markdown mode switches the editor between rich blocks and plain source
@@ -450,11 +457,7 @@ export class DocEditor {
     if (settings.undo !== false) {
       const coalesce = settings.coalesce && this.typing && Date.now() - this.typing.time < TYPING_COALESCE_MS;
       if (!coalesce) {
-        this.undoStack.push({ blocks: this.blocks, anchor: this.anchor, focus: this.focus });
-        if (this.undoStack.length > UNDO_LIMIT) {
-          this.undoStack.shift();
-        }
-        this.redoStack = [];
+        this.recordUndo({ blocks: this.blocks, anchor: this.anchor, focus: this.focus });
       }
     }
 
@@ -479,6 +482,14 @@ export class DocEditor {
     if (this.callbacks.onChange) {
       this.callbacks.onChange(this.blocks);
     }
+  }
+
+  recordUndo(snapshot) {
+    this.undoStack.push(snapshot);
+    if (this.undoStack.length > UNDO_LIMIT) {
+      this.undoStack.shift();
+    }
+    this.redoStack = [];
   }
 
   undo() {

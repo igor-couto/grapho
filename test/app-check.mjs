@@ -2062,6 +2062,33 @@ async function main() {
       JSON.stringify({ shortcutOn, shortcutOff }),
     );
 
+    // A view round trip should preserve both stacks. Edits made during a
+    // Markdown visit become one reversible edit in the rich view.
+    await pressKey("End", "End", 35, 2);
+    await cdp.send("Input.insertText", { text: " RichHistoryMarker" });
+    const markerVisible = () => evaluate(cdp, `document.querySelector(".doc-content").textContent.includes("RichHistoryMarker")`);
+    check("the rich edit is visible before the Markdown round trip", await markerVisible());
+    await enterMarkdown();
+    await leaveMarkdown();
+    await pressKey("z", "KeyZ", 90, 2);
+    check("undo still works after an unchanged Markdown round trip", !(await markerVisible()));
+    await enterMarkdown();
+    await leaveMarkdown();
+    await pressKey("Z", "KeyZ", 90, 10);
+    check("redo still works after an unchanged Markdown round trip", await markerVisible());
+    await enterMarkdown();
+    await pressKey("End", "End", 35, 2);
+    await cdp.send("Input.insertText", { text: " MarkdownHistoryMarker" });
+    await leaveMarkdown();
+    await pressKey("z", "KeyZ", 90, 2);
+    check(
+      "undo reverts Markdown edits in the rich view",
+      (await markerVisible()) &&
+        !(await evaluate(cdp, `document.querySelector(".doc-content").textContent.includes("MarkdownHistoryMarker")`)),
+    );
+    await pressKey("z", "KeyZ", 90, 2);
+    check("the older rich edits are still undoable", !(await markerVisible()));
+
     // Every toolbar control edits the source in Markdown mode. Work on the last
     // line (a plain paragraph), then leave and come back to prove round-trip.
     const readSource = () =>
@@ -3216,6 +3243,49 @@ async function main() {
       .filter((event) => event.method === "Runtime.consoleAPICalled" && event.params.type === "error")
       .map((event) => event.params.args.map((arg) => arg.value || arg.description).join(" "));
     check("no console errors in the real editor", consoleErrors.length === 0, consoleErrors.join("\n"));
+
+    await clickFirstLine();
+    await pressKey("a", "KeyA", 65, 2);
+    await cdp.send("Input.insertText", { text: "Last draft before deletion." });
+    await evaluate(
+      cdp,
+      `(() => {
+        document.getElementById("documentMenuButton").click();
+        document.querySelector('[data-doc-action="delete"]').click();
+        document.getElementById("deleteConfirm").click();
+      })()`,
+    );
+    await waitForExpression(
+      cdp,
+      `location.pathname === "/" && Boolean(document.querySelector(".document-card[data-document-id]"))`,
+      PAGE_TIMEOUT_MS,
+    );
+    const deletedRow = `#recentlyDeletedList [data-document-id="${dialogTypingId}"]`;
+    const libraryRow = `#documents [data-document-id="${dialogTypingId}"]`;
+    check(
+      "the deleted document is absent from the library",
+      !(await evaluate(cdp, `Boolean(document.querySelector(${JSON.stringify(libraryRow)}))`)),
+    );
+    await evaluate(cdp, `document.getElementById("recentlyDeletedButton").click()`);
+    check(
+      "the deleted document appears in Recently deleted",
+      await waitForExpression(cdp, `Boolean(document.querySelector(${JSON.stringify(deletedRow)}))`, PAGE_TIMEOUT_MS),
+    );
+    await clickSelector(deletedRow + " button");
+    check(
+      "restoring puts the original document back in the library",
+      await waitForExpression(
+        cdp,
+        `!document.querySelector(${JSON.stringify(deletedRow)}) && Boolean(document.querySelector(${JSON.stringify(libraryRow)}))`,
+        PAGE_TIMEOUT_MS,
+      ),
+    );
+    const restoredDraft = await evaluate(
+      cdp,
+      `(async () => (await (await fetch("/api/documents/" + ${JSON.stringify(dialogTypingId)})).json()).content)()`,
+    );
+    check("the restored document includes the latest edit", restoredDraft === "<p>Last draft before deletion.</p>");
+    await clickSelector("#recentlyDeletedClose");
 
     // The library's card menu is placed by CSS rather than measured, and in
     // grid view it opens above its button. The opening animation starts from

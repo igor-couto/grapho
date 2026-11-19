@@ -156,9 +156,10 @@ The same page adds backup connectors: a folder that receives a copy of every
 save, an SSH server reached over SFTP, or a Google Drive folder. A OneDrive or
 Dropbox folder works through its desktop sync client, and a mounted network share
 works like any other folder. Adding one seeds the whole library through the
-worker, then every create, update, and delete queues a job. `backup.rs` owns the
-worker: it reads the latest version from the store at write time, collapses a
-burst of saves into one write per document, and records the last failure per
+worker, then each create, update, delete, or restore queues a job. `backup.rs`
+reads the latest state per changed id, writes active documents and removes
+copies of deleted ones. It collapses a burst of saves into one write per
+document and records the last failure per
 connector for the page to show. Copies never run on the request path, so a slow
 share cannot slow a save; on shutdown `BackupMirror::flush` gives queued copies a
 few seconds. Removing a connector stops mirroring and leaves the files already
@@ -229,6 +230,14 @@ width into a new file with its own id and timestamps, then answers with the same
 summary the listing carries, so `home.js` adds a card with no listing reload.
 The copy's title is its source's name plus ` (copy)`, numbered when a title is
 already taken, and the title limit still applies. The source is never touched.
+
+Deleting sets `deleted_at` through the ordinary atomic document write. The
+original id, writing, and timestamps stay in the data folder and move with it.
+Deleted documents stay out of the library, search, editor, and mirrors. The
+library menu opens Recently deleted, which loads a title and deletion date
+for each deleted document on demand. Restoring clears the timestamp and queues
+the original document for mirroring again. Grapho keeps deleted documents until
+they are restored, and Storage includes their bytes in space used.
 
 While the listing is in flight the home page shows placeholder rows or cards.
 `index.html` ships a few so the very first paint is not an empty library;
@@ -452,8 +461,8 @@ hidden while the ghost stands in.
   holds one paragraph block per source line (blocks carry `source: true`, one
   unmarked run, painted by the source style in `layout.js` and
   `.doc-line.is-source`), with image blocks unchanged between the lines.
-  Entering converts rich blocks to source; leaving, saving, and exporting parse
-  the source back with `assets/doc/markdown.js`, so the JSON on disk is the same
+  Entering converts rich blocks to source. Leaving, saving, and exporting parse
+  edited source with `assets/doc/markdown.js`, so the JSON on disk is the same
   sanitized HTML as always. The dialect is line-per-block: one line is one
   paragraph, a blank line is an empty paragraph (so intentional line breaks
   survive leaving and re-entering the mode), `#`..`###`, `>`, list markers,
@@ -468,8 +477,10 @@ hidden while the ghost stands in.
   through `assets/doc/markdown-edit.js`; `DocEditor.setSourceMode` gates the
   rich commands off so they can never rewrite a source line as a styled block.
   The mode is per-visit (off after a reload) and is never stored with the
-  document. A toggle keeps the rich blocks in a snapshot, so toggling with no
-  edits restores them exactly; a toggle clears undo history.
+  document. The mode keeps the rich blocks and undo and redo stacks in a
+  snapshot. An unchanged round trip restores them exactly. Markdown edits have
+  their own undo steps while in source mode and become a single rich-text undo
+  step on exit when the parsed document changed.
 - The link dialog (`Ctrl+K`) points the selected text at a web address or at
   another Grapho page. The field is both: a typed address is applied as before,
   while the list under it shows the library's recent documents, filters by title

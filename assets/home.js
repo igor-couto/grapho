@@ -18,6 +18,8 @@
     busy: false,
     pending: null,
     returnFocus: null,
+    deletedLoad: 0,
+    restoring: new Set(),
     toastTimer: null,
   };
 
@@ -88,6 +90,13 @@
     els.renameInput = document.getElementById("renameInput");
     els.actionCancel = document.getElementById("actionCancel");
     els.actionConfirm = document.getElementById("actionConfirm");
+    els.recentlyDeletedButton = document.getElementById("recentlyDeletedButton");
+    els.recentlyDeletedDialog = document.getElementById("recentlyDeletedDialog");
+    els.recentlyDeletedList = document.getElementById("recentlyDeletedList");
+    els.recentlyDeletedStatus = document.getElementById("recentlyDeletedStatus");
+    els.recentlyDeletedClose = document.getElementById("recentlyDeletedClose");
+    els.recentlyDeletedRetry = document.getElementById("recentlyDeletedRetry");
+    els.recentlyDeletedRow = document.getElementById("recentlyDeletedRow");
     els.signOut = document.getElementById("signOut");
     els.signOutRule = document.getElementById("signOutRule");
     els.toast = document.getElementById("toast");
@@ -168,6 +177,21 @@
     });
 
     els.signOut.addEventListener("click", signOut);
+
+    els.recentlyDeletedButton.addEventListener("click", function () {
+      closeLibraryMenu();
+      els.recentlyDeletedDialog.showModal();
+      loadRecentlyDeleted();
+    });
+    els.recentlyDeletedRetry.addEventListener("click", loadRecentlyDeleted);
+    els.recentlyDeletedDialog.addEventListener("close", function () {
+      els.libraryMenuButton.focus();
+    });
+    els.recentlyDeletedDialog.addEventListener("click", function (event) {
+      if (event.target === els.recentlyDeletedDialog) {
+        els.recentlyDeletedDialog.close();
+      }
+    });
 
     els.actionCancel.addEventListener("click", closeActionDialog);
     els.actionConfirm.addEventListener("click", confirmAction);
@@ -782,7 +806,7 @@
     els.actionDescription.textContent =
       "“" +
       document.title +
-      "” will be removed from your library. It can't be undone.";
+      "” will move to Recently deleted in the library menu.";
     els.actionIcon.innerHTML = "";
     els.actionIcon.hidden = true;
     els.renameField.hidden = true;
@@ -862,7 +886,7 @@
         state.returnFocus = null;
         closeActionDialog();
         await refreshAfterChange();
-        showToast("“" + pending.document.title + "” was deleted.");
+        showToast("Moved to Recently deleted.");
         if (!els.searchDocuments.disabled) {
           els.searchDocuments.focus();
         }
@@ -874,6 +898,99 @@
         error.userMessage || "That change couldn't be saved. Please try again.",
         true,
       );
+    }
+  }
+
+  function showDeletedStatus(text, isError) {
+    els.recentlyDeletedStatus.textContent = text;
+    els.recentlyDeletedStatus.classList.toggle("is-error", Boolean(isError));
+  }
+
+  async function loadRecentlyDeleted() {
+    var load = ++state.deletedLoad;
+    els.recentlyDeletedRetry.hidden = true;
+    els.recentlyDeletedList.replaceChildren();
+    showDeletedStatus("Loading deleted documents…");
+
+    try {
+      var payload = await request("/api/documents/deleted");
+      if (load !== state.deletedLoad || !els.recentlyDeletedDialog.open) {
+        return;
+      }
+      payload.documents.forEach(function (document) {
+        var row = els.recentlyDeletedRow.content.firstElementChild.cloneNode(true);
+        row.dataset.documentId = document.id;
+        row.querySelector(".deleted-title").textContent = document.title;
+        var date = row.querySelector("time");
+        var timestamp = new Date(document.deleted_at);
+        date.dateTime = timestamp.toISOString();
+        date.textContent = "Deleted " + dateTimeFormatter.format(timestamp);
+
+        var button = row.querySelector("button");
+        button.setAttribute("aria-label", "Restore " + document.title);
+        button.disabled = state.restoring.has(document.id);
+        button.addEventListener("click", function () {
+          restoreDocument(document.id);
+        });
+        els.recentlyDeletedList.appendChild(row);
+      });
+      showDeletedStatus(payload.documents.length ? "" : "No deleted documents.");
+    } catch (error) {
+      if (load === state.deletedLoad && els.recentlyDeletedDialog.open) {
+        showDeletedStatus("Couldn't load deleted documents.", true);
+        els.recentlyDeletedRetry.hidden = false;
+      }
+    }
+  }
+
+  async function restoreDocument(id) {
+    if (state.restoring.has(id)) {
+      return;
+    }
+    var selector = '[data-document-id="' + CSS.escape(id) + '"]';
+    var row = els.recentlyDeletedList.querySelector(selector);
+    var load = state.deletedLoad;
+    var restore = row.querySelector("button");
+    state.restoring.add(id);
+    restore.disabled = true;
+    try {
+      var restored = await request("/api/documents/" + encodeURIComponent(id) + "/restore", {
+        method: "POST",
+      });
+      state.documents = state.documents.filter(function (document) {
+        return document.id !== id;
+      });
+      state.documents.push(restored);
+      applySort();
+      await refreshAfterChange();
+
+      var message = "Restored “" + restored.title + "”.";
+      if (!els.recentlyDeletedDialog.open) {
+        showToast(message);
+      } else if (load !== state.deletedLoad) {
+        await loadRecentlyDeleted();
+      } else {
+        var next = row.nextElementSibling || row.previousElementSibling;
+        row.remove();
+        if (!els.recentlyDeletedDialog.contains(document.activeElement)) {
+          var nextButton = next && next.querySelector("button:not(:disabled)");
+          (nextButton || els.recentlyDeletedClose).focus();
+        }
+        showDeletedStatus(message);
+      }
+    } catch (error) {
+      var message = error.userMessage || "That document couldn't be restored. Try again.";
+      if (els.recentlyDeletedDialog.open) {
+        showDeletedStatus(message, true);
+        var current = els.recentlyDeletedList.querySelector(selector);
+        if (current) {
+          current.querySelector("button").disabled = false;
+        }
+      } else {
+        showToast(message, true);
+      }
+    } finally {
+      state.restoring.delete(id);
     }
   }
 
