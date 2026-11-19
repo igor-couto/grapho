@@ -22,12 +22,27 @@ const IMAGE_GAP = 24;
 const DOC_TOP = 29;
 const INDENT_STEP = 24;
 
+// One line of body text, the vertical rhythm the page is spaced to. These two
+// numbers mirror the body styles below and .doc-line.is-p in app.css, so the
+// page paints the line the layout measured.
+const BODY_SIZE = 17.5;
+const BODY_LEADING = 1.82;
+const BODY_LINE = BODY_SIZE * BODY_LEADING;
+
 export function contentTop() {
   return DOC_TOP;
 }
 
 const STYLES = {
-  p: { size: 17.5, weight: 400, italic: false, lineHeight: 1.82, before: 0, after: 18.4, tracking: 0 },
+  p: {
+    size: BODY_SIZE,
+    weight: 400,
+    italic: false,
+    lineHeight: BODY_LEADING,
+    before: 0,
+    after: BODY_LINE,
+    tracking: 0,
+  },
   // One Markdown source line per block in Markdown mode. Zero spacing lets
   // consecutive lines read as one continuous block of text.
   source: { size: 15, weight: 400, italic: false, lineHeight: 1.7, before: 0, after: 0, tracking: 0 },
@@ -35,7 +50,15 @@ const STYLES = {
   h2: { size: 26.25, weight: 500, italic: false, lineHeight: 1.23, before: 40.7, after: 14.4, tracking: -0.03 },
   h3: { size: 21.7, weight: 500, italic: false, lineHeight: 1.23, before: 33.6, after: 11.9, tracking: -0.025 },
   quote: { size: 19.25, weight: 400, italic: true, lineHeight: 1.72, before: 28.9, after: 28.9, indent: 26, tracking: 0 },
-  list: { size: 17.5, weight: 400, italic: false, lineHeight: 1.82, before: 4.4, after: 4.4, tracking: 0 },
+  list: {
+    size: BODY_SIZE,
+    weight: 400,
+    italic: false,
+    lineHeight: BODY_LEADING,
+    before: 4.4,
+    after: 4.4,
+    tracking: 0,
+  },
   code: {
     size: 13.5,
     weight: 400,
