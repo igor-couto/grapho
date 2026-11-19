@@ -806,6 +806,14 @@ export function layoutDocument(blocks, columnWidth) {
   return layout;
 }
 
+// A blank line the writer typed with Enter is an empty paragraph. It is one
+// line of space, not a block with paragraph margins: suppressing those margins
+// makes it leave exactly one line, the same space as a blank line written with
+// Shift+Enter, instead of a line plus a paragraph gap on either side.
+function isBlankLine(block) {
+  return block.type === "p" && block.source !== true && blockText(block).length === 0;
+}
+
 function layoutPass(blocks, columnWidth, obstacles, pinned) {
   const laid = [];
   let y = DOC_TOP;
@@ -816,6 +824,7 @@ function layoutPass(blocks, columnWidth, obstacles, pinned) {
   for (let index = 0; index < blocks.length; index += 1) {
     const block = blocks[index];
     const style = styleFor(block);
+    const blank = isBlankLine(block);
 
     if (block.type === "image") {
       const width = imageWidthFor(block, columnWidth);
@@ -867,7 +876,11 @@ function layoutPass(blocks, columnWidth, obstacles, pinned) {
       continue;
     }
 
-    y += Math.max(previousAfter, index === 0 ? 0 : style.before);
+    // A blank line adds no margin of its own; the margin the preceding block
+    // would leave above it belongs to the blank line's one line of space.
+    if (!blank) {
+      y += Math.max(previousAfter, index === 0 ? 0 : style.before);
+    }
 
     if (block.type === "code") {
       const code = layoutCodeBlock(block, columnWidth, y, style, obstacles);
@@ -899,7 +912,9 @@ function layoutPass(blocks, columnWidth, obstacles, pinned) {
         : null,
     });
     y += height;
-    previousAfter = style.after;
+    // A blank line leaves no margin after it either; whatever follows keeps its
+    // own space above.
+    previousAfter = blank ? 0 : style.after;
   }
 
   return { blocks: laid, height: Math.max(y, maxImageBottom), width: columnWidth };
