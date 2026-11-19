@@ -113,6 +113,7 @@ async function init() {
   els.documentMenu = document.getElementById("documentMenu");
   els.focusMenuItemLabel = document.getElementById("focusMenuItemLabel");
   els.markdownMenuItemLabel = document.getElementById("markdownMenuItemLabel");
+  els.copyHeadingLink = document.getElementById("copyHeadingLink");
   els.formatToolbar = document.getElementById("formatToolbar");
   els.styleButton = document.getElementById("styleButton");
   els.styleButtonLabel = document.getElementById("styleButtonLabel");
@@ -204,6 +205,9 @@ async function applyDocument(document) {
   loadMissingImages(blocks, () => {
     editor.relayout();
     editor.sync();
+    // A late image measurement can move the heading a deep link asked for, so
+    // follow it once the flow has settled again.
+    scrollToLocationAnchor({ smooth: false });
   });
   editor.setDocument(blocks);
   state.savedContent = blocksContent(blocks);
@@ -215,12 +219,39 @@ async function applyDocument(document) {
   updatePageTitle();
   updateEditorPlaceholder();
   hideSaveStatus();
+  scrollToLocationAnchor({ smooth: false });
 
   const params = new URLSearchParams(window.location.search);
   if (params.get("new") === "1") {
     window.history.replaceState(null, "", window.location.pathname);
     els.documentTitle.focus();
     els.documentTitle.select();
+  }
+}
+
+// The heading a URL fragment names, decoded from the address bar. A malformed
+// escape is no anchor rather than an error.
+function locationAnchor() {
+  const raw = window.location.hash.replace(/^#/, "");
+  if (!raw) {
+    return "";
+  }
+  try {
+    return decodeURIComponent(raw);
+  } catch (error) {
+    return "";
+  }
+}
+
+// Opening /doc/<id>#<anchor> scrolls the heading into view once the document is
+// laid out; a hash change in the same page does the same, smoothly.
+function scrollToLocationAnchor(options) {
+  if (!state.loaded || !editor) {
+    return;
+  }
+  const anchor = locationAnchor();
+  if (anchor) {
+    editor.goToAnchor(anchor, options);
   }
 }
 
@@ -322,7 +353,7 @@ function updatePageTitle() {
 function updateEditorPlaceholder() {
   const blocks = editor ? editor.getDocument() : [];
   const hasText = blocks.some((block) => {
-    if (block.type === "image") {
+    if (block.type === "image" || block.type === "divider") {
       return true;
     }
     return blockText(block).trim().length > 0;
@@ -345,7 +376,9 @@ function documentBlocks() {
 // all-blank documents store "", which is what makes an empty document's
 // no-op Markdown toggle compare cleanly against the saved content.
 function blocksContent(blocks) {
-  const hasContent = blocks.some((block) => block.type === "image" || blockText(block).trim().length > 0);
+  const hasContent = blocks.some(
+    (block) => block.type === "image" || block.type === "divider" || blockText(block).trim().length > 0,
+  );
   return hasContent ? serializeDocument(blocks) : "";
 }
 
@@ -511,6 +544,10 @@ function showSaveStatus() {
    -------------------------------------------------------------------------- */
 
 function bindEvents() {
+  window.addEventListener("hashchange", () => {
+    scrollToLocationAnchor({ smooth: true });
+  });
+
   els.documentTitle.addEventListener("input", () => {
     if (!state.loaded) {
       return;
@@ -2047,6 +2084,9 @@ function toggleDocumentMenu() {
     closeDocumentMenu(true);
     return;
   }
+  // A heading is the only thing with an address to copy, so the item only
+  // exists while the caret is in one.
+  els.copyHeadingLink.hidden = !editor.headingAnchor();
   els.documentMenu.hidden = false;
   els.documentMenuButton.setAttribute("aria-expanded", "true");
   closeAlignMenu();
@@ -2089,6 +2129,9 @@ function handleDocumentMenuAction(event) {
       exportPdf();
       els.documentMenuButton.focus();
       break;
+    case "copy-heading-link":
+      copyHeadingLink();
+      break;
     case "focus":
       toggleFocusMode();
       break;
@@ -2101,6 +2144,56 @@ function handleDocumentMenuAction(event) {
     default:
       break;
   }
+}
+
+// A heading's deep link. The fragment is the anchor the editor derives from the
+// heading text, so the stored document format stays untouched.
+function headingAnchorLink(anchor) {
+  return (
+    window.location.origin +
+    "/doc/" +
+    encodeURIComponent(state.documentId) +
+    "#" +
+    encodeURIComponent(anchor)
+  );
+}
+
+// The clipboard API needs a secure context, and a library served from a plain
+// http:// address on the network is not one. The old selection-and-copy path
+// still works there, and it cannot disturb a document selection: the field it
+// selects is its own.
+function copyTextFallback(text) {
+  const field = document.createElement("textarea");
+  field.className = "clipboard-fallback";
+  field.value = text;
+  field.setAttribute("readonly", "");
+  document.body.appendChild(field);
+  field.select();
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch (error) {
+    copied = false;
+  }
+  field.remove();
+  return copied;
+}
+
+async function copyHeadingLink() {
+  const anchor = editor.headingAnchor();
+  if (!anchor) {
+    return;
+  }
+  const link = headingAnchorLink(anchor);
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(link);
+    copied = true;
+  } catch (error) {
+    copied = copyTextFallback(link);
+  }
+  showToast(copied ? "Link to this heading copied." : "That link couldn't be copied.", !copied);
+  editor.focusEditor();
 }
 
 /* --------------------------------------------------------------------------
@@ -2411,6 +2504,7 @@ function exportHtml() {
     "pre{padding:16px;background:#f1ece1;border-radius:8px;white-space:pre-wrap;",
     "font-family:ui-monospace,Consolas,monospace;font-size:.8em;}",
     "code{font-family:ui-monospace,Consolas,monospace;font-size:.84em;}",
+    "hr{border:0;height:1px;background:#d3cbbb;margin:2em 0;}",
     "img{display:block;max-width:100%;height:auto;margin:1.6em auto;}",
     "img.wrap-left{float:left;max-width:42%;margin:.35em 1.35em 0 0;}",
     "img.wrap-right{float:right;max-width:42%;margin:.35em 0 0 1.35em;}",
@@ -2522,6 +2616,10 @@ function exportMarkdown() {
 
     if (block.type === "image") {
       parts.push(markdownImage(block));
+      continue;
+    }
+    if (block.type === "divider") {
+      parts.push("---");
       continue;
     }
     if (block.type === "code") {

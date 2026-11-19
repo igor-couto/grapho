@@ -4,6 +4,7 @@
 import {
   cacheImageSize,
   codeFont,
+  dividerLineY,
   fragmentTextWidth,
   layoutDocument,
   styleFor,
@@ -39,6 +40,7 @@ const ACCENT = [0.098, 0.404, 0.824]; // #1967d2
 const PAPER = [1, 0.992, 0.976]; // #fffdf9
 const CODE_BG = [0.969, 0.953, 0.918]; // #f7f3ea
 const CODE_BORDER = [0.886, 0.863, 0.812]; // #e2dccf
+const RULE = [0.827, 0.796, 0.733]; // #d3cbbb, the divider on light paper
 
 const IGNORED = new Set(["\u200b", "\u200c", "\u200d", "\ufeff"]);
 
@@ -119,6 +121,16 @@ function paginate(layout) {
             breakAt(line.y, line === entry.lines[0]);
           }
         }
+      }
+      previous = entry;
+      continue;
+    }
+
+    if (entry.divider) {
+      // A rule alone at the foot of a page reads like a stray line, so it moves
+      // to the next page with the text after it.
+      if (entry.top + entry.height - start > CONTENT_HEIGHT + 0.5) {
+        breakAt(entry.top, true);
       }
       previous = entry;
       continue;
@@ -286,6 +298,18 @@ function renderPage(layout, page, pageIndex, freePages, images, names) {
         ops.push(fillColor(CODE_BG), `${rectAt(box.x, box.y, box.width, box.height, start)} f`);
         ops.push(strokeColor(CODE_BORDER), "0.75 w");
         ops.push(`${rectAt(box.x, box.y, box.width, box.height, start)} S`);
+      }
+    }
+
+    if (entry.divider) {
+      const lineY = dividerLineY(entry);
+      if (lineY >= start && lineY < end) {
+        const onPage = pageY(lineY, start);
+        ops.push(strokeColor(RULE), "0.75 w");
+        ops.push(
+          `${number(MARGIN * POINT)} ${number(onPage)} m ` +
+            `${number((MARGIN + CONTENT_WIDTH) * POINT)} ${number(onPage)} l S`,
+        );
       }
     }
 

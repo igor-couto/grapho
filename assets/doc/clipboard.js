@@ -157,6 +157,12 @@ export function selectionHtml(blocks, from, to) {
     if (!block) {
       continue;
     }
+    if (block.type === "divider") {
+      // A divider has no offset either, so it is copied whenever the range
+      // reaches it, and an HTML paste carrying one inserts it as a block.
+      copied.push({ ...block, id: createBlockId() });
+      continue;
+    }
     if (block.type === "image") {
       // A picture has no offset, so it is copied whenever the range reaches it
       // (a select-all reaches the first and last block). An image-only selection
@@ -245,6 +251,9 @@ export function blocksFromPastedHtml(html) {
     if (block.type === "image") {
       return Boolean(block.src);
     }
+    if (block.type === "divider") {
+      return true;
+    }
     return Boolean(block.runs && block.runs.some((run) => run.text.trim()));
   });
   return hasContent ? blocks : null;
@@ -298,7 +307,7 @@ function renderNode(node, context) {
     return "<pre>" + escapeText(preText(node)) + "</pre>";
   }
   if (tag === "hr") {
-    return "";
+    return "<hr>";
   }
   if (HEADING_TAGS[tag]) {
     return renderBlock(node, HEADING_TAGS[tag], context);

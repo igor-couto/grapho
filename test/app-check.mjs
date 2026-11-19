@@ -363,6 +363,7 @@ async function main() {
       "<blockquote>A quote</blockquote>",
       "<pre>const x = 1;\n\treturn x;</pre>",
       "<p>" + "x".repeat(140) + "</p>",
+      "<hr>",
     ].join("");
 
     documentId = await evaluate(
@@ -424,7 +425,7 @@ async function main() {
     );
 
     let blocks = await paintedBlocks(cdp);
-    equal("editor paints every stored block", blocks.length, 11);
+    equal("editor paints every stored block", blocks.length, 12);
     equal("repeated spaces survive the sanitizer and reload", blocks[0].text, "First paragraph with  two  spaces.");
     equal("the empty paragraph survives", blocks[1].lines, 1);
     equal("the empty paragraph paints empty text", blocks[1].text, "");
@@ -433,6 +434,9 @@ async function main() {
     equal("headings paint one line", blocks[5].text, "A heading");
     equal("list markers are painted", blocks[6].marker, "\u2022");
     equal("code keeps its newline and tab", blocks[9].text, "const x = 1;\n\treturn x;");
+    equal("a divider paints no text lines", blocks[11].lines, 0);
+    const dividerRules = await evaluate(cdp, `document.querySelectorAll(".doc-divider-rule").length`);
+    equal("the divider's rule is painted", dividerRules, 1);
 
     // Heading levels stop at three, in the rich style menu as in Markdown mode.
     const styleMenu = await evaluate(
@@ -645,7 +649,8 @@ async function main() {
     equal("the dragged word was replaced on reload", blocks[2].text, "Third R.");
     equal("hard breaks survive the real save and reload", blocks[3].text, "Line one\nline two");
     equal("the empty paragraph survives a real save and reload", blocks[1].text, "");
-    equal("the paragraph count survives a real save and reload", blocks.length, 11);
+    equal("the paragraph count survives a real save and reload", blocks.length, 12);
+    equal("the divider survives the real save and reload", blocks[11].lines, 0);
 
     // Tab types four spaces at the caret instead of moving the paragraph; the
     // spaces must go through the sanitizer, the save, and the reload unchanged.
@@ -936,7 +941,7 @@ async function main() {
       mobile.scrollWidth <= mobile.innerWidth + 1,
       `innerWidth ${mobile.innerWidth}, scrollWidth ${mobile.scrollWidth}`,
     );
-    check("the editor still paints on a narrow viewport", mobile.blocks === 11 && mobile.lineCount > 0);
+    check("the editor still paints on a narrow viewport", mobile.blocks === 12 && mobile.lineCount > 0);
     await cdp.send("Emulation.clearDeviceMetricsOverride");
 
     // The image menu's transform buttons rewrite the picture itself, which sends
@@ -2539,6 +2544,29 @@ async function main() {
       await waitForSavedLinkContent(linkPages.source, 'href="' + targetHref + '"'),
     );
 
+    // A heading fragment rides the same root-relative link, so a deep link can
+    // be written from the dialog; the store sanitizer keeps the fragment.
+    await pressKey("z", "KeyZ", 90, 2);
+    await selectWholeDocument();
+    check("the link dialog reopens for a heading fragment", await openLinkDialogForTest());
+    await waitForExpression(
+      cdp,
+      `document.activeElement && document.activeElement.id === "linkInput"`,
+      PAGE_TIMEOUT_MS,
+    );
+    await cdp.send("Input.insertText", { text: targetHref + "#target-heading" });
+    await pressEnter();
+    const fragmentLink = await paintedLink();
+    check(
+      "a root-relative link keeps its heading fragment",
+      fragmentLink && fragmentLink.href === targetHref + "#target-heading",
+      JSON.stringify(fragmentLink),
+    );
+    check(
+      "the fragment link is saved",
+      await waitForSavedLinkContent(linkPages.source, 'href="' + targetHref + '#target-heading"'),
+    );
+
     // The dialog still adds a web address: pasting one hides the page list and
     // Enter applies it to the selection.
     await pressKey("z", "KeyZ", 90, 2);
@@ -2721,6 +2749,193 @@ async function main() {
         narrowDialog.overflow <= 1,
       JSON.stringify(narrowDialog),
     );
+
+    // Heading anchors are derived from the heading text, so a deep link opens
+    // the document scrolled to that section without anything stored in the
+    // file. The document menu copies the link while the caret is in a heading,
+    // and repeated headings get a "-2" suffix so both stay addressable.
+    const anchorDocumentId = await evaluate(
+      cdp,
+      `(async () => {
+        const filler = [];
+        for (let index = 0; index < 40; index += 1) {
+          filler.push("<p>filler line " + index + "</p>");
+        }
+        const content =
+          "<h1>Anchors check</h1>" +
+          filler.join("") +
+          "<h2>Second part</h2>" +
+          "<h3>Second part</h3>" +
+          filler.join("");
+        const created = await fetch("/api/documents", { method: "POST" });
+        if (!created.ok) throw new Error("create failed: " + created.status);
+        const document = await created.json();
+        const saved = await fetch("/api/documents/" + encodeURIComponent(document.id), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: "Anchor check", content: content, paper_width: 0 }),
+        });
+        if (!saved.ok) throw new Error("save failed: " + saved.status);
+        return document.id;
+      })()`,
+    );
+    check("the anchor check document was created", Boolean(anchorDocumentId));
+
+    const anchorUrl = base + "/doc/" + anchorDocumentId + "#second-part";
+    await cdp.send("Page.navigate", { url: anchorUrl });
+    await waitForPage(cdp, anchorUrl, PAGE_TIMEOUT_MS);
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+    let anchorOpen = null;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      anchorOpen = await evaluate(
+        cdp,
+        `(() => {
+          const line = Array.from(document.querySelectorAll(".doc-line.is-h2")).find(
+            (candidate) => candidate.textContent === "Second part",
+          );
+          if (!line) return null;
+          const box = line.getBoundingClientRect();
+          return { top: box.top, scrollY: window.scrollY, hash: location.hash };
+        })()`,
+      );
+      if (anchorOpen && anchorOpen.scrollY > 0 && anchorOpen.top > 0 && anchorOpen.top < 240) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    check(
+      "opening a #heading link scrolls that heading below the header",
+      Boolean(anchorOpen) &&
+        anchorOpen.hash === "#second-part" &&
+        anchorOpen.scrollY > 0 &&
+        anchorOpen.top > 0 &&
+        anchorOpen.top < 240,
+      JSON.stringify(anchorOpen),
+    );
+
+    // The duplicate heading has the deduplicated anchor.
+    const duplicateAnchorUrl = base + "/doc/" + anchorDocumentId + "#second-part-2";
+    await cdp.send("Page.navigate", { url: duplicateAnchorUrl });
+    await waitForPage(cdp, duplicateAnchorUrl, PAGE_TIMEOUT_MS);
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+    let duplicateAnchorOpen = null;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      duplicateAnchorOpen = await evaluate(
+        cdp,
+        `(() => {
+          const line = Array.from(document.querySelectorAll(".doc-line.is-h3")).find(
+            (candidate) => candidate.textContent === "Second part",
+          );
+          if (!line) return null;
+          return { top: line.getBoundingClientRect().top, scrollY: window.scrollY };
+        })()`,
+      );
+      if (duplicateAnchorOpen && duplicateAnchorOpen.top > 0 && duplicateAnchorOpen.top < 240) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    check(
+      "a repeated heading gets a -2 anchor of its own",
+      Boolean(duplicateAnchorOpen) &&
+        duplicateAnchorOpen.scrollY > 0 &&
+        duplicateAnchorOpen.top > 0 &&
+        duplicateAnchorOpen.top < 240,
+      JSON.stringify(duplicateAnchorOpen),
+    );
+
+    // The menu item only exists while the caret is in a heading, and the link it
+    // copies is the absolute URL of that heading.
+    await cdp.send("Page.navigate", { url: base + "/doc/" + anchorDocumentId });
+    await waitForPage(cdp, base + "/doc/" + anchorDocumentId, PAGE_TIMEOUT_MS);
+    await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+    const paragraphPoint = await evaluate(
+      cdp,
+      `(() => {
+        const line = document.querySelector(".doc-line.is-p");
+        const box = line.getBoundingClientRect();
+        return { x: box.left + 6, y: box.top + box.height / 2 };
+      })()`,
+    );
+    await clickAt(paragraphPoint);
+    const paragraphMenu = await evaluate(
+      cdp,
+      `(() => {
+        document.getElementById("documentMenuButton").click();
+        const item = document.getElementById("copyHeadingLink");
+        const hidden = item.hidden;
+        const display = getComputedStyle(item).display;
+        document.getElementById("documentMenuButton").click();
+        return { hidden, display };
+      })()`,
+    );
+    check(
+      "the copy-link item is not offered outside a heading",
+      paragraphMenu.hidden === true && paragraphMenu.display === "none",
+      JSON.stringify(paragraphMenu),
+    );
+
+    const headingPoint = await evaluate(
+      cdp,
+      `(() => {
+        const line = document.querySelector(".doc-line.is-h1");
+        const box = line.getBoundingClientRect();
+        return { x: box.left + 6, y: box.top + box.height / 2 };
+      })()`,
+    );
+    await clickAt(headingPoint);
+    // Stub the clipboard write so the copied address can be read back.
+    await evaluate(
+      cdp,
+      `(() => {
+        window.__copiedAnchorLink = "";
+        try {
+          Object.defineProperty(navigator, "clipboard", {
+            configurable: true,
+            value: {
+              writeText: async (text) => {
+                window.__copiedAnchorLink = text;
+              },
+            },
+          });
+        } catch (error) {
+          window.__copiedAnchorLink = "unavailable";
+        }
+        return true;
+      })()`,
+    );
+    const copyMenu = await evaluate(
+      cdp,
+      `(() => {
+        document.getElementById("documentMenuButton").click();
+        const item = document.getElementById("copyHeadingLink");
+        const visible = !item.hidden;
+        const display = getComputedStyle(item).display;
+        const label = item.textContent.trim();
+        if (visible) {
+          item.click();
+        }
+        return { visible, display, label };
+      })()`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const copiedAnchorLink = await evaluate(cdp, `window.__copiedAnchorLink || ""`);
+    const expectedAnchorLink = base + "/doc/" + anchorDocumentId + "#anchors-check";
+    check(
+      "the document menu offers a link to the heading the caret is in",
+      copyMenu.visible && copyMenu.display !== "none" && copyMenu.label === "Copy link to heading",
+      JSON.stringify(copyMenu),
+    );
+    check(
+      "copying the heading link writes the anchored URL",
+      copiedAnchorLink === expectedAnchorLink,
+      copiedAnchorLink,
+    );
+
+    await evaluate(
+      cdp,
+      `fetch("/api/documents/" + encodeURIComponent(${JSON.stringify(anchorDocumentId)}), { method: "DELETE" })`,
+    ).catch(() => null);
 
     // Closing a dialog has to leave the writer writing. Chrome restores focus
     // when a modal dialog closes without restoring the editing state, and can
@@ -3012,6 +3227,115 @@ async function main() {
         `fetch("/api/documents/" + encodeURIComponent(${JSON.stringify(duplicated.copyId)}), { method: "DELETE" })`,
       ).catch(() => null);
     }
+
+    // Search reads the text of the preview the listing already carries, not
+    // just the 220-character excerpt. Seed a document whose marker word sits
+    // past the excerpt but inside the preview, then type it into the library
+    // search: the card has to appear. The ampersand proves the preview's
+    // escaped entities are decoded before matching.
+    const searchFixture = await evaluate(
+      cdp,
+      `(async () => {
+        const filler = "filler words before the marker ".repeat(12);
+        const content = "<p>" + filler + "needleword and R&amp;D notes</p>";
+        const created = await fetch("/api/documents", { method: "POST" });
+        if (!created.ok) throw new Error("create failed: " + created.status);
+        const document = await created.json();
+        const saved = await fetch("/api/documents/" + encodeURIComponent(document.id), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: "Search depth check", content: content, paper_width: 0 }),
+        });
+        if (!saved.ok) throw new Error("save failed: " + saved.status);
+        const listing = await (await fetch("/api/documents")).json();
+        const summary = listing.documents.find((entry) => entry.id === document.id);
+        return {
+          id: document.id,
+          excerptHasMarker: Boolean(summary && summary.excerpt.includes("needleword")),
+          previewHasMarker: Boolean(summary && summary.preview.includes("needleword")),
+          previewHasAmpersand: Boolean(summary && summary.preview.includes("R&amp;D")),
+        };
+      })()`,
+    );
+    check(
+      "the search fixture's marker is past the excerpt and inside the preview",
+      Boolean(searchFixture.id) &&
+        searchFixture.excerptHasMarker === false &&
+        searchFixture.previewHasMarker === true &&
+        searchFixture.previewHasAmpersand === true,
+      JSON.stringify(searchFixture),
+    );
+
+    await cdp.send("Page.navigate", { url: base + "/" });
+    await waitForPage(cdp, base + "/", PAGE_TIMEOUT_MS);
+    await waitForExpression(
+      cdp,
+      `document.querySelectorAll(".document-card:not(.document-card-skeleton)").length > 0`,
+      PAGE_TIMEOUT_MS,
+    );
+    const searchField = await evaluate(
+      cdp,
+      `(() => {
+        const box = document.getElementById("searchDocuments").getBoundingClientRect();
+        return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+      })()`,
+    );
+    await clickAt(searchField);
+    await cdp.send("Input.insertText", { text: "needleword" });
+    const readSearch = async () =>
+      evaluate(
+        cdp,
+        `(() => ({
+          value: document.getElementById("searchDocuments").value,
+          ids: Array.from(document.querySelectorAll(".document-card")).map((card) => card.dataset.documentId),
+          empty: !document.getElementById("emptyState").hidden,
+        }))()`,
+      );
+    let deepSearch = null;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      deepSearch = await readSearch();
+      if (deepSearch.ids.includes(searchFixture.id)) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    check(
+      "search finds a word past the 220-character excerpt",
+      deepSearch.value === "needleword" &&
+        deepSearch.ids.includes(searchFixture.id) &&
+        deepSearch.empty === false,
+      JSON.stringify(deepSearch),
+    );
+
+    await evaluate(cdp, `document.getElementById("searchDocuments").select()`);
+    await cdp.send("Input.insertText", { text: "R&D" });
+    let ampersandSearch = null;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      ampersandSearch = await readSearch();
+      if (ampersandSearch.ids.includes(searchFixture.id)) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    check(
+      "search matches an ampersand typed into the field",
+      ampersandSearch.value === "R&D" && ampersandSearch.ids.includes(searchFixture.id),
+      JSON.stringify(ampersandSearch),
+    );
+
+    await evaluate(
+      cdp,
+      `(() => {
+        const input = document.getElementById("searchDocuments");
+        input.value = "";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        return true;
+      })()`,
+    );
+    await evaluate(
+      cdp,
+      `fetch("/api/documents/" + encodeURIComponent(${JSON.stringify(searchFixture.id)}), { method: "DELETE" })`,
+    ).catch(() => null);
 
     const cardMenuShifts = await evaluate(
       cdp,

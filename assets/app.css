@@ -771,6 +771,12 @@ html[data-theme="dark"] .new-document-button:hover:not(:disabled) {
   background: var(--bg-deep);
 }
 
+.document-preview hr {
+  margin: 1.5em 0;
+  border: 0;
+  border-top: 1px solid var(--line-strong);
+}
+
 .document-glyph {
   display: grid;
   width: 36px;
@@ -3504,6 +3510,29 @@ body.is-resizing-paper * {
   width: 2px;
   border-radius: 1px;
   background: var(--accent);
+}
+
+/* A horizontal rule. The block's band is taller than the line so a click near
+   the rule still lands on the divider; the line itself sits in the middle. */
+.doc-divider-rule {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1.5px;
+  background: var(--line-strong);
+}
+
+/* A textarea used only to put a link on the clipboard on a plain http origin,
+   where navigator.clipboard is unavailable. It has to stay focusable and
+   selectable, so it is moved out of view instead of hidden. */
+.clipboard-fallback {
+  position: fixed;
+  top: -1000px;
+  left: -1000px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .doc-code-box {

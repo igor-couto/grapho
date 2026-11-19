@@ -20,6 +20,7 @@ import {
 import {
   blockLength,
   blockText,
+  headingAnchors,
   imageRadius,
   parseDocument,
   serializeDocument,
@@ -2159,6 +2160,216 @@ test("shortcuts: one undo takes back the marker and the block style", async () =
   assertEqual(blockText(blocks[0]), "A written line", "undo gives the line back whole");
 });
 
+test("shortcuts: three dashes and a space insert a divider", async () => {
+  await load("<p></p>");
+  typeText("--- ");
+
+  let blocks = editor.getDocument();
+  assertEqual(blocks.length, 2, "the rule and a paragraph below it");
+  assertEqual(blocks[0].type, "divider", "the marker became a divider");
+  assertEqual(blockText(blocks[0]), "", "the marker is not stored as text");
+  assertEqual(blocks[1].type, "p", "a paragraph waits below the rule");
+  assertEqual(blockText(blocks[1]), "", "the paragraph starts empty");
+  assertEqual(editor.getSelection().focus.block, 1, "the caret moves below the divider");
+  assertEqual(editor.getSelection().focus.offset, 0, "at the start of the paragraph");
+
+  const dividerEntry = entry(0);
+  assert(dividerEntry.divider, "the block carries divider geometry");
+  assertEqual(dividerEntry.lines.length, 0, "a divider has no text lines");
+  assert(dividerEntry.height > 0, "it still takes space");
+  assert(entry(1).top >= dividerEntry.top + dividerEntry.height, "the paragraph starts below it");
+  assert(blockElement(0).querySelector(".doc-divider-rule"), "the rule is painted");
+
+  typeText("below");
+  blocks = editor.getDocument();
+  assertEqual(blocks[0].type, "divider", "the rule survives typing below it");
+  assertEqual(blockText(blocks[1]), "below", "typing lands in the paragraph");
+  assertEqual(serializeDocument(blocks), "<hr><p>below</p>", "the divider is stored as hr");
+
+  const reloaded = parseDocument(serializeDocument(blocks));
+  assertEqual(reloaded[0].type, "divider", "the stored hr parses back to a divider");
+  assertEqual(blockText(reloaded[1]), "below", "the text after it survives");
+  editor.setDocument(reloaded);
+  await settle();
+  assert(blockElement(0).querySelector(".doc-divider-rule"), "the reloaded divider paints its rule");
+});
+
+test("shortcuts: the divider takes the whole line, and its text moves below", async () => {
+  await load("<p>---tail</p>");
+  editor.collapseTo({ block: 0, offset: 3 });
+  editor.sync();
+  typeText(" ");
+
+  const blocks = editor.getDocument();
+  assertEqual(blocks.length, 2, "the rule plus the paragraph that holds the rest");
+  assertEqual(blocks[0].type, "divider", "the line became a divider");
+  assertEqual(blockText(blocks[1]), "tail", "the text after the marker moved below");
+  assertEqual(editor.getSelection().focus.block, 1, "the caret is in the paragraph");
+  assertEqual(editor.getSelection().focus.offset, 0, "before the moved text");
+
+  // The marker only works at the start of a line.
+  await load("<p>one</p>");
+  editor.collapseTo({ block: 0, offset: 3 });
+  editor.sync();
+  typeText("--- ");
+  const block = editor.getDocument()[0];
+  assertEqual(block.type, "p", "mid-line dashes stay text");
+  assertEqual(blockText(block), "one--- ", "the dashes are typed where the caret is");
+});
+
+test("shortcuts: one undo takes back a divider and its paragraph", async () => {
+  await load("<p></p>");
+  typeText("--- ");
+  assertEqual(editor.getDocument().length, 2, "the divider was inserted");
+  editor.undo();
+  const blocks = editor.getDocument();
+  assertEqual(blocks.length, 1, "one undo restores the single paragraph");
+  assertEqual(blocks[0].type, "p", "the paragraph is back");
+  assertEqual(blockText(blocks[0]), "", "with no marker left behind");
+});
+
+test("dividers: clicking one selects the rule, and typing over it replaces it", async () => {
+  await load("<p>above</p><hr><p>below</p>");
+  const divider = entry(1);
+  assert(divider.divider, "the divider is laid out");
+  assertEqual(divider.lines.length, 0, "it has no text lines");
+
+  clickAt(10, divider.top + divider.height / 2);
+  assertEqual(editor.getSelection().focus.block, 1, "a click selects the divider block");
+  assertEqual(editor.getSelection().collapsed, true, "as a collapsed caret on the block");
+  assert(root.querySelector(".doc-selection"), "the divider's band is painted");
+
+  typeText("x");
+  let blocks = editor.getDocument();
+  assertEqual(blocks.length, 3, "typing replaces the rule instead of splitting the text");
+  assertEqual(blocks[1].type, "p", "the rule became a paragraph");
+  assertEqual(blockText(blocks[1]), "x", "with the typed text");
+  assertEqual(blockText(blocks[0]), "above", "the text above is untouched");
+  assertEqual(blockText(blocks[2]), "below", "the text below is untouched");
+  editor.undo();
+  assertEqual(editor.getDocument()[1].type, "divider", "one undo brings the rule back");
+
+  const again = entry(1);
+  clickAt(10, again.top + again.height / 2);
+  editor.backspace();
+  blocks = editor.getDocument();
+  assertEqual(blocks.length, 2, "backspace removes the selected rule");
+  assertEqual(blockText(blocks[0]), "above", "the text before it stays");
+  assertEqual(blockText(blocks[1]), "below", "the text after it stays");
+});
+
+test("dividers: Enter opens a paragraph, and the neighbours delete the rule", async () => {
+  await load("<p>above</p><hr><p>below</p>");
+  const divider = entry(1);
+  clickAt(10, divider.top + divider.height / 2);
+  key("Enter");
+  let blocks = editor.getDocument();
+  assertEqual(blocks.length, 4, "Enter inserts a paragraph after the rule");
+  assertEqual(blocks[2].type, "p", "the new paragraph follows the divider");
+  assertEqual(blockText(blocks[2]), "", "and it is empty");
+  assertEqual(editor.getSelection().focus.block, 2, "the caret lands in it");
+  editor.undo();
+  assertEqual(editor.getDocument().length, 3, "undo restores the three blocks");
+
+  // Backspace at the start of the paragraph after a divider removes the rule.
+  editor.collapseTo({ block: 2, offset: 0 });
+  editor.sync();
+  editor.backspace();
+  blocks = editor.getDocument();
+  assertEqual(blocks.length, 2, "the rule is gone");
+  assertEqual(blockText(blocks[1]), "below", "the paragraph below is whole");
+
+  // Delete at the end of the paragraph before one removes it too.
+  await load("<p>above</p><hr><p>below</p>");
+  editor.collapseTo({ block: 0, offset: "above".length });
+  editor.sync();
+  editor.deleteForward();
+  blocks = editor.getDocument();
+  assertEqual(blocks.length, 2, "the rule is gone");
+  assertEqual(blockText(blocks[0]), "above", "the paragraph above is whole");
+  assertEqual(blockText(blocks[1]), "below", "and the one below follows it");
+});
+
+test("dividers: a selection across one deletes it and joins the text", async () => {
+  await load("<p>above</p><hr><p>below</p>");
+  editor.setSelection({ block: 0, offset: 1 }, { block: 2, offset: 1 });
+  editor.sync();
+  editor.backspace();
+  const blocks = editor.getDocument();
+  assertEqual(blocks.length, 1, "the rule and the selected text are gone");
+  assertEqual(blocks[0].type, "p", "the remaining text is one paragraph");
+  assertEqual(blockText(blocks[0]), "aelow", "the unselected text on both sides is kept");
+});
+
+test("dividers: the arrow keys step over one instead of into it", async () => {
+  await load("<p>above</p><hr><p>below</p>");
+  editor.collapseTo({ block: 0, offset: "above".length });
+  editor.sync();
+  key("ArrowRight");
+  assertEqual(editor.getSelection().focus.block, 2, "right from the text before lands after the rule");
+  assertEqual(editor.getSelection().focus.offset, 0, "at the start of the next paragraph");
+  key("ArrowLeft");
+  assertEqual(editor.getSelection().focus.block, 0, "left from that text lands before the rule");
+  assertEqual(editor.getSelection().focus.offset, "above".length, "at the end of the previous paragraph");
+});
+
+
+
+test("anchors: headings derive stable, unique slugs", async () => {
+  const blocks = parseDocument(
+    "<h1>Hello, World!</h1>" +
+      "<h2>Café notes</h2>" +
+      "<h3>hello world</h3>" +
+      "<p>Body</p>" +
+      "<h2>……</h2>" +
+      '<h2 data-align="center">日本 語</h2>',
+  );
+  assertEqual(
+    JSON.stringify(headingAnchors(blocks)),
+    JSON.stringify(["hello-world", "cafe-notes", "hello-world-2", null, "section", "日本-語"]),
+    "anchors are slugged, deduplicated, and only headings get one",
+  );
+
+  const collisions = parseDocument("<h2>A</h2><h2>A</h2><h2>A-2</h2>");
+  assertEqual(
+    JSON.stringify(headingAnchors(collisions)),
+    JSON.stringify(["a", "a-2", "a-2-2"]),
+    "a heading whose own slug collides with a generated suffix still gets a unique anchor",
+  );
+  assertEqual(headingAnchors(parseDocument("<p>no headings</p>"))[0], null, "paragraphs have no anchor");
+});
+
+test("anchors: a deep link scrolls the heading into view and moves the caret", async () => {
+  const filler = [];
+  for (let index = 0; index < 40; index += 1) {
+    filler.push("<p>filler line " + index + "</p>");
+  }
+  await load("<h1>Start here</h1>" + filler.join("") + "<h2>Target section</h2>" + filler.join(""));
+  const index = editor.getDocument().findIndex((block) => blockText(block) === "Target section");
+  assert(index > 0, "the heading is in the document");
+
+  window.scrollTo({ top: 0, behavior: "instant" });
+  await settle();
+  assertEqual(editor.goToAnchor("no-such-heading"), false, "an unknown anchor does nothing");
+  assertEqual(window.scrollY, 0, "and the view does not move");
+
+  assert(editor.goToAnchor("target-section", { smooth: false }), "the anchor resolves");
+  await settle();
+  assert(window.scrollY > 0, "the page scrolled down");
+  assertEqual(editor.getSelection().focus.block, index, "the caret moves into the heading");
+  assertEqual(editor.getSelection().focus.offset, 0, "at its start");
+  const rect = rootRect();
+  const headingTop = rect.top + editor.entryFor(index).top;
+  assert(
+    headingTop > 0 && headingTop < 220,
+    "the heading sits just below the sticky header, not at the very top: " + headingTop,
+  );
+
+  assert(editor.goToAnchor("start-here", { smooth: false }), "the first heading resolves too");
+  await settle();
+  assertEqual(editor.getSelection().focus.block, 0, "the caret moves back to the first heading");
+});
+
 test("lists: ordered markers number consecutive items", async () => {
   await load("<p>alpha</p><p>beta</p><p>gamma</p>");
   editor.setSelection({ block: 0, offset: 0 }, { block: 2, offset: 5 });
@@ -2638,6 +2849,17 @@ test("export: PDF builds from an edited document", async () => {
   assert(text.startsWith("%PDF"), "the PDF header is present");
   assert(text.includes("Exported title"), "the title appears in the PDF text");
   assert(text.includes("hard break"), "the body appears in the PDF text");
+});
+
+test("export: PDF draws a divider as a stroked rule", async () => {
+  await load("<p>above</p><hr><p>below</p>");
+  const pdf = await buildPdf(editor.getDocument(), "Divided");
+  const text = new TextDecoder("latin1").decode(pdf);
+  assert(text.includes("above") && text.includes("below"), "the text around the rule is exported");
+  assert(
+    /\d+(?:\.\d+)? \d+(?:\.\d+)? m \d+(?:\.\d+)? \d+(?:\.\d+)? l S/.test(text),
+    "the rule is a stroked line",
+  );
 });
 
 test("model: an edited document round-trips through stored HTML", async () => {
@@ -3999,10 +4221,11 @@ test("model: parse and serialize round-trip preserves writing", async () => {
     "<ul><li>One</li><li>Two<ul><li>Nested</li></ul></li></ul>" +
     "<ol><li>First</li></ol>" +
     "<pre>let x = 1;\nlet y = 2;</pre>" +
+    "<hr>" +
     '<p data-align="right" data-indent="2">Aligned</p>' +
     '<img class="free" data-x="20" data-y="40" data-width="120" width="400" height="300" alt="Picture" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==">';
   const blocks = parseDocument(html);
-  assertEqual(blocks.length, 10, "block count");
+  assertEqual(blocks.length, 11, "block count");
   const serialized = serializeDocument(blocks);
   const reparsed = parseDocument(serialized);
   assertEqual(serializeDocument(reparsed), serialized, "serialization is stable");

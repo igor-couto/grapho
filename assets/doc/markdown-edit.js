@@ -1095,6 +1095,10 @@ export function setMark(blocks, selection, key) {
     if (!block || block.type === "image" || !info || isFence(info.kind)) {
       continue;
     }
+    if (!isInlineLine(info) && info.kind !== "html") {
+      // A divider line is a block of its own, not text to wrap in markers.
+      continue;
+    }
     const text = lineText(block);
     const start = Math.max(clamp(lineStart(sel, index), 0, text.length), lineBodyStart(info, text));
     const end = clamp(lineEnd(sel, index, text.length), 0, text.length);

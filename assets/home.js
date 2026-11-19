@@ -4,6 +4,11 @@
   var state = {
     documents: [],
     cards: new Map(),
+    // Lowercased plain text of each document's preview, keyed by id. The
+    // listing already carries the preview for the grid miniature; reading its
+    // text makes search cover about a page of the document instead of the
+    // 220-character excerpt, with no extra request and no extra payload.
+    previewTexts: new Map(),
     previewObserver: null,
     query: "",
     view: "list",
@@ -267,6 +272,7 @@
     try {
       var payload = await request("/api/documents");
       state.documents = Array.isArray(payload.documents) ? payload.documents : [];
+      state.previewTexts.clear();
       state.loaded = true;
       els.signOut.hidden = !payload.auth_required;
       els.signOutRule.hidden = !payload.auth_required;
@@ -339,6 +345,36 @@
     els.retryLoad.disabled = false;
   }
 
+  // The plain text of a document's preview, lowercased for the search filter.
+  // The preview is the card's miniature: the server strips links, images, and
+  // attributes from the stored HTML and stops after about one page of text, so
+  // its words are the document's own. Cached per document because it only
+  // changes when the writing does; a rename does not invalidate it.
+  function previewSearchText(document) {
+    var cached = state.previewTexts.get(document.id);
+    if (cached && cached.preview === document.preview) {
+      return cached.text;
+    }
+    var text = plainPreviewText(document.preview).toLocaleLowerCase();
+    state.previewTexts.set(document.id, { preview: document.preview, text: text });
+    return text;
+  }
+
+  // `preview_html` only writes the tags it lists, and no attributes except the
+  // image placeholder's class, so stripping tags is enough. Block tags become
+  // spaces so a query cannot match across two paragraphs, the three entities
+  // the server escapes are decoded so a typed "&" matches, and whitespace
+  // collapses the way the server's own text extraction collapses it.
+  function plainPreviewText(preview) {
+    return String(preview || "")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&amp;/g, "&")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
   function renderDocuments() {
     if (!state.loaded) {
       // A view or sort change arrived before the first listing did; the
@@ -353,7 +389,8 @@
       }
       return (
         document.title.toLocaleLowerCase().includes(query) ||
-        document.excerpt.toLocaleLowerCase().includes(query)
+        document.excerpt.toLocaleLowerCase().includes(query) ||
+        previewSearchText(document).includes(query)
       );
     });
 
@@ -770,6 +807,7 @@
         state.documents = state.documents.filter(function (document) {
           return document.id !== pending.document.id;
         });
+        state.previewTexts.delete(pending.document.id);
         renderDocuments();
         state.returnFocus = null;
         closeActionDialog();

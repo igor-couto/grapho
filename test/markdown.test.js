@@ -153,6 +153,38 @@ test("markdown emitter: placeholder document is one empty source line", async ()
   assertEqual(sourceToRich(conversion.blocks).blocks.length, 1, "parses back to one paragraph");
 });
 
+test("markdown: a divider is a row of three dashes", async () => {
+  assertDeepEqual(sourceOf("<p>a</p><hr><p>b</p>"), ["a", "---", "b"], "the divider's source line");
+  assertEqual(readLine("---").kind, "divider", "readLine recognizes the rule");
+  assertEqual(writeLine({ kind: "divider" }), "---", "writeLine rebuilds it");
+  assertEqual(lineToBlocks("---")[0].type, "divider", "lineToBlocks makes a divider block");
+  assertDeepEqual(blockToLines(parseDocument("<hr>")[0]), ["---"], "a divider emits one line");
+
+  const conversion = richToSource(parseDocument("<p>a</p><hr><p>b</p>"));
+  assertEqual(sourceLineInfo(conversion.blocks)[1].kind, "divider", "sourceLineInfo reports it");
+  assertDeepEqual(
+    mapRichCaretToSource(conversion, { block: 1, offset: 0 }),
+    { block: 1, offset: 0 },
+    "a rich caret on the divider maps to its source line",
+  );
+  const back = sourceToRich(conversion.blocks);
+  assertDeepEqual(
+    mapSourceCaretToRich(back, { block: 1, offset: 2 }),
+    { block: 1, offset: 0 },
+    "any caret in the dashes maps back onto the divider block",
+  );
+
+  assertLossless("<hr>", "divider only");
+  assertLossless("<p>a</p><hr><p>b</p>", "divider between paragraphs");
+});
+
+test("markdown: text that looks like a divider stays text", async () => {
+  assertLossless("<p>---</p>", "a paragraph of dashes");
+  assertLossless("<p>--- tail</p>", "dashes with text after them");
+  assertLossless("<p>----</p>", "four dashes are text");
+  assertDeepEqual(sourceOf("<p>---</p>"), ["\\---"], "a paragraph of dashes is escaped");
+});
+
 test("markdown emitter: empty paragraphs are blank source lines", async () => {
   assertDeepEqual(sourceOf("<p>a</p><p></p><p>b</p>"), ["a", "", "b"], "middle empty paragraph");
   assertDeepEqual(sourceOf("<p></p><p>a</p>"), ["", "a"], "leading empty paragraph");

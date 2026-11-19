@@ -210,7 +210,14 @@ so ordinary browser text wrapping paints the miniature; a soft fade at the
 bottom stands in for the page break Grapho does not have. `home.js` fills a
 card's preview only when the card comes near the viewport and keeps card
 elements between renders, so search filtering never rebuilds them. List rows
-show no preview. The summary still carries the excerpt for search matching.
+show no preview. Search matches a document's title, its excerpt, and the text of
+its preview, so any word on the document's first page finds it; `home.js` strips
+the preview's markup once per document and caches the lowercase text, so typing
+stays a few `indexOf` calls. Text past that first page is not searched: the
+listing deliberately carries no more of the document than the cards already
+need, which is what keeps search request-free. A word beyond the first page
+needs the server-side search design instead, which trades one debounced request
+for full-text coverage.
 
 Each card's ⋯ menu opens the document, renames it, duplicates it, or deletes it.
 A duplicate is made by the server, not by replaying the document through the
@@ -327,6 +334,14 @@ hidden while the ghost stands in.
   already had, so it returns to the middle without being resized. `Block` stays
   for a block image at its natural width, and a free image keeps the position it
   was dropped at until one of the three is chosen.
+- A divider is a block whose stored HTML is `<hr>`. `layout.js` gives it an
+  18 px band with space above and below and `dividerLineY` says where the rule
+  goes, so `view.js` and `pdf.js` paint the same line. It has no text: like a
+  picture, a click selects it, Backspace or Delete removes it, typing over it
+  replaces it with a paragraph, Enter opens a paragraph after it, and the arrow
+  keys step over it. A selection that reaches one paints its band. The `--- `
+  shortcut creates one, the HTML export styles the `hr`, and in Markdown mode it
+  is the source line `---` (see the dialect below).
 - Paragraph alignment is a block property stored as `data-align` on the block tag
   (or list item). Layout shifts each painted line for centre/right alignment and
   stretches spaces on justified lines except the last line of a segment. Older
@@ -352,12 +367,14 @@ hidden while the ghost stands in.
   break inside the heading. This is rich-text behavior only; Markdown source
   lines are plain blocks and keep their markers.
 - Markdown line shortcuts work in the rendered editor: typing `- ` at the start
-  of a block starts a bullet item, and `# `, `## `, or `### ` starts Heading 1
-  to 3. The space that completes the marker triggers the rule and both it and
-  the marker are consumed, so the caret continues in the new style and text
-  after it stays in the converted block. The rules run on typed input only and
-  only at the very start of a line: a marker elsewhere, a code block, pasted
-  text, and Markdown source keep the literal characters.
+  of a block starts a bullet item, `# `, `## `, or `### ` starts Heading 1 to 3,
+  and `--- ` turns the block into a divider and opens a paragraph below it. The
+  space that completes the marker triggers the rule and both it and the marker
+  are consumed, so the caret continues in the new style and text after it stays
+  in the converted block (a divider takes the whole line, so that text continues
+  in the paragraph beneath it). The rules run on typed input only and only at the
+  very start of a line: a marker elsewhere, a code block, pasted text, and
+  Markdown source keep the literal characters.
 - Paper width belongs to the document, not the HTML: `paper_width` (pixels) in
   the document JSON, applied before the first layout. Dragging either border
   resizes both edges around the centre; the workspace bounds the drag and leaves
@@ -436,9 +453,9 @@ hidden while the ghost stands in.
   the source back with `assets/doc/markdown.js`, so the JSON on disk is the same
   sanitized HTML as always. The dialect is line-per-block: one line is one
   paragraph, a blank line is an empty paragraph (so intentional line breaks
-  survive leaving and re-entering the mode), `#`..`###`, `>`, list markers and
-  fences are understood, and inline marks, links, underline and hard breaks are
-  inline Markdown. Content Markdown cannot express (alignment, legacy indent,
+  survive leaving and re-entering the mode), `#`..`###`, `>`, list markers,
+  `---` (a divider) and fences are understood, and inline marks, links,
+  underline and hard breaks are inline Markdown. Content Markdown cannot express (alignment, legacy indent,
   empty paragraphs) rides a documented serialized-HTML escape hatch; images stay
   real image blocks and are never written into the source as base64 or urls, and
   only the accepted HTML shapes are parsed, so a stored document still cannot
@@ -460,6 +477,19 @@ hidden while the ghost stands in.
   request; the current document is left out. A root-relative target keeps
   working on any host or port the library is served from, the store's sanitizer
   passes it, and Markdown mode carries it.
+- Heading anchors are derived, never stored: `model.js`'s `headingAnchors` slugs
+  each heading's text (accents folded, lowercase, punctuation and whitespace runs
+  to one hyphen, capped at 80 characters), gives repeats "-2", "-3" suffixes in
+  document order, and calls a heading with no letters "section". The document
+  menu offers "Copy link to heading" only while the caret is in a heading and
+  copies the absolute `/doc/<id>#<anchor>` URL; on a plain-http origin, where the
+  Clipboard API is unavailable, the old selection-and-copy path is the fallback.
+  Opening such a link scrolls the heading below the sticky header and puts the
+  caret in it, and a `hashchange` repeats the jump smoothly. The link dialog
+  accepts and stores root-relative targets with a fragment. Anchors are absent
+  from Markdown mode (its blocks are source lines, not headings), and neither the
+  exported HTML nor the PDF carries them yet: that is the hook a TOC and export
+  anchors would use.
 - Known gaps: no native spellcheck, screen readers get the painted text but not a
   text-editing surface, printing the editor prints the painted page, image and
   paper resizing need a pointer, turning an animated GIF keeps only its first

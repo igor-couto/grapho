@@ -2,7 +2,7 @@
 // sync. Only blocks whose geometry or text changed are rebuilt.
 
 import { blockLength, imageRadius } from "./model.js";
-import { fontFor, fragmentTextWidth, textWidth } from "./layout.js";
+import { dividerLineY, fontFor, fragmentTextWidth, textWidth } from "./layout.js";
 
 const HANDLE_CORNERS = [
   ["nw", 0, 0],
@@ -65,7 +65,10 @@ export class EditorView {
   }
 
   signature(entry, block) {
-    const parts = [entry.top, entry.height, block ? block.mode || "" : ""];
+    const parts = [entry.top, entry.height, block ? block.type : "", block ? block.mode || "" : ""];
+    if (entry.divider) {
+      parts.push("d");
+    }
     if (entry.image) {
       parts.push(
         "i",
@@ -103,10 +106,17 @@ export class EditorView {
 
   paintBlock(view, entry, block, index) {
     const element = view.element;
-    element.className = "doc-block" + (entry.quote ? " is-quote" : "");
+    element.className = "doc-block" + (entry.quote ? " is-quote" : "") + (entry.divider ? " is-divider" : "");
     element.style.top = entry.top + "px";
     element.style.height = (entry.height || 0) + "px";
     element.textContent = "";
+
+    if (entry.divider) {
+      const rule = document.createElement("div");
+      rule.className = "doc-divider-rule";
+      rule.style.top = dividerLineY(entry) - entry.top + "px";
+      element.appendChild(rule);
+    }
 
     if (entry.quote) {
       const rule = document.createElement("div");
@@ -233,6 +243,22 @@ export class EditorView {
     for (let index = startBlock; index <= endBlock; index += 1) {
       const entry = this.layout.blocks[index];
       if (!entry) {
+        continue;
+      }
+
+      if (entry.divider) {
+        // A divider has no text to highlight, so a selection that reaches it
+        // paints the rule's whole band instead. The same band marks a caret
+        // that rests on the divider after a click, which is the only way to
+        // show where the caret went on a block with no glyphs.
+        const band = document.createElement("div");
+        band.className = "doc-selection";
+        band.style.left = "0px";
+        band.style.top = entry.top + "px";
+        band.style.width = this.layout.width + "px";
+        band.style.height = entry.height + "px";
+        this.overlay.appendChild(band);
+        this.selectionElements.push(band);
         continue;
       }
 

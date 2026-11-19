@@ -26,6 +26,7 @@
 //   1. text                   ordered list item (any digits; leading spaces
 //                             indent the item, two spaces per level, capped
 //                             at the model's depth limit of 6)
+//   ---                       a divider (the whole line, nothing else)
 //   ```                       fenced code; the fence is at least as long as
 //                             the longest backtick run inside the code, and
 //                             the content is the lines up to the closing fence
@@ -87,6 +88,7 @@ import {
   blockText,
   createBlock,
   createBlockId,
+  createDivider,
   emptyParagraph,
   normalizeRuns,
   parseDocument,
@@ -612,6 +614,7 @@ function leadingColumns(text) {
  *   {kind: "html", text}                        rich-only attributes carried
  *                                               as serialized HTML
  *   {kind: "fence"}
+ *   {kind: "divider"}
  *   {kind: "p", body}
  *   {kind: "h1"} .. {kind: "h3"}, body
  *   {kind: "quote", body}
@@ -627,6 +630,11 @@ export function readLine(text) {
   }
   if (line[0] === "<" && classifyHtmlLine(line)) {
     return { kind: "html", text: line };
+  }
+  // A row of exactly three dashes is the divider. A line of dashes with any
+  // text after them is an ordinary paragraph (or a list item with a space).
+  if (line === "---") {
+    return { kind: "divider" };
   }
   const fenceLength = fenceLineLength(line);
   if (fenceLength >= 3) {
@@ -704,6 +712,8 @@ export function writeLine(line) {
       const length = clampNumber(line.fenceLength, 3, 64);
       return "`".repeat(Math.max(3, length));
     }
+    case "divider":
+      return "---";
     case "h1":
     case "h2":
     case "h3":
@@ -735,6 +745,7 @@ export function writeLine(line) {
  *   {kind: "fenceOpen", fenceLength}
  *   {kind: "fenceClose"}
  *   {kind: "codeContent"}
+ *   {kind: "divider"}
  *   {kind: "p"|"h1".."h3"|"quote"|"list", body, indent, ordered, depth}
  * plus `index` on text entries.
  */
@@ -837,6 +848,8 @@ function startsWithInlineMarkdown(line) {
 
 function richBlockFromLine(line, info) {
   switch (info.kind) {
+    case "divider":
+      return createDivider();
     case "h1":
     case "h2":
     case "h3":
@@ -1119,6 +1132,10 @@ function isLoneEmptyParagraph(blocks) {
 function blockLinesFor(block, counters) {
   if (!block || block.type === "image") {
     return { lines: [], kind: "image", prefixLength: 0 };
+  }
+
+  if (block.type === "divider") {
+    return { lines: ["---"], kind: "markdown", prefixLength: 0 };
   }
 
   if (block.type === "code") {

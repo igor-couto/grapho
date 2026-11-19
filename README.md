@@ -282,7 +282,8 @@ and working notes.
 ## Current limits
 
 Single user. No sharing, real-time collaboration, comments, tables, or version
-history. The optional password signs one person in: there are no accounts, no TLS,
+history. Search covers a document's title and first page, not its whole text. The
+optional password signs one person in: there are no accounts, no TLS,
 and failed logins pause per address, so behind a reverse proxy they share the
 proxy's address and one pause. PDF downloads use A4
 pages and PDF's standard fonts; characters outside WinAnsi are replaced with

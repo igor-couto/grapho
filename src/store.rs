@@ -589,6 +589,7 @@ pub fn sanitize_content(html: &str) -> String {
         // `demote_heading_four` can see it and turn an older document's fourth
         // level into an `h3` instead of dropping it to a plain paragraph.
         "h4",
+        "hr",
         "i",
         "img",
         "li",
@@ -812,6 +813,9 @@ fn is_line_break_tag(tag: &str) -> bool {
         || tag == "br/"
         || tag.starts_with("br ")
         || tag.starts_with("img")
+        || tag == "hr"
+        || tag == "hr/"
+        || tag.starts_with("hr ")
         || [
             "/p",
             "/div",
@@ -906,6 +910,7 @@ fn preview_html(html: &str) -> String {
             } else {
                 match preview_tag_name(body) {
                     "br" => output.push_str("<br>"),
+                    "hr" => output.push_str("<hr>"),
                     "img" => output.push_str("<span class=\"document-thumb-image\"></span>"),
                     name => {
                         if let Some(tag) = preview_tag(name) {
@@ -965,6 +970,7 @@ fn preview_tag(name: &str) -> Option<&'static str> {
         "u" => "u",
         "s" | "strike" | "del" => "s",
         "code" => "code",
+        "hr" => "hr",
         _ => return None,
     })
 }
@@ -1225,6 +1231,33 @@ mod tests {
     }
 
     #[test]
+    fn dividers_survive_sanitising_without_attributes() {
+        let clean = sanitize_content(concat!(
+            "<p>Above</p>",
+            "<hr>",
+            "<hr data-x=\"1\" data-align=\"center\" onclick=\"alert(1)\" style=\"color:red\">",
+            "<p>Below</p>",
+        ));
+
+        assert_eq!(
+            clean.matches("<hr>").count(),
+            2,
+            "both rules are kept, and bare: {clean}"
+        );
+        assert!(!clean.contains("onclick"), "no script attributes: {clean}");
+        assert!(!clean.contains("data-x"), "no image attributes: {clean}");
+        assert!(
+            !clean.contains("data-align"),
+            "a rule has no alignment: {clean}"
+        );
+        assert!(!clean.contains("style"), "no inline styles: {clean}");
+        assert!(
+            clean.contains("<p>Above</p>"),
+            "text around it survives: {clean}"
+        );
+    }
+
+    #[test]
     fn heading_four_from_an_older_document_becomes_heading_three() {
         let clean = sanitize_content(concat!(
             "<h4>Small</h4>",
@@ -1356,6 +1389,14 @@ mod tests {
         assert_eq!(
             preview_html(&html),
             "<p>Before</p><span class=\"document-thumb-image\"></span><p>After</p>"
+        );
+    }
+
+    #[test]
+    fn a_preview_keeps_a_divider_as_a_rule() {
+        assert_eq!(
+            preview_html("<p>Above</p><hr><p>Below</p>"),
+            "<p>Above</p><hr><p>Below</p>"
         );
     }
 

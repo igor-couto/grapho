@@ -11,7 +11,10 @@ import {
   blockText,
   createBlock,
   createBlockId,
+  createDivider,
   emptyParagraph,
+  headingAnchors,
+  isAtomicBlock,
   marksAt,
   mergeBlocks,
   normalizeRuns,
@@ -42,16 +45,22 @@ const ALIGNMENT_VALUES = new Set(ALIGNMENTS);
 const HEADING_TYPES = new Set(["h1", "h2", "h3"]);
 // Markdown line shortcuts in the rendered editor. The complete line prefix,
 // space included, maps to the block it starts; nothing above Heading 3 exists.
+// A row of three dashes is a divider: the block becomes a horizontal rule and
+// the caret continues in a paragraph below it.
 const MARKDOWN_SHORTCUTS = new Map([
   ["- ", "list"],
   ["# ", "h1"],
   ["## ", "h2"],
   ["### ", "h3"],
+  ["--- ", "divider"],
 ]);
 // Tab types four spaces at the caret in a paragraph. A selection gets one tab
 // stop at the start of every line it touches instead, the way a code editor
 // indents a block of text.
 const TAB_TEXT = "    ";
+// A deep link leaves this much room above the heading it jumps to, so the
+// heading does not hide under the sticky editor header (64 px tall).
+const ANCHOR_MARGIN = 96;
 
 export class DocEditor {
   constructor({
@@ -209,7 +218,7 @@ export class DocEditor {
 
   linkAtCaret() {
     const block = this.blocks[this.focus.block];
-    if (!block || block.type === "image" || block.type === "code") {
+    if (!block || isAtomicBlock(block) || block.type === "code") {
       return null;
     }
     let index = 0;
@@ -317,10 +326,10 @@ export class DocEditor {
     if (!this.isCollapsed()) {
       const { from } = this.normalized();
       const block = this.blocks[from.block];
-      return block && block.type !== "image" ? marksAt(block, from.offset) : {};
+      return block && !isAtomicBlock(block) ? marksAt(block, from.offset) : {};
     }
     const block = this.blocks[this.focus.block];
-    return block && block.type !== "image" ? marksAt(block, this.focus.offset) : {};
+    return block && !isAtomicBlock(block) ? marksAt(block, this.focus.offset) : {};
   }
 
   activeBlockType() {
@@ -329,6 +338,11 @@ export class DocEditor {
       return "p";
     }
     if (block.type === "list") {
+      return "p";
+    }
+    // A divider has no paragraph style; while the caret rests on one the style
+    // menu keeps showing Normal text rather than an unknown label.
+    if (block.type === "divider") {
       return "p";
     }
     return block.type;
@@ -398,7 +412,7 @@ export class DocEditor {
     if (!entry) {
       return null;
     }
-    if (entry.block.type === "image") {
+    if (isAtomicBlock(entry.block)) {
       return null;
     }
     return caretPoint(entry, this.focus.offset, this.lineHint);
@@ -419,7 +433,7 @@ export class DocEditor {
   positionInputAtSelectionEnd() {
     const saved = this.focus;
     const entry = this.layout ? blockEntry(this.layout, saved.block) : null;
-    const point = entry && entry.block.type !== "image" ? caretPoint(entry, saved.offset, this.lineHint) : null;
+    const point = entry && !isAtomicBlock(entry.block) ? caretPoint(entry, saved.offset, this.lineHint) : null;
     if (point) {
       this.textarea.style.left = point.x + "px";
       this.textarea.style.top = point.y + "px";
@@ -518,29 +532,45 @@ export class DocEditor {
      --------------------------------------------------------------------- */
 
   // Markdown line shortcuts, for typed input only: the space that ends "- ",
-  // "# ", "## ", or "### " at the start of a block turns the block into a
-  // bullet item or the matching heading and consumes the marker, so the caret
-  // continues in the new style. Text already after the caret belongs to the
-  // converted block; a marker anywhere else on the line, a code block, and
-  // Markdown source stay literal. Pasting never runs this.
+  // "# ", "## ", "### ", or "--- " at the start of a block turns the block into
+  // a bullet item, the matching heading, or a divider and consumes the marker.
+  // A heading's caret continues in the converted block, with the text that was
+  // after the marker; a divider takes the whole line, so that text continues in
+  // the paragraph below it. A marker anywhere else on the line, a code block,
+  // a divider, and Markdown source stay literal. Pasting never runs this.
   applyMarkdownShortcut(typed) {
     if (this.sourceMode || !this.isCollapsed()) {
       return false;
     }
-    // Every marker is at most "### " long and must start at offset 0, so a
-    // caret deeper in the block skips the text work below on every keystroke.
+    // Every marker is at most four characters long and must start at offset 0,
+    // so a caret deeper in the block skips the text work below on every
+    // keystroke.
     const offset = this.focus.offset;
     if (offset + typed.length > 4) {
       return false;
     }
     const index = this.focus.block;
     const block = this.blocks[index];
-    if (!block || block.type === "image" || block.type === "code") {
+    if (!block || isAtomicBlock(block) || block.type === "code") {
       return false;
     }
     const type = MARKDOWN_SHORTCUTS.get(blockText(block).slice(0, offset) + typed);
     if (!type) {
       return false;
+    }
+
+    if (type === "divider") {
+      // The rule owns the line, so anything the writer had typed after the
+      // marker moves into the paragraph below it and the caret waits there.
+      const below = createBlock("p", removeRangeFromRuns(block.runs, 0, offset), {
+        align: block.align,
+        indent: block.indent,
+      });
+      const blocks = this.blocks.slice();
+      blocks.splice(index, 1, createDivider(), below);
+      const caret = { block: index + 1, offset: 0 };
+      this.commit(blocks, caret, caret, { coalesce: true, keepMarks: true });
+      return true;
     }
 
     const next = {
@@ -597,9 +627,9 @@ export class DocEditor {
     let caret = deletion ? { ...deletion.caret } : { ...this.focus };
     let blocks = deletion ? deletion.blocks : this.blocks;
 
-    // A collapsed caret can sit on an image block (a click selects it). Typing
-    // then replaces the image with a paragraph at the same position.
-    if (blocks[caret.block] && blocks[caret.block].type === "image") {
+    // A collapsed caret can sit on an image or a divider (a click selects it).
+    // Typing then replaces that block with a paragraph at the same position.
+    if (blocks[caret.block] && isAtomicBlock(blocks[caret.block])) {
       blocks = blocks.slice();
       blocks[caret.block] = emptyParagraph();
       caret = { block: caret.block, offset: 0 };
@@ -664,11 +694,12 @@ export class DocEditor {
     let blocks = deletion ? deletion.blocks : this.blocks;
     let caret = deletion ? { ...deletion.caret } : { ...this.focus };
 
-    // A picture caret is replaced by a paragraph, the same way typing over a
-    // selected picture works; the paste then lands in that paragraph. A caret
-    // that only landed on a picture because the deleted selection ended next to
-    // it must not replace that picture: the paste goes after it instead.
-    if (blocks[caret.block] && blocks[caret.block].type === "image") {
+    // A picture or divider caret is replaced by a paragraph, the same way
+    // typing over a selected picture works; the paste then lands in that
+    // paragraph. A caret that only landed on one because the deleted selection
+    // ended next to it must not replace that block: the paste goes after it
+    // instead.
+    if (blocks[caret.block] && isAtomicBlock(blocks[caret.block])) {
       blocks = blocks.slice();
       if (deletion) {
         blocks.splice(caret.block + 1, 0, emptyParagraph());
@@ -752,10 +783,11 @@ export class DocEditor {
       position = { block: caret.block, offset: blockLength(first) };
     }
 
-    // A picture has no caret. A paste that ends on one and stops the document
-    // gets a paragraph to continue writing in; if the split tail follows it, the
-    // caret belongs at the start of that text and no paragraph is needed.
-    if (next[position.block] && next[position.block].type === "image") {
+    // A picture or divider has no caret. A paste that ends on one and stops the
+    // document gets a paragraph to continue writing in; if the split tail
+    // follows it, the caret belongs at the start of that text and no paragraph
+    // is needed.
+    if (next[position.block] && isAtomicBlock(next[position.block])) {
       if (position.block === next.length - 1) {
         next.push(emptyParagraph());
         position = { block: next.length - 1, offset: 0 };
@@ -768,7 +800,7 @@ export class DocEditor {
 
   marksForTyping() {
     const block = this.blocks[this.focus.block];
-    if (!block || block.type === "image") {
+    if (!block || isAtomicBlock(block)) {
       return {};
     }
     if (block.type === "code") {
@@ -783,7 +815,7 @@ export class DocEditor {
 
   splitAt(blocks, caret) {
     const block = blocks[caret.block];
-    if (block.type === "image") {
+    if (isAtomicBlock(block)) {
       const paragraph = emptyParagraph();
       const next = blocks.slice();
       next.splice(caret.block + 1, 0, paragraph);
@@ -807,7 +839,7 @@ export class DocEditor {
     const last = this.blocks[to.block];
 
     if (from.block === to.block) {
-      if (first.type === "image") {
+      if (isAtomicBlock(first)) {
         const next = this.blocks.slice();
         next.splice(from.block, 1);
         const caret = previousPosition(next, from.block);
@@ -818,15 +850,15 @@ export class DocEditor {
     }
 
     const headLength = from.offset;
-    if (first.type === "image" && last.type === "image") {
+    if (isAtomicBlock(first) && isAtomicBlock(last)) {
       const next = this.blocks.slice();
       next.splice(from.block, to.block - from.block + 1);
       const caret = previousPosition(next, from.block);
       return { blocks: next.length ? next : [emptyParagraph()], caret };
     }
-    const headRuns = first.type === "image" ? [] : runsInRange(first, 0, from.offset);
-    const tailRuns = last.type === "image" ? [] : runsInRange(last, to.offset, blockLength(last));
-    const base = first.type === "image" ? last : first;
+    const headRuns = isAtomicBlock(first) ? [] : runsInRange(first, 0, from.offset);
+    const tailRuns = isAtomicBlock(last) ? [] : runsInRange(last, to.offset, blockLength(last));
+    const base = isAtomicBlock(first) ? last : first;
     const mergedRuns = normalizeRuns([...headRuns, ...tailRuns]);
     const merged = {
       ...base,
@@ -859,7 +891,7 @@ export class DocEditor {
       return;
     }
 
-    if (block.type === "image") {
+    if (isAtomicBlock(block)) {
       this.deleteBlockAt(position.block);
       return;
     }
@@ -895,7 +927,7 @@ export class DocEditor {
     const previousIndex = position.block - 1;
     const previousBlock = this.blocks[previousIndex];
 
-    if (previousBlock.type === "image") {
+    if (isAtomicBlock(previousBlock)) {
       const next = this.blocks.slice();
       next.splice(previousIndex, 1);
       const caret = { block: previousIndex, offset: 0 };
@@ -903,7 +935,7 @@ export class DocEditor {
       return;
     }
 
-    if (block.type === "image") {
+    if (isAtomicBlock(block)) {
       const next = this.blocks.slice();
       next.splice(position.block, 1);
       const caret = { block: Math.max(0, position.block - 1), offset: 0 };
@@ -929,7 +961,7 @@ export class DocEditor {
       return;
     }
 
-    if (block.type === "image") {
+    if (isAtomicBlock(block)) {
       this.deleteBlockAt(position.block);
       return;
     }
@@ -948,14 +980,14 @@ export class DocEditor {
     }
 
     const nextBlock = this.blocks[position.block + 1];
-    if (nextBlock.type === "image") {
+    if (isAtomicBlock(nextBlock)) {
       const next = this.blocks.slice();
       next.splice(position.block + 1, 1);
       this.commit(next.length ? next : [emptyParagraph()], position, position);
       return;
     }
 
-    if (block.type === "image") {
+    if (isAtomicBlock(block)) {
       const next = this.blocks.slice();
       next.splice(position.block, 1);
       const caret = { block: Math.max(0, position.block - 1), offset: 0 };
@@ -982,7 +1014,7 @@ export class DocEditor {
       return;
     }
 
-    if (block.type === "image") {
+    if (isAtomicBlock(block)) {
       const paragraph = emptyParagraph();
       const next = blocks.slice();
       next.splice(index + 1, 0, paragraph);
@@ -1071,7 +1103,7 @@ export class DocEditor {
 
     for (let index = from.block; index <= to.block; index += 1) {
       const block = blocks[index];
-      if (!block || block.type === "image" || block.type === "code") {
+      if (!block || isAtomicBlock(block) || block.type === "code") {
         continue;
       }
       const start = index === from.block ? from.offset : 0;
@@ -1092,7 +1124,7 @@ export class DocEditor {
 
     for (let index = from.block; index <= to.block; index += 1) {
       const block = blocks[index];
-      if (!block || block.type === "image") {
+      if (!block || isAtomicBlock(block)) {
         continue;
       }
       blocks = blocks.slice();
@@ -1124,7 +1156,7 @@ export class DocEditor {
     const { from, to } = this.normalized();
     const indices = [];
     for (let index = from.block; index <= to.block; index += 1) {
-      if (this.blocks[index] && this.blocks[index].type !== "image") {
+      if (this.blocks[index] && !isAtomicBlock(this.blocks[index])) {
         indices.push(index);
       }
     }
@@ -1186,7 +1218,7 @@ export class DocEditor {
 
     for (let index = from.block; index <= to.block; index += 1) {
       const block = blocks[index];
-      if (!block || block.type === "image" || block.type === "code") {
+      if (!block || isAtomicBlock(block) || block.type === "code") {
         continue;
       }
       if (blockAlignment(block) === align) {
@@ -1219,7 +1251,7 @@ export class DocEditor {
     }
 
     const block = this.blocks[this.focus.block];
-    if (!block || block.type === "image") {
+    if (!block || isAtomicBlock(block)) {
       return;
     }
     if (block.type === "list") {
@@ -1249,7 +1281,7 @@ export class DocEditor {
         continue;
       }
       const block = blocks[index];
-      if (!block || block.type === "image") {
+      if (!block || isAtomicBlock(block)) {
         continue;
       }
       if (block.type === "list") {
@@ -1295,7 +1327,7 @@ export class DocEditor {
   outdentAtCaret() {
     const position = this.focus;
     const block = this.blocks[position.block];
-    if (!block || block.type === "image") {
+    if (!block || isAtomicBlock(block)) {
       return;
     }
 
@@ -1346,7 +1378,7 @@ export class DocEditor {
       // for whatever is typed next.
       const link = this.linkAtCaret();
       const block = this.blocks[from.block];
-      if (link && block && block.type !== "image" && block.type !== "code") {
+      if (link && block && !isAtomicBlock(block) && block.type !== "code") {
         const runs = setHrefOnRuns(block.runs, link.from, link.to, href || null);
         this.commit(
           this.replaceBlock(from.block, { ...block, id: createBlockId(), runs }),
@@ -1363,7 +1395,7 @@ export class DocEditor {
     let blocks = this.blocks;
     for (let index = from.block; index <= to.block; index += 1) {
       const block = blocks[index];
-      if (!block || block.type === "image" || block.type === "code") {
+      if (!block || isAtomicBlock(block) || block.type === "code") {
         continue;
       }
       const start = index === from.block ? from.offset : 0;
@@ -1387,7 +1419,7 @@ export class DocEditor {
     let blocks = this.blocks;
     for (let index = from.block; index <= to.block; index += 1) {
       const block = blocks[index];
-      if (!block || block.type === "image" || block.type === "code") {
+      if (!block || isAtomicBlock(block) || block.type === "code") {
         continue;
       }
       const start = index === from.block ? from.offset : 0;
@@ -1408,7 +1440,7 @@ export class DocEditor {
     const offset = deletion ? deletion.caret.offset : this.focus.offset;
     const current = blocks[index];
 
-    if (!current || current.type === "image") {
+    if (!current || isAtomicBlock(current)) {
       const next = blocks.slice();
       next.splice(index + 1, 0, { ...block, id: createBlockId() });
       const paragraph = emptyParagraph();
@@ -1616,7 +1648,7 @@ export class DocEditor {
     const index = deletion ? deletion.caret.block : this.focus.block;
     const offset = deletion ? deletion.caret.offset : this.focus.offset;
     const block = blocks[index];
-    if (!block || block.type === "image") {
+    if (!block || isAtomicBlock(block)) {
       if (deletion) {
         this.commit(deletion.blocks, deletion.caret, deletion.caret);
       }
@@ -1683,7 +1715,7 @@ export class DocEditor {
       let cursor = entry.index + direction;
       while (cursor >= 0 && cursor < this.layout.blocks.length) {
         const candidate = this.layout.blocks[cursor];
-        if (candidate.block.type !== "image" && candidate.lines.length) {
+        if (!isAtomicBlock(candidate.block) && candidate.lines.length) {
           targetEntry = candidate;
           targetLine = direction < 0 ? candidate.lines[candidate.lines.length - 1] : candidate.lines[0];
           break;
@@ -1756,7 +1788,7 @@ export class DocEditor {
   pageTarget(y, x, direction) {
     let previous = null;
     for (const entry of this.layout.blocks) {
-      if (entry.block.type === "image") {
+      if (isAtomicBlock(entry.block)) {
         continue;
       }
       for (const line of entry.lines) {
@@ -1818,13 +1850,50 @@ export class DocEditor {
     this.view.scrollToPageEdge(toStart);
   }
 
+  /* ---------------------------------------------------------------------
+     Heading anchors
+     --------------------------------------------------------------------- */
+
+  // The derived anchor of the heading the caret sits in, or "" for any other
+  // block. The document menu offers "Copy link to heading" only when this
+  // returns something.
+  headingAnchor() {
+    if (!this.blocks[this.focus.block]) {
+      return "";
+    }
+    return headingAnchors(this.blocks)[this.focus.block] || "";
+  }
+
+  // Jump to the heading whose derived anchor is `slug` (already decoded from a
+  // URL fragment). The caret moves to the heading so typing continues there,
+  // and the page scrolls it below the sticky header. Returns false when the
+  // document has no such heading, so the caller can leave the view alone.
+  goToAnchor(slug, options) {
+    if (!slug) {
+      return false;
+    }
+    const index = headingAnchors(this.blocks).indexOf(slug);
+    if (index < 0 || !this.layout) {
+      return false;
+    }
+    this.collapseTo({ block: index, offset: 0 }, { animateCaret: false });
+    const entry = this.layout.blocks[index];
+    if (!entry) {
+      return true;
+    }
+    const rect = this.root.getBoundingClientRect();
+    const top = Math.max(0, rect.top + window.scrollY + entry.top - ANCHOR_MARGIN);
+    window.scrollTo({ top, behavior: options && options.smooth ? "smooth" : "instant" });
+    return true;
+  }
+
   deleteWordBackward() {
     if (this.deleteSelectionIfAny()) {
       return;
     }
     const position = this.focus;
     const block = this.blocks[position.block];
-    if (!block || block.type === "image" || position.offset === 0) {
+    if (!block || isAtomicBlock(block) || position.offset === 0) {
       this.backspace();
       return;
     }
@@ -2306,7 +2375,7 @@ export class DocEditor {
     event.preventDefault();
     const position = this.positionFromEvent(event);
     const block = this.blocks[position.block];
-    if (!block || block.type === "image") {
+    if (!block || isAtomicBlock(block)) {
       return;
     }
     const text = blockText(block);
@@ -2352,7 +2421,7 @@ export class DocEditor {
     }
     const position = this.positionFromEvent(event);
     const block = this.blocks[position.block];
-    if (!block || block.type === "image") {
+    if (!block || isAtomicBlock(block)) {
       return;
     }
     const text = blockText(block);
@@ -2397,7 +2466,7 @@ export class DocEditor {
       const last = this.blocks.length - 1;
       return { block: last, offset: blockLength(this.blocks[last]) };
     }
-    if (entry.block.type === "image") {
+    if (isAtomicBlock(entry.block)) {
       this.lineHint = null;
       return { block: entry.index, offset: 0 };
     }
@@ -2442,7 +2511,7 @@ function isPlainParagraph(block) {
 // Rich content reduced to the lines a code block or a Markdown source line can
 // hold: marks and block types have no place there.
 function pastedPlainText(blocks) {
-  return blocks.map((block) => (block.type === "image" ? "" : blockText(block))).join("\n");
+  return blocks.map((block) => (isAtomicBlock(block) ? "" : blockText(block))).join("\n");
 }
 
 // Start offsets of the lines in a block's text: the text start, and every
@@ -2604,7 +2673,7 @@ function previousPosition(blocks, index) {
   while (cursor >= 0) {
     const block = blocks[cursor];
     if (block) {
-      return { block: cursor, offset: block.type === "image" ? 0 : blockLength(block) };
+      return { block: cursor, offset: isAtomicBlock(block) ? 0 : blockLength(block) };
     }
     cursor -= 1;
   }
@@ -2616,7 +2685,7 @@ function stepPosition(blocks, position, direction) {
   if (!block) {
     return position;
   }
-  if (block.type === "image") {
+  if (isAtomicBlock(block)) {
     const index = Math.max(0, Math.min(blocks.length - 1, position.block + direction));
     return { block: index, offset: 0 };
   }
@@ -2628,7 +2697,7 @@ function stepPosition(blocks, position, direction) {
       return { block: position.block, offset: previousBoundary(boundaries, position.offset) };
     }
     let index = position.block - 1;
-    while (index >= 0 && blocks[index].type === "image") {
+    while (index >= 0 && isAtomicBlock(blocks[index])) {
       index -= 1;
     }
     if (index < 0) {
@@ -2641,7 +2710,7 @@ function stepPosition(blocks, position, direction) {
     return { block: position.block, offset: nextBoundaryAfter(boundaries, position.offset) };
   }
   let index = position.block + 1;
-  while (index < blocks.length && blocks[index].type === "image") {
+  while (index < blocks.length && isAtomicBlock(blocks[index])) {
     index += 1;
   }
   if (index >= blocks.length) {
@@ -2652,7 +2721,7 @@ function stepPosition(blocks, position, direction) {
 
 function stepWord(blocks, position, direction) {
   const block = blocks[position.block];
-  if (!block || block.type === "image") {
+  if (!block || isAtomicBlock(block)) {
     return stepPosition(blocks, position, direction);
   }
   const text = blockText(block);
@@ -2743,7 +2812,7 @@ function selectionHasMark(blocks, from, to, key) {
   let hasText = false;
   for (let index = from.block; index <= to.block; index += 1) {
     const block = blocks[index];
-    if (!block || block.type === "image" || block.type === "code") {
+    if (!block || isAtomicBlock(block) || block.type === "code") {
       continue;
     }
     const start = index === from.block ? from.offset : 0;

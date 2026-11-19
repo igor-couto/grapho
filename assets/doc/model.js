@@ -6,6 +6,10 @@
 
 const INLINE_TAGS = new Set(["a", "b", "code", "del", "em", "i", "s", "span", "strike", "strong", "u"]);
 const BLOCK_TAGS = new Set(["blockquote", "div", "h1", "h2", "h3", "p", "pre", "ul", "ol"]);
+// Blocks with no text of their own. A caret can rest on one after a click, but
+// it cannot be typed into: typing replaces the whole block, and Enter, Delete,
+// and the arrow keys step over it.
+const ATOMIC_TYPES = new Set(["divider", "image"]);
 const HEADING_LEVELS = { h1: 1, h2: 2, h3: 3 };
 const LIST_DEPTH_LIMIT = 6;
 
@@ -50,12 +54,20 @@ export function emptyParagraph() {
   return createBlock("p", []);
 }
 
+export function createDivider() {
+  return { id: createBlockId(), type: "divider", runs: [] };
+}
+
+export function isAtomicBlock(block) {
+  return Boolean(block) && ATOMIC_TYPES.has(block.type);
+}
+
 export function isListBlock(block) {
   return block.type === "list";
 }
 
 export function blockLength(block) {
-  if (block.type === "image") {
+  if (isAtomicBlock(block)) {
     return 0;
   }
   let length = 0;
@@ -66,10 +78,50 @@ export function blockLength(block) {
 }
 
 export function blockText(block) {
-  if (block.type === "image") {
+  if (isAtomicBlock(block)) {
     return "";
   }
   return block.runs.map((run) => run.text).join("");
+}
+
+// Heading anchors are derived from the text, never stored, so no document
+// format changes when one is linked to. The slug folds accents, lowercases,
+// turns runs of punctuation and whitespace into one hyphen, and keeps Unicode
+// letters and digits. A heading that slugs empty is still addressable as
+// "section", and repeated slugs get "-2", "-3" in document order so every
+// heading has a stable target until the writing around it changes.
+const HEADING_ANCHOR_LIMIT = 80;
+
+function headingSlug(text) {
+  const slug = String(text || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/g, "");
+  return Array.from(slug || "section").slice(0, HEADING_ANCHOR_LIMIT).join("");
+}
+
+// One entry per block: the anchor of a heading, null for anything else.
+export function headingAnchors(blocks) {
+  const anchors = new Array(blocks.length).fill(null);
+  const used = new Set();
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index];
+    if (!block || (block.type !== "h1" && block.type !== "h2" && block.type !== "h3")) {
+      continue;
+    }
+    const base = headingSlug(blockText(block));
+    let anchor = base;
+    let suffix = 1;
+    while (used.has(anchor)) {
+      suffix += 1;
+      anchor = base + "-" + suffix;
+    }
+    used.add(anchor);
+    anchors[index] = anchor;
+  }
+  return anchors;
 }
 
 export function runsEqual(a, b) {
@@ -127,7 +179,7 @@ export function splitRuns(runs, offset) {
 }
 
 export function runsInRange(block, start, end) {
-  if (block.type === "image") {
+  if (isAtomicBlock(block)) {
     return [];
   }
   const runs = [];
@@ -145,7 +197,7 @@ export function runsInRange(block, start, end) {
 }
 
 export function marksAt(block, offset) {
-  if (!block || block.type === "image" || !block.runs.length) {
+  if (!block || isAtomicBlock(block) || !block.runs.length) {
     return {};
   }
   let index = 0;
@@ -213,7 +265,7 @@ export function setHrefOnRuns(runs, start, end, href) {
 }
 
 export function splitBlock(block, offset) {
-  if (block.type === "image") {
+  if (isAtomicBlock(block)) {
     return [block, emptyParagraph()];
   }
   const { left, right } = splitRuns(block.runs, offset);
@@ -223,7 +275,7 @@ export function splitBlock(block, offset) {
 }
 
 export function mergeBlocks(first, second) {
-  if (first.type === "image" || second.type === "image") {
+  if (isAtomicBlock(first) || isAtomicBlock(second)) {
     return first;
   }
   const runs = normalizeRuns([...first.runs, ...second.runs]);
@@ -344,6 +396,8 @@ function parseChildren(parent, out, fallbackType, marks, format, container) {
       continue;
     }
     if (tag === "hr") {
+      flush();
+      out.push(createDivider());
       continue;
     }
     if (!BLOCK_TAGS.has(tag)) {
@@ -364,7 +418,7 @@ function hasBlockChild(parent) {
       continue;
     }
     const tag = node.tagName.toLowerCase();
-    if (BLOCK_TAGS.has(tag) || tag === "img") {
+    if (BLOCK_TAGS.has(tag) || tag === "img" || tag === "hr") {
       return true;
     }
   }
@@ -638,6 +692,9 @@ function serializeList(items, startIndex, depth, ordered) {
 }
 
 function serializeBlock(block) {
+  if (block.type === "divider") {
+    return "<hr>";
+  }
   if (block.type === "image") {
     const classes =
       block.mode === "left"

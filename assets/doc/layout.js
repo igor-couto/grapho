@@ -12,7 +12,7 @@ import {
   materializeLineRange,
 } from "../pretext/layout.js";
 import { getGraphemeEnds } from "../pretext/line-text.js";
-import { blockAlignment, blockIndent, blockText } from "./model.js";
+import { blockAlignment, blockIndent, blockText, isAtomicBlock } from "./model.js";
 
 // These stacks must match --font-reading and --font-mono in app.css: Canvas
 // and the DOM have to resolve to the same font when a bundled face is missing.
@@ -21,6 +21,13 @@ const MONO = '"Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", mo
 const IMAGE_GAP = 24;
 const DOC_TOP = 29;
 const INDENT_STEP = 24;
+
+// A divider is a rule with its own breathing room, not a line of text. The
+// entry keeps a whole band so a click near the rule still lands on the block;
+// the rule itself is painted in the middle of it.
+const DIVIDER_BEFORE = 24;
+const DIVIDER_AFTER = 24;
+const DIVIDER_HEIGHT = 18;
 
 // One line of body text, the vertical rhythm the page is spaced to. These two
 // numbers mirror the body styles below and .doc-line.is-p in app.css, so the
@@ -31,6 +38,13 @@ const BODY_LINE = BODY_SIZE * BODY_LEADING;
 
 export function contentTop() {
   return DOC_TOP;
+}
+
+// The vertical centre of a divider's band, where view.js and pdf.js paint the
+// rule. Both read it from here so the page on screen and the exported PDF draw
+// the same line.
+export function dividerLineY(entry) {
+  return entry.top + entry.height / 2;
 }
 
 const STYLES = {
@@ -899,6 +913,21 @@ function layoutPass(blocks, columnWidth, obstacles, pinned) {
       continue;
     }
 
+    if (block.type === "divider") {
+      y += Math.max(previousAfter, DIVIDER_BEFORE);
+      laid.push({
+        block,
+        index,
+        top: y,
+        height: DIVIDER_HEIGHT,
+        lines: [],
+        divider: true,
+      });
+      y += DIVIDER_HEIGHT;
+      previousAfter = DIVIDER_AFTER;
+      continue;
+    }
+
     // A blank line adds no margin of its own; the margin the preceding block
     // would leave above it belongs to the blank line's one line of space.
     if (!blank) {
@@ -1004,7 +1033,7 @@ export function lineAtY(entry, y) {
 }
 
 export function pointToOffset(entry, x, y) {
-  if (!entry || entry.block.type === "image") {
+  if (!entry || isAtomicBlock(entry.block)) {
     return 0;
   }
   const line = lineAtY(entry, y);
@@ -1059,7 +1088,7 @@ function xForOffset(fragment, offset) {
 }
 
 export function caretPoint(entry, offset, hintLine) {
-  if (!entry || entry.block.type === "image" || !entry.lines.length) {
+  if (!entry || isAtomicBlock(entry.block) || !entry.lines.length) {
     return null;
   }
 
@@ -1121,7 +1150,7 @@ export function caretPoint(entry, offset, hintLine) {
 }
 
 export function entryOffsetEnd(entry) {
-  if (!entry || !entry.block || entry.block.type === "image") {
+  if (!entry || !entry.block || isAtomicBlock(entry.block)) {
     return 0;
   }
   return blockText(entry.block).length;
@@ -1129,7 +1158,7 @@ export function entryOffsetEnd(entry) {
 
 export function selectionRects(entry, start, end) {
   const rects = [];
-  if (!entry || entry.block.type === "image") {
+  if (!entry || isAtomicBlock(entry.block)) {
     return rects;
   }
   for (const line of entry.lines) {
