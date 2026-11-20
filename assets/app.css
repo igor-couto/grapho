@@ -2845,7 +2845,7 @@ html[data-theme="dark"] .toast.is-error {
   display: none;
 }
 
-.spelling-ignore {
+.spelling-add {
   color: var(--ink-soft);
 }
 

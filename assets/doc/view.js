@@ -31,7 +31,7 @@ export class EditorView {
     this.caretPoint = null;
     this.spellingRanges = new WeakMap();
     this.spellingCaret = null;
-    this.ignoredSpelling = new Set();
+    this.customSpelling = new Set();
   }
 
   setLayout(layout, blocks) {
@@ -107,6 +107,7 @@ export class EditorView {
       while (ranges[first]?.end <= lineStart) first += 1;
       for (let i = first; ranges[i]?.start < lineEnd; i += 1) {
         const range = ranges[i];
+        if (this.customSpelling.has(spellingKey(range.word))) continue;
         const rect = textRangeRect(line, range.start, range.end);
         if (!rect) continue;
         rect.y -= entry.top;
@@ -128,15 +129,23 @@ export class EditorView {
     if (position && position.block !== previous?.block) this.updateSpellingVisibility(position.block);
   }
 
-  ignoreSpelling(word) {
-    this.ignoredSpelling.add(spellingKey(word));
-    for (const index of this.views.keys()) this.updateSpellingVisibility(index);
+  addSpellingWords(words) {
+    const previousSize = this.customSpelling.size;
+    for (const word of words) this.customSpelling.add(spellingKey(word));
+    if (this.customSpelling.size === previousSize) return;
+    for (const view of this.views.values()) {
+      view.spelling = view.spelling.filter(({ range, element }) => {
+        if (!this.customSpelling.has(spellingKey(range.word))) return true;
+        element.remove();
+        return false;
+      });
+    }
   }
 
   updateSpellingVisibility(index) {
     const offset = this.spellingCaret?.block === index ? this.spellingCaret.offset : -1;
     for (const { range, element } of this.views.get(index)?.spelling || []) {
-      const hidden = (range.start < offset && offset <= range.end) || this.ignoredSpelling.has(spellingKey(range.word));
+      const hidden = range.start < offset && offset <= range.end;
       if (element.hidden !== hidden) element.hidden = hidden;
     }
   }
@@ -553,7 +562,7 @@ function selectionRectsFor(entry, start, end) {
 }
 
 function spellingKey(word) {
-  return word.normalize("NFC").toLowerCase().replaceAll("’", "'");
+  return word.normalize("NFC").toLowerCase().replaceAll("\u2019", "'");
 }
 
 function textRangeRect(line, start, end) {

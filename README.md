@@ -200,6 +200,10 @@ library menu to restore them with their original links. Grapho keeps them until
 restored, and their files count toward the space used. Copy the whole directory
 to back it up. Stop Grapho first if you want a consistent snapshot.
 
+**Add to dictionary** saves words for body spellcheck in `spelling-words.json`
+in the data directory. The list is shared across browsers on the same Grapho
+server and follows the library when you move the data folder.
+
 The folder is chosen in this order: `GRAPHO_DATA_DIR`, the folder saved on the
 Storage page, a `data/` folder in the working directory that already holds
 documents, and the per-user default. A folder chosen in the app is remembered in

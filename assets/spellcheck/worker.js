@@ -9,8 +9,8 @@ const dictionary = Promise.all(["en-US.aff", "en-US.dic"].map(async (name) => {
 
 // Ignore URLs, email addresses, numeric tokens and identifiers with underscores.
 // Keep contractions together, and check each part of a hyphenated word.
-const TOKENS = /(?:[a-z][a-z\d+.-]*:\/\/|www\.)[^\s<>]+|[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}|[\p{L}\p{M}\p{N}_]+(?:['’][\p{L}\p{M}\p{N}_]+)*/giu;
-const WORD = /^\p{Script=Latin}[\p{Script=Latin}\p{M}'’]*$/u;
+const TOKENS = /(?:[a-z][a-z\d+.-]*:\/\/|www\.)[^\s<>]+|[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}|[\p{L}\p{M}\p{N}_]+(?:['\u2019][\p{L}\p{M}\p{N}_]+)*/giu;
+const WORD = /^\p{Script=Latin}[\p{Script=Latin}\p{M}'\u2019]*$/u;
 const MAX_WORD_LENGTH = 40;
 
 function misspellings(checker, text, codeRanges) {

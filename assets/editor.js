@@ -190,6 +190,9 @@ async function init() {
     editor,
     menu: els.spellingMenu,
     positionMenu: positionBelow,
+    loadWords: () => request("/api/spelling/words", { cache: "no-store" }),
+    addWord: (word) => request("/api/spelling/words", { method: "POST", body: { word } }),
+    onDictionaryError: (message) => showToast(message, true),
     beforeOpen: () => {
       closeLinkPopover();
       closeImageMenu();
@@ -866,6 +869,7 @@ function bindEvents() {
   });
   els.deleteDialog.addEventListener("close", restoreEditorFocus);
 
+  document.addEventListener("keydown", handleSpellcheckShortcut, { capture: true });
   document.addEventListener("keydown", handleGlobalKeydown);
   window.addEventListener("beforeunload", persistBeforeLeaving);
 }
@@ -2402,6 +2406,16 @@ function setSpellingEnabled(enabled) {
   els.documentTitle.spellcheck = enabled;
 }
 
+function toggleSpellcheck() {
+  const enabled = !spelling.enabled;
+  setSpellingEnabled(enabled);
+  try {
+    localStorage.setItem(SPELLING_PREFERENCE, enabled ? "on" : "off");
+  } catch {
+    // The current page can still use the selected setting.
+  }
+}
+
 /* --------------------------------------------------------------------------
    Document menu, export, and delete
    -------------------------------------------------------------------------- */
@@ -2470,17 +2484,10 @@ function handleDocumentMenuAction(event) {
     case "markdown":
       toggleMarkdownMode();
       break;
-    case "spelling": {
-      const enabled = !spelling.enabled;
-      setSpellingEnabled(enabled);
-      try {
-        localStorage.setItem(SPELLING_PREFERENCE, enabled ? "on" : "off");
-      } catch {
-        // The current page can still use the selected setting.
-      }
+    case "spelling":
+      toggleSpellcheck();
       editor.focusEditor();
       break;
-    }
     case "delete":
       openDeleteDialog();
       break;
@@ -3184,6 +3191,20 @@ async function deleteDocument() {
       els.deleteConfirm.textContent = "Delete";
     }
   }
+}
+
+function handleSpellcheckShortcut(event) {
+  if (!state.loaded || !event.ctrlKey || !event.altKey || event.shiftKey || event.metaKey ||
+      event.key.toLowerCase() !== "s" || event.getModifierState("AltGraph") ||
+      event.isComposing || editor.composing || document.querySelector("dialog[open]")) {
+    return;
+  }
+  // Consume the shortcut before the editor's Ctrl+S save handler sees it.
+  event.preventDefault();
+  event.stopPropagation();
+  if (event.repeat) return;
+  toggleSpellcheck();
+  showToast(spelling.enabled ? "Spellcheck on." : "Spellcheck off.");
 }
 
 function handleGlobalKeydown(event) {

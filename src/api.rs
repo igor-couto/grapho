@@ -1,4 +1,6 @@
+use std::collections::BTreeSet;
 use std::fmt;
+use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -120,6 +122,12 @@ pub fn router(store: SharedStore, auth: Option<Arc<Auth>>, options: ServerOption
         .route("/api/storage/backups/ssh", post(add_ssh_backup))
         .route("/api/storage/backups/google", post(start_google_backup))
         .route("/api/storage/backups/{id}", delete(remove_backup))
+        .route(
+            "/api/spelling/words",
+            get(get_spelling_words)
+                .post(add_spelling_word)
+                .layer(DefaultBodyLimit::max(1024)),
+        )
         .route("/api/documents", get(list_documents).post(create_document))
         .route("/api/documents/search", get(search_documents))
         .route("/api/documents/deleted", get(list_deleted_documents))
@@ -408,6 +416,51 @@ async fn get_document_title(
         .await
         .map(Json)
         .ok_or_else(ApiError::not_found)
+}
+
+async fn get_spelling_words(
+    State(state): State<AppState>,
+) -> Result<Json<BTreeSet<String>>, ApiError> {
+    state
+        .store
+        .spelling_words()
+        .await
+        .map(Json)
+        .map_err(spelling_error)
+}
+
+#[derive(Deserialize)]
+struct AddSpellingWordRequest {
+    word: String,
+}
+
+async fn add_spelling_word(
+    State(state): State<AppState>,
+    Json(payload): Json<AddSpellingWordRequest>,
+) -> Result<Json<BTreeSet<String>>, ApiError> {
+    let word = payload.word.trim().to_lowercase().replace('\u{2019}', "'");
+    let valid = word.encode_utf16().count() <= 40
+        && word.split('\'').all(|part| {
+            let mut chars = part.chars();
+            chars.next().is_some_and(char::is_alphabetic)
+                && chars.all(|c| c.is_alphabetic() || ('\u{0300}'..='\u{036f}').contains(&c))
+        });
+    if !valid {
+        return Err(ApiError::bad_request(
+            "Add one word of up to 40 characters.",
+        ));
+    }
+    state
+        .store
+        .add_spelling_word(word)
+        .await
+        .map(Json)
+        .map_err(spelling_error)
+}
+
+fn spelling_error(error: io::Error) -> ApiError {
+    eprintln!("could not access custom spelling words: {error}");
+    ApiError::server_error("Grapho couldn't access your custom dictionary.")
 }
 
 #[derive(Deserialize, Default)]
@@ -1589,6 +1642,53 @@ mod tests {
             .next()
             .expect("the cookie pair")
             .to_owned()
+    }
+
+    #[tokio::test]
+    async fn spelling_words_are_shared_persisted_and_deduplicated() {
+        const WORDS: &str = "/api/spelling/words";
+        let (app, directory) = test_app(None).await;
+        let words = app.clone().oneshot(get(WORDS)).await.unwrap();
+        assert_eq!(json_body(words).await, serde_json::json!([]));
+
+        let (first, second) = tokio::join!(
+            app.clone()
+                .oneshot(post_json(WORDS, serde_json::json!({ "word": "Grapho" }))),
+            app.clone().oneshot(post_json(
+                WORDS,
+                serde_json::json!({ "word": "Neuraspace" })
+            )),
+        );
+        assert_eq!(first.unwrap().status(), StatusCode::OK);
+        assert_eq!(second.unwrap().status(), StatusCode::OK);
+
+        let expected = serde_json::json!(["grapho", "neuraspace"]);
+        let duplicate = app
+            .clone()
+            .oneshot(post_json(WORDS, serde_json::json!({ "word": "GRAPHO" })))
+            .await
+            .unwrap();
+        assert_eq!(json_body(duplicate).await, expected);
+        let invalid = app
+            .clone()
+            .oneshot(post_json(WORDS, serde_json::json!({ "word": "two words" })))
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(app.oneshot(get(WORDS)).await.unwrap()).await,
+            expected
+        );
+
+        let reopened = Store::load(directory.clone()).await.unwrap();
+        let target = directory.join("moved");
+        reopened.relocate(target.clone()).await.unwrap();
+        let moved = Store::load(target).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(moved.spelling_words().await.unwrap()).unwrap(),
+            expected
+        );
+        tokio::fs::remove_dir_all(directory).await.unwrap();
     }
 
     pub(super) async fn json_body(response: Response) -> serde_json::Value {

@@ -525,15 +525,19 @@ hidden while the ghost stands in.
   from Markdown mode (its blocks are source lines, not headings), and neither the
   exported HTML nor the PDF carries them yet: that is the hook a TOC and export
   anchors would use.
-- Spellcheck checks rich-text prose in US English. The document menu toggles
-  it for the browser. The title uses native textarea spellcheck. The rich-text
-  checker runs in a same-origin worker and loads the embedded dictionary only
-  after there is text to check. After a pause in typing, it checks new or changed
-  blocks and drops results for replaced blocks. The view paints spelling marks
+- Spellcheck checks rich-text prose in US English. The document menu and
+  Ctrl+Alt+S toggle it for the browser. The title uses native textarea
+  spellcheck. The rich-text checker runs in a same-origin worker and loads the
+  embedded dictionary only after there is text to check. After a pause in
+  typing, it checks new or changed blocks and drops results for replaced blocks.
+  The view paints spelling marks
   from the selection geometry. Right-click, tap, or Shift+F10 at a marked word
   opens suggestions. Corrections preserve inline formatting and use ordinary
-  undo. Ignoring a word lasts for the visit. Code, URLs, and Markdown source
-  are skipped. Assets under `assets/spellcheck/` include the original licenses
+  undo. Add to dictionary saves a word in `spelling-words.json` in the data
+  folder through the protected `/api/spelling/words` endpoint. The editor
+  loads custom words when starting spellcheck and accepts them across documents
+  and browsers. Code, URLs, and Markdown source are skipped. Assets under
+  `assets/spellcheck/` include the original licenses
   for Typo.js (BSD-3-Clause) and the SCOWL en_US dictionary (2020.12.07).
 - Known gaps: screen readers get the painted text but not a
   text-editing surface, printing the editor prints the painted page, image and

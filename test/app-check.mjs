@@ -4835,9 +4835,12 @@ async function checkSpellcheck(cdp, base, pressKey, tap) {
   for (let i = 0; i < 4; i += 1) await pressKey("Backspace", "Backspace", 8, 0);
   await pressKey("s", "KeyS", 83, 2);
 
-  await toggle();
-  check("turning off spellcheck clears the marks and disables title spellcheck", await evaluate(cdp,
-    `document.querySelectorAll(".doc-spelling-mark").length === 0 && !document.querySelector("#documentTitle").spellcheck`));
+  await evaluate(cdp, `document.querySelector("#documentTitle").focus()`);
+  await pressKey("s", "KeyS", 83, 3);
+  check("Ctrl+Alt+S clears spelling marks and keeps focus in the title", await evaluate(cdp,
+    `document.querySelectorAll(".doc-spelling-mark").length === 0 && !document.querySelector("#documentTitle").spellcheck &&
+     document.querySelector("#spellcheckToggle").getAttribute("aria-checked") === "false" &&
+     document.activeElement.id === "documentTitle"`));
   await cdp.send("Page.reload");
   await waitForPage(cdp, url, PAGE_TIMEOUT_MS);
   await waitForEditor(cdp, PAGE_TIMEOUT_MS);
@@ -4863,6 +4866,24 @@ async function checkSpellcheck(cdp, base, pressKey, tap) {
   await tap(receive);
   check("a phone tap applies the replacement", await evaluate(cdp, `${firstLine}.textContent === "We receive letters."`));
   await cdp.send("Emulation.clearDeviceMetricsOverride");
+
+  await pressKey("z", "KeyZ", 90, 2);
+  check("undo makes the original word available to add to the dictionary", await wait(
+    `${firstLine}.textContent === "We recieve letters." && document.querySelector(${JSON.stringify(mark)}) !== null`,
+  ));
+  await clickWord("right");
+  await evaluate(cdp, `document.querySelector("#spellingMenu .spelling-add").click()`);
+  check("adding a word clears its underline and preserves the text", await wait(
+    `!document.querySelector(".doc-spelling-mark") && ${firstLine}.textContent === "We recieve letters."`,
+  ));
+  await cdp.send("Page.navigate", { url: base + "/doc/new" });
+  await waitForPage(cdp, base + "/doc/new/", PAGE_TIMEOUT_MS);
+  await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+  await pressKey("Enter", "Enter", 13, 0);
+  await cdp.send("Input.insertText", { text: "Recieve and qzxqzxqz " });
+  check("the custom word stays accepted in a new document with different capitalization", await wait(
+    `document.querySelectorAll(${JSON.stringify(mark)}).length === 1 && ${firstLine}.textContent.includes("Recieve and qzxqzxqz")`,
+  ));
 }
 
 main().catch((error) => {

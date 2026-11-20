@@ -3,12 +3,16 @@ import { blockLength, isAtomicBlock } from "./model.js";
 const CHECK_DELAY_MS = 250;
 
 export class Spellcheck {
-  constructor({ editor, menu, positionMenu, beforeOpen, onError }) {
+  constructor({ editor, menu, positionMenu, beforeOpen, onError, loadWords, addWord, onDictionaryError }) {
     this.editor = editor;
     this.menu = menu;
     this.positionMenu = positionMenu;
     this.beforeOpen = beforeOpen;
     this.onError = onError;
+    this.loadWords = loadWords;
+    this.addWord = addWord;
+    this.onDictionaryError = onDictionaryError;
+    this.wordsReady = null;
     this.blocks = null;
     this.enabled = false;
     this.checked = new WeakSet();
@@ -66,7 +70,11 @@ export class Spellcheck {
       if (!this.worker) {
         const worker = new Worker(new URL("../spellcheck/worker.js", import.meta.url));
         this.worker = worker;
-        worker.addEventListener("message", ({ data }) => {
+        this.wordsReady ??= this.loadWords()
+          .then((words) => this.editor.view.addSpellingWords(words))
+          .catch(() => this.onDictionaryError("Couldn't load your custom dictionary."));
+        worker.addEventListener("message", async ({ data }) => {
+          if (data.type === "checked") await this.wordsReady;
           if (this.worker === worker) this.receive(data);
         });
         worker.addEventListener("error", (error) => {
@@ -154,8 +162,13 @@ export class Spellcheck {
     this.close(false);
     if (button.hasAttribute("data-replacement")) {
       this.editor.replaceMisspelling(index, block, range, button.dataset.replacement);
-    } else {
-      this.editor.view.ignoreSpelling(range.word);
+    } else if (button.matches(".spelling-add")) {
+      this.addWord(range.word.normalize("NFC"))
+        .then((words) => {
+          this.editor.view.addSpellingWords(words);
+          this.reposition();
+        })
+        .catch(() => this.onDictionaryError("Couldn't add the word to your dictionary."));
     }
     this.editor.focusEditor();
   }

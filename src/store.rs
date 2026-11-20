@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 const SCHEMA_VERSION: u32 = 1;
 const DEFAULT_TITLE: &str = "Untitled document";
+const SPELLING_WORDS_FILE: &str = "spelling-words.json";
 const MAX_TITLE_CHARS: usize = 200;
 const EXCERPT_CHARS: usize = 220;
 /// How much text the home page's grid card miniature holds. The card renders
@@ -200,6 +201,9 @@ impl Store {
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }
+            if entry.file_name() == SPELLING_WORDS_FILE {
+                continue;
+            }
             let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
@@ -245,6 +249,20 @@ impl Store {
     /// The folder documents are written to right now.
     pub async fn directory(&self) -> PathBuf {
         self.state.read().await.directory.clone()
+    }
+
+    pub async fn spelling_words(&self) -> io::Result<BTreeSet<String>> {
+        let state = self.state.read().await;
+        read_spelling_words(&state.directory).await
+    }
+
+    pub async fn add_spelling_word(&self, word: String) -> io::Result<BTreeSet<String>> {
+        let state = self.state.write().await;
+        let mut words = read_spelling_words(&state.directory).await?;
+        if words.insert(word) {
+            crate::settings::write_json(&state.directory.join(SPELLING_WORDS_FILE), &words).await?;
+        }
+        Ok(words)
     }
 
     /// What the folder holds, counted from the files themselves rather than the
@@ -558,6 +576,10 @@ impl Store {
 
         let ours: HashSet<Uuid> = existing.iter().map(|(id, _)| *id).collect();
 
+        let spelling_words = read_spelling_words(&state.directory)
+            .await
+            .map_err(|error| RelocateError::io(&state.directory, error))?;
+
         // Copies this call creates are the only ones a failure may remove; a
         // file that was already there belongs to the folder's previous use.
         let mut created = Vec::new();
@@ -571,6 +593,20 @@ impl Store {
             }
         }
 
+        // When returning to a previous data folder, retain any words added there.
+        if !spelling_words.is_empty() {
+            let copied = async {
+                let mut words = read_spelling_words(&target).await?;
+                words.extend(spelling_words);
+                crate::settings::write_json(&target.join(SPELLING_WORDS_FILE), &words).await
+            }
+            .await;
+            if let Err(error) = copied {
+                remove_copies(&target, &created).await;
+                return Err(RelocateError::io(&target, error));
+            }
+        }
+
         state.directory = target.clone();
         Ok(Relocated {
             directory: target,
@@ -580,6 +616,14 @@ impl Store {
                 .filter(|doc| doc.deleted_at.is_none())
                 .count(),
         })
+    }
+}
+
+async fn read_spelling_words(directory: &Path) -> io::Result<BTreeSet<String>> {
+    match fs::read(directory.join(SPELLING_WORDS_FILE)).await {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::from),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(BTreeSet::new()),
+        Err(error) => Err(error),
     }
 }
 

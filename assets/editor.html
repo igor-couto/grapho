@@ -139,7 +139,7 @@
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9.5 4 7.5 20M16.5 4l-2 16M4 9h16M4 15h16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
             <span id="markdownMenuItemLabel">Markdown mode</span>
           </button>
-          <button class="menu-item" id="spellcheckToggle" type="button" role="menuitemcheckbox" data-doc-action="spelling" aria-checked="true">
+          <button class="menu-item" id="spellcheckToggle" type="button" role="menuitemcheckbox" data-doc-action="spelling" aria-checked="true" aria-keyshortcuts="Control+Alt+S" title="Toggle spellcheck (Ctrl+Alt+S)">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m4 14 4-9 4 9m-6.5-3h5M13 15l2.5 2.5L21 12" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Spellcheck (English US)
             <span class="spelling-toggle-indicator" aria-hidden="true"></span>
@@ -322,7 +322,7 @@
   <div class="popover-menu spelling-menu" id="spellingMenu" role="group" aria-label="Spelling suggestions" tabindex="-1" hidden>
     <p class="spelling-status" role="status"></p>
     <div class="spelling-suggestions"></div>
-    <button class="menu-item spelling-ignore" type="button">Ignore word</button>
+    <button class="menu-item spelling-add" type="button">Add to dictionary</button>
   </div>
 
   <dialog class="modal link-dialog" id="linkDialog" aria-labelledby="linkTitle">
