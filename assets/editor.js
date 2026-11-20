@@ -32,6 +32,7 @@ import {
 import { IMAGE_MAX_DATA_URL, encodeCanvas, transformImage } from "./doc/image.js";
 import { cacheImageSize, ensureFonts, loadMissingImages } from "./doc/layout.js";
 import { buildPdf } from "./doc/pdf.js";
+import { Spellcheck } from "./doc/spellcheck.js";
 
 const state = {
   documentId: null,
@@ -66,6 +67,8 @@ const state = {
 
 const els = {};
 let editor = null;
+let spelling = null;
+const SPELLING_PREFERENCE = "grapho-spellcheck";
 
 // The link dialog's page search. The listing is read when the dialog opens,
 // once per opening like Ctrl+O, and filtered locally as the writer types: no
@@ -118,6 +121,8 @@ async function init() {
   els.documentMenu = document.getElementById("documentMenu");
   els.focusMenuItemLabel = document.getElementById("focusMenuItemLabel");
   els.markdownMenuItemLabel = document.getElementById("markdownMenuItemLabel");
+  els.spellcheckToggle = document.getElementById("spellcheckToggle");
+  els.spellingMenu = document.getElementById("spellingMenu");
   els.copyHeadingLink = document.getElementById("copyHeadingLink");
   els.formatToolbar = document.getElementById("formatToolbar");
   els.moreFormattingButton = document.getElementById("moreFormattingButton");
@@ -170,6 +175,7 @@ async function init() {
   editor = new DocEditor({
     root: els.editor,
     textarea: els.docInput,
+    onLayout: (blocks) => spelling.update(blocks),
     onChange: handleEditorChange,
     onSelection: handleSelectionChange,
     onImageSelect: openImageMenu,
@@ -180,6 +186,24 @@ async function init() {
     onSourceFormat: handleSourceFormat,
     onSourceWrap: wrapSourceTypedText,
   });
+  spelling = new Spellcheck({
+    editor,
+    menu: els.spellingMenu,
+    positionMenu: positionBelow,
+    beforeOpen: () => {
+      closeLinkPopover();
+      closeImageMenu();
+      closeStyleMenu();
+      closeAlignMenu();
+      closeDocumentMenu();
+      closeMoreFormatting();
+    },
+    onError: () => {
+      setSpellingEnabled(false);
+      showToast("Spellcheck could not load.", true);
+    },
+  });
+  setSpellingEnabled(readSpellingPreference());
   editor.bind();
 
   bindEvents();
@@ -670,7 +694,17 @@ function bindEvents() {
   els.styleMenu.addEventListener("keydown", handleStyleMenuKeydown);
   els.formatToolbar.addEventListener("scroll", closeStyleMenu, { passive: true });
 
-  els.editor.addEventListener("click", handleLinkClick);
+  els.editor.addEventListener("click", (event) => {
+    if (event.pointerType === "touch" && event.detail === 1 && editor.isCollapsed() &&
+        !event.target.closest(".doc-image, .doc-resize-handle") && spelling.open(editor.view.spellingAtPoint(event))) {
+      return;
+    }
+    handleLinkClick(event);
+  });
+  els.editor.addEventListener("contextmenu", (event) => {
+    if (event.defaultPrevented || event.target.closest(".doc-image, .doc-resize-handle")) return;
+    if (spelling.open(editor.view.spellingAtPoint(event))) event.preventDefault();
+  });
   els.linkButton.addEventListener("click", () => {
     const link = !state.markdownMode && editor.isCollapsed() && editor.linkAtCaret();
     if (link) {
@@ -693,8 +727,15 @@ function bindEvents() {
   });
   document.addEventListener("focusin", (event) => {
     if (event.target !== els.docInput && !els.linkPopover.contains(event.target)) closeLinkPopover();
+    if (!els.spellingMenu.contains(event.target)) spelling.close(false);
   });
   els.docInput.addEventListener("keydown", (event) => {
+    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+      if (spelling.open(editor.view.spellingAtCaret(editor.getSelection().focus))) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    }
     if (event.key === "Tab" && !event.shiftKey && !els.linkPopover.hidden) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -758,9 +799,12 @@ function bindEvents() {
   window.addEventListener("scroll", closeAlignMenu, { passive: true });
   window.addEventListener("scroll", closeStyleMenu, { passive: true });
   window.addEventListener("scroll", closeLinkPopover, { passive: true });
+  window.addEventListener("scroll", () => spelling.close(true), { passive: true });
+  window.addEventListener("resize", () => spelling.close(true));
   window.addEventListener("resize", closeLinkPopover);
   window.visualViewport?.addEventListener("resize", () => {
     if (state.linkAnchor) positionBelow(els.linkPopover, state.linkAnchor);
+    spelling.reposition();
   });
   window.addEventListener("resize", closeImageMenu);
   window.addEventListener("resize", closeAlignMenu);
@@ -2325,6 +2369,7 @@ function imageDownloadName(block) {
 }
 
 function handleDocumentPointer(event) {
+  if (!els.spellingMenu.contains(event.target)) spelling.close(false);
   if (!els.linkPopover.hidden && !els.linkPopover.contains(event.target)) closeLinkPopover();
   if (!els.imageMenu.hidden && !els.imageMenu.contains(event.target)) {
     closeImageMenu();
@@ -2341,6 +2386,20 @@ function handleDocumentPointer(event) {
   if (!els.moreFormattingMenu.contains(event.target) && !els.moreFormattingButton.contains(event.target)) {
     closeMoreFormatting();
   }
+}
+
+function readSpellingPreference() {
+  try {
+    return localStorage.getItem(SPELLING_PREFERENCE) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+function setSpellingEnabled(enabled) {
+  spelling.setEnabled(enabled);
+  els.spellcheckToggle.setAttribute("aria-checked", String(enabled));
+  els.documentTitle.spellcheck = enabled;
 }
 
 /* --------------------------------------------------------------------------
@@ -2411,6 +2470,17 @@ function handleDocumentMenuAction(event) {
     case "markdown":
       toggleMarkdownMode();
       break;
+    case "spelling": {
+      const enabled = !spelling.enabled;
+      setSpellingEnabled(enabled);
+      try {
+        localStorage.setItem(SPELLING_PREFERENCE, enabled ? "on" : "off");
+      } catch {
+        // The current page can still use the selected setting.
+      }
+      editor.focusEditor();
+      break;
+    }
     case "delete":
       openDeleteDialog();
       break;

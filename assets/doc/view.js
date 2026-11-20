@@ -2,7 +2,7 @@
 // sync. Only blocks whose geometry or text changed are rebuilt.
 
 import { blockLength, imageRadius } from "./model.js";
-import { dividerLineY, fontFor, fragmentTextWidth, textWidth } from "./layout.js";
+import { dividerLineY, entryAtY, fontFor, fragmentTextWidth, textWidth } from "./layout.js";
 
 const HANDLE_CORNERS = [
   ["nw", 0, 0],
@@ -29,6 +29,9 @@ export class EditorView {
     this.selectionElements = [];
     this.passage = null;
     this.caretPoint = null;
+    this.spellingRanges = new WeakMap();
+    this.spellingCaret = null;
+    this.ignoredSpelling = new Set();
   }
 
   setLayout(layout, blocks) {
@@ -46,7 +49,7 @@ export class EditorView {
       let view = this.views.get(index);
 
       if (!view) {
-        view = { element: document.createElement("div"), signature: null };
+        view = { element: document.createElement("div"), signature: null, spelling: [] };
         view.element.className = "doc-block";
         this.views.set(index, view);
         this.content.appendChild(view.element);
@@ -57,6 +60,9 @@ export class EditorView {
       if (view.signature !== signature || (entry.image && previousBlocks?.[index] !== blocks[index])) {
         this.paintBlock(view, entry, blocks[index]);
         view.signature = signature;
+        this.paintSpelling(index);
+      } else if (previousBlocks?.[index] !== blocks[index]) {
+        this.paintSpelling(index);
       }
     });
 
@@ -70,6 +76,85 @@ export class EditorView {
       if (this.passage.blocks === blocks) this.paintSearchPassage();
       else this.clearSearchPassage();
     }
+  }
+
+  setSpelling(index, ranges) {
+    this.spellingRanges.set(this.blocks[index], ranges);
+    this.paintSpelling(index);
+  }
+
+  clearSpelling() {
+    this.spellingRanges = new WeakMap();
+    for (const [index, view] of this.views) {
+      if (view.spelling.length) this.paintSpelling(index);
+    }
+  }
+
+  paintSpelling(index) {
+    const view = this.views.get(index);
+    for (const { element } of view.spelling) element.remove();
+    view.spelling = [];
+    const ranges = this.spellingRanges.get(this.blocks[index]);
+    if (!ranges?.length) return;
+
+    const entry = this.layout.blocks[index];
+    let first = 0;
+    const markers = document.createDocumentFragment();
+    for (const line of entry.lines) {
+      if (!line.fragments.length) continue;
+      const lineStart = line.fragments[0].start;
+      const lineEnd = line.fragments.at(-1).end;
+      while (ranges[first]?.end <= lineStart) first += 1;
+      for (let i = first; ranges[i]?.start < lineEnd; i += 1) {
+        const range = ranges[i];
+        const rect = textRangeRect(line, range.start, range.end);
+        if (!rect) continue;
+        rect.y -= entry.top;
+        const element = rangeRectangle(rect, "doc-spelling-mark");
+        element.setAttribute("aria-hidden", "true");
+        view.spelling.push({ index, range, element });
+        markers.appendChild(element);
+      }
+    }
+    view.element.appendChild(markers);
+    this.updateSpellingVisibility(index);
+  }
+
+  setSpellingCaret(position) {
+    const previous = this.spellingCaret;
+    if (previous?.block === position?.block && previous?.offset === position?.offset) return;
+    this.spellingCaret = position;
+    if (previous) this.updateSpellingVisibility(previous.block);
+    if (position && position.block !== previous?.block) this.updateSpellingVisibility(position.block);
+  }
+
+  ignoreSpelling(word) {
+    this.ignoredSpelling.add(spellingKey(word));
+    for (const index of this.views.keys()) this.updateSpellingVisibility(index);
+  }
+
+  updateSpellingVisibility(index) {
+    const offset = this.spellingCaret?.block === index ? this.spellingCaret.offset : -1;
+    for (const { range, element } of this.views.get(index)?.spelling || []) {
+      const hidden = (range.start < offset && offset <= range.end) || this.ignoredSpelling.has(spellingKey(range.word));
+      if (element.hidden !== hidden) element.hidden = hidden;
+    }
+  }
+
+  spellingAtCaret(position) {
+    return this.views.get(position.block)?.spelling.find(({ range, element }) =>
+      !element.hidden && range.start <= position.offset && position.offset <= range.end);
+  }
+
+  spellingAtPoint({ clientX, clientY }) {
+    if (!this.layout) return null;
+    const root = this.root.getBoundingClientRect();
+    const entry = entryAtY(this.layout, clientY - root.top);
+    return this.views.get(entry?.index)?.spelling.find(({ element }) => {
+      if (element.hidden) return false;
+      const rect = element.getBoundingClientRect();
+      return rect.left <= clientX && clientX < rect.right && rect.top <= clientY && clientY < rect.bottom;
+    });
   }
 
   signature(entry, block) {
@@ -461,21 +546,24 @@ function rangeRectangle(rect, className) {
 function selectionRectsFor(entry, start, end) {
   const rects = [];
   for (const line of entry.lines) {
-    if (!line.fragments.length) {
-      continue;
-    }
-    const lineStart = line.fragments[0].start;
-    const lineEnd = line.fragments[line.fragments.length - 1].end;
-    if (end <= lineStart || start >= lineEnd) {
-      continue;
-    }
-    const from = xAt(line, Math.max(start, lineStart));
-    const to = xAt(line, Math.min(end, lineEnd));
-    if (to > from) {
-      rects.push({ x: from, y: line.y, width: to - from, height: line.height });
-    }
+    const rect = textRangeRect(line, start, end);
+    if (rect) rects.push(rect);
   }
   return rects;
+}
+
+function spellingKey(word) {
+  return word.normalize("NFC").toLowerCase().replaceAll("’", "'");
+}
+
+function textRangeRect(line, start, end) {
+  if (!line.fragments.length) return null;
+  const lineStart = line.fragments[0].start;
+  const lineEnd = line.fragments.at(-1).end;
+  if (end <= lineStart || start >= lineEnd) return null;
+  const from = xAt(line, Math.max(start, lineStart));
+  const to = xAt(line, Math.min(end, lineEnd));
+  return to > from ? { x: from, y: line.y, width: to - from, height: line.height } : null;
 }
 
 function xAt(line, offset) {

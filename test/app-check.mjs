@@ -4706,6 +4706,7 @@ async function main() {
       "Draft with body text",
     );
     await cdp.send("Emulation.clearDeviceMetricsOverride");
+    await checkSpellcheck(cdp, base, pressKey, tapToolbar);
   } finally {
     if (cdp) {
       cdp.close();
@@ -4732,6 +4733,116 @@ async function main() {
   if (failures.length) {
     process.exitCode = 1;
   }
+}
+
+async function checkSpellcheck(cdp, base, pressKey, tap) {
+  const content = '<p>We <strong>rec</strong><em>ieve</em> letters.</p>' +
+    '<p>See https://misspeling.example and <code>misspeling</code>.</p><pre>misspeling</pre>';
+  const id = await evaluate(cdp, `(async () => {
+    const result = await fetch("/api/documents", { method: "POST" });
+    const { id } = await result.json();
+    const saved = await fetch("/api/documents/" + id, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Spelling test", content: ${JSON.stringify(content)} }),
+    });
+    if (!saved.ok) throw new Error("Could not seed the spelling test");
+    return id;
+  })()`);
+  const url = base + "/doc/" + id;
+  const mark = ".doc-spelling-mark:not([hidden])";
+  const receive = '#spellingMenu [data-replacement="receive"]';
+  const firstLine = `document.querySelector(".doc-line")`;
+  const wait = (expression) => waitForExpression(cdp, expression, 6000);
+  const toggle = () => evaluate(cdp, `(() => {
+    document.querySelector("#documentMenuButton").click();
+    document.querySelector("#spellcheckToggle").click();
+  })()`);
+
+  async function clickWord(button) {
+    const point = await evaluate(cdp, `(() => {
+      const mark = document.querySelector(${JSON.stringify(mark)});
+      const { x, y, width, height } = mark.getBoundingClientRect();
+      return { x: x + width / 2, y: y + height / 2 };
+    })()`);
+    await cdp.send("Input.dispatchMouseEvent", { ...point, button, type: "mousePressed", clickCount: 1 });
+    await cdp.send("Input.dispatchMouseEvent", { ...point, button, type: "mouseReleased", clickCount: 1 });
+  }
+
+  await cdp.send("Page.navigate", { url });
+  await waitForPage(cdp, url, PAGE_TIMEOUT_MS);
+  await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+  check("spellcheck underlines split-format prose and skips code and URLs", await wait(
+    `document.querySelectorAll(${JSON.stringify(mark)}).length === 1 &&
+     ${firstLine}.parentElement.querySelector(${JSON.stringify(mark)}) !== null`,
+  ));
+  check("spellcheck enables the browser's native title field", await evaluate(cdp,
+    `document.querySelector("#documentTitle").spellcheck && !document.querySelector("#docInput").spellcheck`));
+
+  await clickWord("right");
+  check("right-click offers the intended spelling correction", await wait(
+    `!spellingMenu.hidden && document.querySelector(${JSON.stringify(receive)}) !== null`,
+  ));
+  await evaluate(cdp, `document.querySelector(${JSON.stringify(receive)}).click()`);
+  check("correction preserves the word's split formatting and returns focus", await evaluate(cdp,
+    `${firstLine}.textContent === "We receive letters." && ${firstLine}.querySelector(".m-b").textContent === "rec" &&
+     ${firstLine}.querySelector(".m-i").textContent === "eive" && document.activeElement.id === "docInput"`));
+  await pressKey("s", "KeyS", 83, 2);
+  check("correction saves without spelling decoration", await wait(`(async () => {
+    const saved = await fetch("/api/documents/${id}").then((result) => result.json());
+    return saved.content.includes("<b>rec</b><i>eive</i>") && !saved.content.includes("doc-spelling");
+  })()`));
+  await pressKey("z", "KeyZ", 90, 2);
+  check("a single undo restores the original misspelling and mark", await wait(
+    `${firstLine}.textContent === "We recieve letters." && document.querySelector(${JSON.stringify(mark)}) !== null`,
+  ));
+
+  await clickWord("left");
+  await pressKey("F10", "F10", 121, 8);
+  check("shift+F10 opens suggestions at the caret", await wait(`!spellingMenu.hidden`));
+  await pressKey("Escape", "Escape", 27, 0);
+  check("Escape dismisses suggestions and restores typing focus", await evaluate(cdp,
+    `spellingMenu.hidden && document.activeElement.id === "docInput"`));
+
+  await pressKey("Home", "Home", 36, 2);
+  await cdp.send("Input.insertText", { text: "teh" });
+  check("an unfinished word stays unmarked after the spelling check", await wait(
+    `${firstLine}.parentElement.querySelector(".doc-spelling-mark[hidden]") !== null`,
+  ));
+  await cdp.send("Input.insertText", { text: " " });
+  check("finishing the word shows both misspellings", await wait(
+    `${firstLine}.parentElement.querySelectorAll(${JSON.stringify(mark)}).length === 2`,
+  ));
+  for (let i = 0; i < 4; i += 1) await pressKey("Backspace", "Backspace", 8, 0);
+  await pressKey("s", "KeyS", 83, 2);
+
+  await toggle();
+  check("turning off spellcheck clears the marks and disables title spellcheck", await evaluate(cdp,
+    `document.querySelectorAll(".doc-spelling-mark").length === 0 && !document.querySelector("#documentTitle").spellcheck`));
+  await cdp.send("Page.reload");
+  await waitForPage(cdp, url, PAGE_TIMEOUT_MS);
+  await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+  check("the spellcheck preference survives a reload", await evaluate(cdp,
+    `document.querySelector("#spellcheckToggle").getAttribute("aria-checked") === "false"`));
+  await toggle();
+  check("turning spellcheck back on checks the document", await wait(`document.querySelector(${JSON.stringify(mark)}) !== null`));
+
+  await pressKey("m", "KeyM", 77, 10);
+  check("the spelling marks are absent from Markdown source", await evaluate(cdp,
+    `document.body.classList.contains("is-markdown-mode") && !document.querySelector(".doc-spelling-mark")`));
+  await pressKey("m", "KeyM", 77, 10);
+  check("returning to rich text restores spelling marks", await wait(`document.querySelector(${JSON.stringify(mark)}) !== null`));
+
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 650, deviceScaleFactor: 1, mobile: true });
+  await tap(mark);
+  check("a phone tap opens suggestions without a text keyboard and the menu fits", await wait(`(() => {
+    if (spellingMenu.hidden || !document.querySelector(${JSON.stringify(receive)})) return false;
+    const rect = spellingMenu.getBoundingClientRect();
+    return document.activeElement.id !== "docInput" && rect.left >= 0 && rect.right <= innerWidth &&
+      rect.top >= 0 && rect.bottom <= innerHeight && document.documentElement.scrollWidth <= innerWidth + 1;
+  })()`));
+  await tap(receive);
+  check("a phone tap applies the replacement", await evaluate(cdp, `${firstLine}.textContent === "We receive letters."`));
+  await cdp.send("Emulation.clearDeviceMetricsOverride");
 }
 
 main().catch((error) => {

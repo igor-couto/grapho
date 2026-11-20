@@ -46,7 +46,18 @@ pub fn find(path: &str) -> Option<Asset> {
         "doc/model.js" => script(include_bytes!("../assets/doc/model.js")),
         "doc/pdf.js" => script(include_bytes!("../assets/doc/pdf.js")),
         "doc/pdf-fonts.js" => script(include_bytes!("../assets/doc/pdf-fonts.js")),
+        "doc/spellcheck.js" => script(include_bytes!("../assets/doc/spellcheck.js")),
         "doc/view.js" => script(include_bytes!("../assets/doc/view.js")),
+        "spellcheck/worker.js" => script(include_bytes!("../assets/spellcheck/worker.js")),
+        "spellcheck/typo.js" => script(include_bytes!("../assets/spellcheck/typo.js")),
+        "spellcheck/en-US.aff" => plain_text(include_bytes!("../assets/spellcheck/en-US.aff")),
+        "spellcheck/en-US.dic" => plain_text(include_bytes!("../assets/spellcheck/en-US.dic")),
+        "spellcheck/en-US-LICENSE.txt" => {
+            plain_text(include_bytes!("../assets/spellcheck/en-US-LICENSE.txt"))
+        }
+        "spellcheck/Typo-LICENSE.txt" => {
+            plain_text(include_bytes!("../assets/spellcheck/Typo-LICENSE.txt"))
+        }
         "favicon.svg" => Asset {
             bytes: include_bytes!("../assets/favicon.ico"),
             content_type: "image/svg+xml",
@@ -94,5 +105,12 @@ fn script(bytes: &'static [u8]) -> Asset {
     Asset {
         bytes,
         content_type: "text/javascript; charset=utf-8",
+    }
+}
+
+fn plain_text(bytes: &'static [u8]) -> Asset {
+    Asset {
+        bytes,
+        content_type: "text/plain; charset=utf-8",
     }
 }

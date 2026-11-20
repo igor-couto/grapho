@@ -139,6 +139,11 @@
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9.5 4 7.5 20M16.5 4l-2 16M4 9h16M4 15h16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
             <span id="markdownMenuItemLabel">Markdown mode</span>
           </button>
+          <button class="menu-item" id="spellcheckToggle" type="button" role="menuitemcheckbox" data-doc-action="spelling" aria-checked="true">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m4 14 4-9 4 9m-6.5-3h5M13 15l2.5 2.5L21 12" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Spellcheck (English US)
+            <span class="spelling-toggle-indicator" aria-hidden="true"></span>
+          </button>
           <div class="menu-rule" role="separator"></div>
           <p class="popover-label">Download as</p>
           <button class="menu-item" type="button" role="menuitem" data-doc-action="export-html">
@@ -225,7 +230,7 @@
         </div>
 
         <header class="paper-head">
-          <textarea class="document-title" id="documentTitle" rows="1" placeholder="Untitled document" maxlength="200" autocomplete="off" spellcheck="false" enterkeyhint="next" aria-label="Document title" disabled></textarea>
+          <textarea class="document-title" id="documentTitle" rows="1" placeholder="Untitled document" maxlength="200" autocomplete="off" spellcheck="true" lang="en-US" enterkeyhint="next" aria-label="Document title" disabled></textarea>
         </header>
 
         <div class="prose" id="editor" role="textbox" aria-multiline="true" aria-label="Document content" data-placeholder="Start writing…" data-empty="true">
@@ -312,6 +317,12 @@
       <a class="menu-item" id="linkOpen" aria-describedby="linkDestination" rel="noopener noreferrer">Open</a>
       <button class="menu-item" id="linkEdit" type="button">Edit</button>
     </div>
+  </div>
+
+  <div class="popover-menu spelling-menu" id="spellingMenu" role="group" aria-label="Spelling suggestions" tabindex="-1" hidden>
+    <p class="spelling-status" role="status"></p>
+    <div class="spelling-suggestions"></div>
+    <button class="menu-item spelling-ignore" type="button">Ignore word</button>
   </div>
 
   <dialog class="modal link-dialog" id="linkDialog" aria-labelledby="linkTitle">

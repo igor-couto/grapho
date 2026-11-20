@@ -66,6 +66,7 @@ export class DocEditor {
   constructor({
     root,
     textarea,
+    onLayout,
     onChange,
     onSelection,
     onImageSelect,
@@ -102,6 +103,7 @@ export class DocEditor {
     // pendingMarks already does for rich text.
     this.pendingSourceMarks = null;
     this.callbacks = {
+      onLayout,
       onChange,
       onSelection,
       onImageSelect,
@@ -361,6 +363,7 @@ export class DocEditor {
     const width = this.width || this.root.clientWidth || 640;
     this.layout = layoutDocument(this.blocks, width);
     this.view.setLayout(this.layout, this.blocks);
+    this.callbacks.onLayout?.(this.blocks);
   }
 
   sync(options) {
@@ -368,6 +371,8 @@ export class DocEditor {
     this.clampSelection();
     const collapsed = this.isCollapsed();
     const entry = this.layout ? blockEntry(this.layout, this.focus.block) : null;
+
+    this.view.setSpellingCaret(this.typing || this.composing ? this.focus : null);
 
     this.view.paintSelection(this.layout ? { anchor: this.anchor, focus: this.focus } : null);
 
@@ -483,6 +488,21 @@ export class DocEditor {
       this.undoStack.shift();
     }
     this.redoStack = [];
+  }
+
+  replaceMisspelling(index, block, { start, end, word }, text) {
+    // A suggestion may arrive after the user has edited or moved the block.
+    if (this.sourceMode || this.blocks[index] !== block || blockText(block).slice(start, end) !== word) {
+      return false;
+    }
+    const { left, right } = splitRuns(block.runs, start);
+    const { left: original, right: tail } = splitRuns(right, end - start);
+    const correction = spellingCorrectionRuns(original, word, text);
+    const runs = normalizeRuns([...left, ...correction, ...tail]);
+    const next = { ...block, id: createBlockId(), runs };
+    const caret = { block: index, offset: start + text.length };
+    this.commit(this.replaceBlock(index, next), caret, caret);
+    return true;
   }
 
   historySnapshot() {
@@ -1964,6 +1984,7 @@ export class DocEditor {
 
   handleCompositionStart() {
     this.composing = true;
+    this.view.setSpellingCaret(this.focus);
     const point = this.caretGeometry();
     if (point) {
       this.view.setComposition(point, "");
@@ -1983,6 +2004,8 @@ export class DocEditor {
     this.textarea.value = "";
     if (event.data) {
       this.insertText(event.data);
+    } else {
+      this.view.setSpellingCaret(this.typing ? this.focus : null);
     }
   }
 
@@ -2125,8 +2148,9 @@ export class DocEditor {
     }
 
     event.preventDefault();
-    // A tap on a link opens its actions without calling up the phone keyboard.
-    if (!link || event.pointerType !== "touch" || event.shiftKey) {
+    // Touch actions can open without calling up the phone keyboard.
+    const touchAction = event.pointerType === "touch" && (link || this.view.spellingAtPoint(event));
+    if (!touchAction || event.shiftKey) {
       this.focusEditor();
     }
     const position = this.positionFromEvent(event);
@@ -2522,6 +2546,42 @@ export class DocEditor {
 /* --------------------------------------------------------------------------
    Helpers
    -------------------------------------------------------------------------- */
+
+function spellingCorrectionRuns(runs, word, correction) {
+  if (runs.length === 1) return [{ ...runs[0], text: correction }];
+
+  const before = graphemeBoundaries(word);
+  const after = graphemeBoundaries(correction);
+  const oldCount = before.length - 1;
+  const newCount = after.length - 1;
+  const matches = (a, b) => word.slice(before[a], before[a + 1]) === correction.slice(after[b], after[b + 1]);
+  let prefix = 0;
+  let suffix = 0;
+  while (prefix < Math.min(oldCount, newCount) && matches(prefix, prefix)) prefix += 1;
+  while (prefix + suffix < Math.min(oldCount, newCount) && matches(oldCount - 1 - suffix, newCount - 1 - suffix)) {
+    suffix += 1;
+  }
+
+  // Keep the marks on unchanged letters at either end. Align boundaries in
+  // the edited middle by grapheme so a correction never splits an accent.
+  let offset = 0;
+  let start = 0;
+  return runs.map((run, index) => {
+    offset += run.text.length;
+    const oldBoundary = before.findIndex((boundary) => boundary >= offset);
+    let newBoundary = oldBoundary;
+    if (index === runs.length - 1 || oldBoundary >= oldCount - suffix) {
+      newBoundary = index === runs.length - 1 ? newCount : newCount - (oldCount - oldBoundary);
+    } else if (oldBoundary > prefix) {
+      const ratio = (oldBoundary - prefix) / (oldCount - prefix - suffix);
+      newBoundary = prefix + Math.round(ratio * (newCount - prefix - suffix));
+    }
+    const end = after[newBoundary];
+    const result = { ...run, text: correction.slice(start, end) };
+    start = end;
+    return result;
+  });
+}
 
 function insertRuns(block, offset, text, marks) {
   const { left, right } = splitRuns(block.runs, offset);
