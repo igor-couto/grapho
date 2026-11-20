@@ -30,6 +30,7 @@ import {
   caretPoint,
   contentTop,
   entryAtY,
+  graphemeBoundaryAtOrAfter,
   graphemeBoundaries,
   imageWidthFor,
   layoutDocument,
@@ -457,6 +458,17 @@ export class DocEditor {
       if (!coalesce) {
         this.recordUndo(this.historySnapshot());
       }
+    }
+
+    const block = blocks[focus.block];
+    // Inserting or deleting text can join two previously separate graphemes.
+    // Leave the caret after the whole character so the next edit can't split it.
+    if (
+      block && block !== this.blocks[focus.block] && anchor.block === focus.block &&
+      anchor.offset === focus.offset && focus.offset > 0 && focus.offset < blockLength(block)
+    ) {
+      const offset = graphemeBoundaryAtOrAfter(blockText(block), focus.offset);
+      anchor = focus = { block: focus.block, offset };
     }
 
     this.blocks = blocks;
@@ -1710,7 +1722,7 @@ export class DocEditor {
       const { from, to } = this.normalized();
       start = direction < 0 ? from : to;
     }
-    const next = stepWord(this.blocks, start, direction);
+    const next = stepWord(this.blocks, start, direction, extend);
     if (extend) {
       this.setSelection(this.anchor, next, { keepMarks: true });
     } else {
@@ -2429,27 +2441,20 @@ export class DocEditor {
 
   handleDoubleClick(event) {
     event.preventDefault();
-    const position = this.positionFromEvent(event);
+    const position = this.positionFromEvent(event, { character: true });
     const block = this.blocks[position.block];
     if (!block || isAtomicBlock(block)) {
       return;
     }
     const text = blockText(block);
-    const boundaries = wordBoundaries(text);
-    let start = 0;
-    let end = text.length;
-    for (let index = 0; index < boundaries.length - 1; index += 1) {
-      if (boundaries[index] <= position.offset && position.offset <= boundaries[index + 1]) {
-        start = boundaries[index];
-        end = boundaries[index + 1];
-        break;
+    for (const part of wordSegments(text)) {
+      const end = part.index + part.segment.length;
+      if (position.offset < end) {
+        this.setSelection({ block: position.block, offset: part.index }, { block: position.block, offset: end });
+        this.focusEditor();
+        return;
       }
     }
-    if (start === end) {
-      return;
-    }
-    this.setSelection({ block: position.block, offset: start }, { block: position.block, offset: end });
-    this.focusEditor();
   }
 
   // Three clicks select the whole line under the pointer, as a native text
@@ -2509,7 +2514,7 @@ export class DocEditor {
     return null;
   }
 
-  positionFromEvent(event) {
+  positionFromEvent(event, options) {
     if (!this.layout) {
       return { block: 0, offset: 0 };
     }
@@ -2529,7 +2534,7 @@ export class DocEditor {
     // A click belongs to the line under the pointer, which resolves the shared
     // offset at a soft wrap in that line's favour.
     this.lineHint = lineAtY(entry, y);
-    return { block: entry.index, offset: pointToOffset(entry, x, y) };
+    return { block: entry.index, offset: pointToOffset(entry, x, y, options) };
   }
 
   lineAtPoint(event) {
@@ -2811,7 +2816,7 @@ function stepPosition(blocks, position, direction) {
   return { block: index, offset: 0 };
 }
 
-function stepWord(blocks, position, direction) {
+function stepWord(blocks, position, direction, extend) {
   const block = blocks[position.block];
   if (!block || isAtomicBlock(block)) {
     return stepPosition(blocks, position, direction);
@@ -2826,11 +2831,9 @@ function stepWord(blocks, position, direction) {
   if (position.offset >= text.length) {
     return stepPosition(blocks, position, 1);
   }
-  return { block: position.block, offset: nextWordStart(text, position.offset) };
+  return { block: position.block, offset: nextWordBoundary(text, position.offset, extend) };
 }
 
-// Starts of the word-like segments, so word navigation skips the spaces and
-// punctuation between words instead of stopping on every segment edge.
 function wordStarts(text) {
   const starts = [];
   for (const part of wordSegments(text)) {
@@ -2851,11 +2854,16 @@ function previousWordStart(text, offset) {
   return 0;
 }
 
-function nextWordStart(text, offset) {
-  const starts = wordStarts(text);
-  for (const start of starts) {
-    if (start > offset) {
-      return start;
+function nextWordBoundary(text, offset, extend) {
+  // A forward selection ends with the word. Caret movement continues to the
+  // start of the next word.
+  for (const part of wordSegments(text)) {
+    if (!part.isWordLike) {
+      continue;
+    }
+    const boundary = extend ? part.index + part.segment.length : part.index;
+    if (boundary > offset) {
+      return boundary;
     }
   }
   return text.length;
@@ -2896,14 +2904,6 @@ function wordSegments(text) {
     }
   }
   return segments;
-}
-
-function wordBoundaries(text) {
-  const points = [0];
-  for (const part of wordSegments(text)) {
-    points.push(part.index + part.segment.length);
-  }
-  return points;
 }
 
 // The line holding an offset: from the start of the text after the previous

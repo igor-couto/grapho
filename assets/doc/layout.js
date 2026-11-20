@@ -1059,7 +1059,7 @@ export function lineAtY(entry, y) {
   return entry.lines[entry.lines.length - 1];
 }
 
-export function pointToOffset(entry, x, y) {
+export function pointToOffset(entry, x, y, { character = false } = {}) {
   if (!entry || isAtomicBlock(entry.block)) {
     return 0;
   }
@@ -1069,6 +1069,14 @@ export function pointToOffset(entry, x, y) {
   }
   if (!line.fragments.length) {
     return line.offsetStart || 0;
+  }
+
+  if (character) {
+    // A double-click targets the character under the pointer, while a normal
+    // click can place the caret on either side of it.
+    const fragment = line.fragments.find((part) => x < xForOffset(part, part.end)) ?? line.fragments.at(-1);
+    const boundaries = graphemeBoundaries(fragment.text);
+    return fragment.start + boundaries[graphemeAtX(fragment, x, boundaries)];
   }
 
   let best = { offset: line.fragments[0].start, distance: Infinity };
@@ -1087,26 +1095,27 @@ export function pointToOffset(entry, x, y) {
 // fragment's own edges. Choosing between them by distance makes a click on the
 // right half of a glyph put the caret after it, as every text editor does.
 function offsetCandidates(fragment, x) {
-  const boundaries = graphemeBoundaries(fragment.text);
   const offsets = [fragment.start, fragment.end];
   if (x > fragment.x && x < fragment.x + fragmentTextWidth(fragment, fragment.text)) {
-    let low = 0;
-    let high = boundaries.length - 1;
-    while (low < high) {
-      const middle = Math.ceil((low + high) / 2);
-      const width = fragmentTextWidth(fragment, fragment.text.slice(0, boundaries[middle]));
-      if (fragment.x + width <= x) {
-        low = middle;
-      } else {
-        high = middle - 1;
-      }
-    }
-    offsets.push(fragment.start + boundaries[low]);
-    if (low + 1 < boundaries.length) {
-      offsets.push(fragment.start + boundaries[low + 1]);
-    }
+    const boundaries = graphemeBoundaries(fragment.text);
+    const hit = graphemeAtX(fragment, x, boundaries);
+    offsets.push(fragment.start + boundaries[hit], fragment.start + boundaries[hit + 1]);
   }
   return offsets;
+}
+
+function graphemeAtX(fragment, x, boundaries) {
+  let low = 0;
+  let high = boundaries.length - 2;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (xForOffset(fragment, fragment.start + boundaries[middle]) <= x) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return low;
 }
 
 function xForOffset(fragment, offset) {
@@ -1219,10 +1228,7 @@ function xClamp(line, offset) {
 let segmenter = null;
 let segmenterChecked = false;
 
-export function graphemeBoundaries(text) {
-  if (!text) {
-    return [0];
-  }
+function ensureGraphemeSegmenter() {
   if (!segmenterChecked) {
     segmenterChecked = true;
     try {
@@ -1231,7 +1237,15 @@ export function graphemeBoundaries(text) {
       segmenter = null;
     }
   }
-  if (!segmenter) {
+  return segmenter;
+}
+
+export function graphemeBoundaries(text) {
+  if (!text) {
+    return [0];
+  }
+  const splitter = ensureGraphemeSegmenter();
+  if (!splitter) {
     const points = [];
     // Pretext already ships Unicode character-break tables. Use the full
     // table here so caret movement can also reach nonprinting characters.
@@ -1240,8 +1254,17 @@ export function graphemeBoundaries(text) {
     return points;
   }
   const points = [0];
-  for (const part of segmenter.segment(text)) {
+  for (const part of splitter.segment(text)) {
     points.push(part.index + part.segment.length);
   }
   return points;
+}
+
+export function graphemeBoundaryAtOrAfter(text, offset) {
+  const splitter = ensureGraphemeSegmenter();
+  if (splitter) {
+    const part = splitter.segment(text).containing(offset);
+    return part && part.index < offset ? part.index + part.segment.length : offset;
+  }
+  return graphemeBoundaries(text).find((boundary) => boundary >= offset) ?? offset;
 }

@@ -41,6 +41,16 @@ test("editing without Intl.Segmenter", async (t) => {
     }
   });
 
+  await t.test("deleting a line break keeps the caret out of the joined accented letter", () => {
+    const editor = editorWith([paragraph("e\n\u0301")]);
+    editor.collapseTo({ block: 0, offset: 1 });
+    press(editor, "Delete");
+    assert.equal(blockText(editor.getDocument()[0]), "e\u0301");
+    assert.deepEqual(editor.getSelection().focus, { block: 0, offset: 2 });
+    press(editor, "Backspace");
+    assert.equal(blockText(editor.getDocument()[0]), "");
+  });
+
   await t.test("double-clicking inside a word includes all its accented characters", () => {
     const word = "revisa\u0303o";
     const editor = editorWith([paragraph("uma " + word + " final")]);

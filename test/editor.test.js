@@ -3610,6 +3610,25 @@ test("pointer: double-click selects words without trailing punctuation", async (
   }
 });
 
+test("pointer: double-click follows the glyph at either edge of a parenthesized word", async () => {
+  await load("<p>Read (<b>beta</b>) next</p>", 640);
+  const start = "Read (".length;
+  const end = start + "beta".length;
+  const line = entry(0).lines[0];
+  const y = line.y + line.height / 2;
+  for (const [offset, fraction, expected] of [
+    [start - 1, 0.75, "("],
+    [start, 0.25, "beta"],
+    [end - 1, 0.75, "beta"],
+    [end, 0.25, ")"],
+  ]) {
+    const left = paintedOffsetX(0, offset);
+    const right = paintedOffsetX(0, offset + 1);
+    doubleClickEventAt(left + (right - left) * fraction, y);
+    assertEqual(editor.selectionText(), expected, `double-click within glyph at ${offset}`);
+  }
+});
+
 test("keyboard: Tab types four spaces and leaves the paragraph in place", async () => {
   await load("<p>An indented paragraph line.</p>");
   const lineX = entry(0).lines[0].x;

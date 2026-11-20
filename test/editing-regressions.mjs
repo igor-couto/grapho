@@ -7,6 +7,42 @@ import { editorWith, paragraph } from "./editor-fixture.mjs";
 import { richToSource, sourceToRich } from "../assets/doc/markdown.js";
 import { blockText, createBlock, findSearchPassage, serializeDocument } from "../assets/doc/model.js";
 
+test("deleting between regional indicators leaves the caret after the joined flag", () => {
+  const flag = "\u{1F1F5}\u{1F1F9}";
+  const original = paragraph("\u{1F1F5} \u{1F1F9} notes");
+  const editor = editorWith([original]);
+  const before = { block: 0, offset: 2 };
+  editor.collapseTo(before);
+  editor.handleKeyDown({ key: "Delete", preventDefault() {} });
+  assert.equal(blockText(editor.getDocument()[0]), flag + " notes");
+  assert.deepEqual(editor.getSelection().focus, { block: 0, offset: flag.length });
+
+  editor.handleKeyDown({ key: "Backspace", preventDefault() {} });
+  assert.equal(blockText(editor.getDocument()[0]), " notes");
+  editor.undo();
+  assert.equal(blockText(editor.getDocument()[0]), flag + " notes");
+  assert.deepEqual(editor.getSelection().focus, { block: 0, offset: flag.length });
+  editor.undo();
+  assert.deepEqual(editor.getDocument(), [original]);
+  assert.deepEqual(editor.getSelection().focus, before);
+});
+
+test("joining paragraphs preserves a combining accent and its letter on the next edit", () => {
+  const blocks = [paragraph("cafe"), paragraph("\u0301 latte")];
+  const editor = editorWith(blocks);
+  editor.collapseTo({ block: 1, offset: 0 });
+  editor.handleKeyDown({ key: "Backspace", preventDefault() {} });
+  assert.deepEqual(editor.getDocument().map(blockText), ["cafe\u0301 latte"]);
+  assert.deepEqual(editor.getSelection().focus, { block: 0, offset: "cafe\u0301".length });
+  editor.textarea.value = " au";
+  editor.handleInput();
+  assert.deepEqual(editor.getDocument().map(blockText), ["cafe\u0301 au latte"]);
+  editor.undo();
+  editor.undo();
+  assert.deepEqual(editor.getDocument(), blocks);
+  assert.deepEqual(editor.getSelection().focus, { block: 1, offset: 0 });
+});
+
 test("saving a numbered sublist keeps it under its bullet", () => {
   const source = ["- Packing", "  1. Passport", "- Transport"];
   const lines = source.map((text) => createBlock("p", [{ text }]));

@@ -99,6 +99,23 @@ test("a noncancelable delete followed by input removes exactly one character", (
   assert.deepEqual(editor.getDocument().map(blockText), ["aébc"]);
 });
 
+test("virtual keyboard input that joins two emoji keeps the caret after the whole glyph", () => {
+  const separate = "\u{1F469}\u{1F4BB}";
+  const joined = "\u{1F469}\u200D\u{1F4BB}";
+  const editor = boundEditor([paragraph(separate + " notes")]);
+  editor.collapseTo({ block: 0, offset: 2 });
+  nativeEdit(editor, "insertText", "\u200D");
+  assert.equal(blockText(editor.getDocument()[0]), joined + " notes");
+  assert.deepEqual(editor.getSelection().focus, { block: 0, offset: joined.length });
+  nativeEdit(editor, "deleteContentBackward");
+  assert.equal(blockText(editor.getDocument()[0]), " notes");
+  nativeEdit(editor, "historyUndo");
+  assert.equal(blockText(editor.getDocument()[0]), joined + " notes");
+  nativeEdit(editor, "historyUndo");
+  assert.equal(blockText(editor.getDocument()[0]), separate + " notes");
+  assert.deepEqual(editor.getSelection().focus, { block: 0, offset: 2 });
+});
+
 test("a virtual Return inside code preserves the block and its following indentation", () => {
   const editor = boundEditor([createBlock("code", [{ text: "a();\treturn;" }])]);
   editor.collapseTo({ block: 0, offset: 4 });

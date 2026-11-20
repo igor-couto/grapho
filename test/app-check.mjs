@@ -4695,7 +4695,7 @@ async function main() {
       await evaluate(cdp, `document.documentElement.scrollWidth <= innerWidth + 1`),
     );
     await pressKey("Enter", "Enter", 13, 0);
-    await cdp.send("Input.insertText", { text: "Draft with body text" });
+    await cdp.send("Input.insertText", { text: "Draft (with body text) remains" });
     const bodyDraftUrl = base + "/doc/" + bodyDraftId;
     await waitForPage(cdp, bodyDraftUrl, PAGE_TIMEOUT_MS);
     await cdp.send("Page.reload");
@@ -4703,9 +4703,29 @@ async function main() {
     equal(
       "an untitled draft with body text survives reload",
       await evaluate(cdp, `document.querySelector(".doc-line").textContent`),
-      "Draft with body text",
+      "Draft (with body text) remains",
     );
     await cdp.send("Emulation.clearDeviceMetricsOverride");
+
+    await evaluate(cdp, `document.getElementById("docInput").focus()`);
+    await pressKey("End", "End", 35, 2);
+    await pressKey("ArrowLeft", "ArrowLeft", 37, 10);
+    await cdp.send("Input.insertText", { text: "here" });
+    equal(
+      "Ctrl+Shift+Left replaces only the word after a closing parenthesis",
+      await evaluate(cdp, `document.querySelector(".doc-line").textContent`),
+      "Draft (with body text) here",
+    );
+    await pressKey("z", "KeyZ", 90, 2);
+    await pressKey("Home", "Home", 36, 2);
+    await pressKey("ArrowRight", "ArrowRight", 39, 10);
+    await cdp.send("Input.insertText", { text: "Page" });
+    equal(
+      "Ctrl+Shift+Right replaces only the word before an opening parenthesis",
+      await evaluate(cdp, `document.querySelector(".doc-line").textContent`),
+      "Page (with body text) remains",
+    );
+
     await checkSpellcheck(cdp, base, pressKey, tapToolbar);
   } finally {
     if (cdp) {
