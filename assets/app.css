@@ -3076,7 +3076,6 @@ html[data-theme="dark"] .toast.is-error {
 }
 
 .board-description {
-  max-width: 68ch;
   margin-bottom: 24px;
   font-family: var(--font-reading);
 }
