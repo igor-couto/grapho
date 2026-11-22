@@ -163,10 +163,6 @@
             PDF
           </button>
           <div class="menu-rule" role="separator"></div>
-          <button class="menu-item" type="button" role="menuitem" id="copyHeadingLink" data-doc-action="copy-heading-link" hidden>
-            <svg viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M7.2 10.8a3.4 3.4 0 0 0 4.8 0l2.2-2.2a3.4 3.4 0 0 0-4.8-4.8l-1 1M10.8 7.2a3.4 3.4 0 0 0-4.8 0L3.8 9.4a3.4 3.4 0 0 0 4.8 4.8l1-1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-            Copy link to heading
-          </button>
           <a class="menu-item" role="menuitem" id="shortcutsLink" href="/shortcuts">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <rect x="2.8" y="6" width="18.4" height="12" rx="2.4" stroke="currentColor" stroke-width="1.6"/>
@@ -319,10 +315,18 @@
     </div>
   </div>
 
+  <div class="popover-menu heading-menu" id="headingMenu" role="menu" aria-label="Heading options" hidden>
+    <button class="menu-item" type="button" role="menuitem" id="copyHeadingLink">
+      <svg viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M7.2 10.8a3.4 3.4 0 0 0 4.8 0l2.2-2.2a3.4 3.4 0 0 0-4.8-4.8l-1 1M10.8 7.2a3.4 3.4 0 0 0-4.8 0L3.8 9.4a3.4 3.4 0 0 0 4.8 4.8l1-1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      Copy link to heading
+    </button>
+  </div>
+
   <div class="popover-menu spelling-menu" id="spellingMenu" role="group" aria-label="Spelling suggestions" tabindex="-1" hidden>
     <p class="spelling-status" role="status"></p>
     <div class="spelling-suggestions"></div>
     <button class="menu-item spelling-add" type="button">Add to dictionary</button>
+    <button class="menu-item spelling-copy-heading" type="button" hidden>Copy link to heading</button>
   </div>
 
   <dialog class="modal link-dialog" id="linkDialog" aria-labelledby="linkTitle">
@@ -331,11 +335,15 @@
       <div class="link-field">
         <label class="field" for="linkInput">
           <span>Web address or search Grapho page</span>
-          <input id="linkInput" type="text" autocomplete="off" spellcheck="false" placeholder="Search documents or paste a web address" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="linkResultsList">
+          <input id="linkInput" type="text" autocomplete="off" spellcheck="false" placeholder="Search documents or paste a web address" role="combobox" aria-autocomplete="list" aria-haspopup="grid" aria-expanded="false" aria-controls="linkResultsList">
         </label>
         <div class="link-results" id="linkResults" hidden>
-          <p class="link-results-label" id="linkResultsLabel">Recent documents</p>
-          <ul class="link-results-list" id="linkResultsList" role="listbox" aria-labelledby="linkResultsLabel"></ul>
+          <div class="link-results-header">
+            <button class="link-result-arrow" id="linkResultsBack" type="button" aria-label="Back to documents" title="Back to documents" hidden></button>
+            <p class="link-results-label" id="linkResultsLabel">Recent documents</p>
+          </div>
+          <ul class="link-results-list" id="linkResultsList" role="grid" aria-labelledby="linkResultsLabel"></ul>
+          <p class="link-results-status" id="linkResultsStatus" role="status" hidden></p>
         </div>
       </div>
       <p class="field-error" id="linkError" role="alert" hidden>Enter a web address, or choose a Grapho page.</p>

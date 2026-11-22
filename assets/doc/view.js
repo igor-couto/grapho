@@ -50,7 +50,7 @@ export class EditorView {
 
       if (!view) {
         view = { element: document.createElement("div"), signature: null, spelling: [] };
-        view.element.className = "doc-block";
+        view.element.dataset.blockIndex = index;
         this.views.set(index, view);
         this.content.appendChild(view.element);
       }

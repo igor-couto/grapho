@@ -1886,14 +1886,12 @@ export class DocEditor {
      Heading anchors
      --------------------------------------------------------------------- */
 
-  // The derived anchor of the heading the caret sits in, or "" for any other
-  // block. The document menu offers "Copy link to heading" only when this
-  // returns something.
-  headingAnchor() {
-    if (!this.blocks[this.focus.block]) {
+  // The derived anchor of a heading block, or "" for any other block.
+  headingAnchor(index) {
+    if (this.sourceMode || !HEADING_TYPES.has(this.blocks[index]?.type)) {
       return "";
     }
-    return headingAnchors(this.blocks)[this.focus.block] || "";
+    return headingAnchors(this.blocks)[index];
   }
 
   // Jump to the heading whose derived anchor is `slug` (already decoded from a

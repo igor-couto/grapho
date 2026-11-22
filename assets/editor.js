@@ -6,6 +6,7 @@ import {
   IMAGE_RADIUS_LIMIT,
   blockText,
   findSearchPassage,
+  headingAnchors,
   imageRadius,
   parseDocument,
   serializeDocument,
@@ -48,6 +49,7 @@ const state = {
   imageEntry: null,
   imageBusy: false,
   linkAnchor: null,
+  contextHeadingAnchor: "",
   toastTimer: null,
   paperWidth: null,
   paperDrag: null,
@@ -80,11 +82,15 @@ const linkPicker = {
   visible: [],
   options: [],
   selected: -1,
+  headingView: null,
 };
 
 const LINK_RESULT_LIMIT = 50;
 const LINK_PAGE_ICON =
   '<svg viewBox="0 0 32 32" fill="none"><path d="M8 4.5h11.2L25 10.3v17.2H8V4.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M19 4.5v6h6" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M12.2 16h8.6M12.2 20h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+// The path from icons/arrow-drop-down.svg, rotated by the button's CSS.
+const LINK_ARROW_ICON =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15L7 10H17Z" fill="currentColor"/></svg>';
 const linkShortDate = new Intl.DateTimeFormat(undefined, {
   month: "short",
   day: "numeric",
@@ -123,6 +129,7 @@ async function init() {
   els.markdownMenuItemLabel = document.getElementById("markdownMenuItemLabel");
   els.spellcheckToggle = document.getElementById("spellcheckToggle");
   els.spellingMenu = document.getElementById("spellingMenu");
+  els.headingMenu = document.getElementById("headingMenu");
   els.copyHeadingLink = document.getElementById("copyHeadingLink");
   els.formatToolbar = document.getElementById("formatToolbar");
   els.moreFormattingButton = document.getElementById("moreFormattingButton");
@@ -166,6 +173,9 @@ async function init() {
   els.linkResults = document.getElementById("linkResults");
   els.linkResultsLabel = document.getElementById("linkResultsLabel");
   els.linkResultsList = document.getElementById("linkResultsList");
+  els.linkResultsStatus = document.getElementById("linkResultsStatus");
+  els.linkResultsBack = document.getElementById("linkResultsBack");
+  els.linkResultsBack.innerHTML = LINK_ARROW_ICON;
 
   els.deleteDialog = document.getElementById("deleteDialog");
   els.deleteForm = document.getElementById("deleteForm");
@@ -194,6 +204,7 @@ async function init() {
     addWord: (word) => request("/api/spelling/words", { method: "POST", body: { word } }),
     onDictionaryError: (message) => showToast(message, true),
     beforeOpen: () => {
+      closeHeadingMenu();
       closeLinkPopover();
       closeImageMenu();
       closeStyleMenu();
@@ -706,7 +717,15 @@ function bindEvents() {
   });
   els.editor.addEventListener("contextmenu", (event) => {
     if (event.defaultPrevented || event.target.closest(".doc-image, .doc-resize-handle")) return;
-    if (spelling.open(editor.view.spellingAtPoint(event))) event.preventDefault();
+    const heading = event.target.closest(".doc-line:is(.is-h1, .is-h2, .is-h3)");
+    const index = heading?.parentElement.dataset.blockIndex;
+    const point = new DOMRect(event.clientX, event.clientY);
+    if (openTextContextMenu(index, point, editor.view.spellingAtPoint(event))) event.preventDefault();
+  });
+  els.copyHeadingLink.addEventListener("click", () => {
+    const anchor = state.contextHeadingAnchor;
+    closeHeadingMenu();
+    if (anchor) copyHeadingLink(anchor);
   });
   els.linkButton.addEventListener("click", () => {
     const link = !state.markdownMode && editor.isCollapsed() && editor.linkAtCaret();
@@ -731,10 +750,12 @@ function bindEvents() {
   document.addEventListener("focusin", (event) => {
     if (event.target !== els.docInput && !els.linkPopover.contains(event.target)) closeLinkPopover();
     if (!els.spellingMenu.contains(event.target)) spelling.close(false);
+    if (!els.headingMenu.contains(event.target)) closeHeadingMenu();
   });
   els.docInput.addEventListener("keydown", (event) => {
     if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
-      if (spelling.open(editor.view.spellingAtCaret(editor.getSelection().focus))) {
+      const { focus } = editor.getSelection();
+      if (openTextContextMenu(focus.block, els.docInput.getBoundingClientRect(), editor.view.spellingAtCaret(focus))) {
         event.preventDefault();
         event.stopImmediatePropagation();
       }
@@ -750,6 +771,12 @@ function bindEvents() {
   els.linkResultsList.addEventListener("mousedown", (event) => event.preventDefault());
   els.linkResultsList.addEventListener("mousemove", handleLinkResultHover);
   els.linkResultsList.addEventListener("click", handleLinkResultClick);
+  els.linkResultsBack.addEventListener("click", returnToLinkDocuments);
+  els.linkDialog.addEventListener("cancel", (event) => {
+    if (!linkPicker.headingView) return;
+    event.preventDefault();
+    returnToLinkDocuments();
+  });
   els.linkDialog.addEventListener("close", () => {
     resetLinkPicker();
     restoreEditorFocus();
@@ -803,7 +830,9 @@ function bindEvents() {
   window.addEventListener("scroll", closeStyleMenu, { passive: true });
   window.addEventListener("scroll", closeLinkPopover, { passive: true });
   window.addEventListener("scroll", () => spelling.close(true), { passive: true });
+  window.addEventListener("scroll", () => closeHeadingMenu(true), { passive: true });
   window.addEventListener("resize", () => spelling.close(true));
+  window.addEventListener("resize", () => closeHeadingMenu(true));
   window.addEventListener("resize", closeLinkPopover);
   window.visualViewport?.addEventListener("resize", () => {
     if (state.linkAnchor) positionBelow(els.linkPopover, state.linkAnchor);
@@ -1237,7 +1266,10 @@ function positionStyleMenu() {
 }
 
 function positionBelow(menu, anchor) {
-  const anchorRect = anchor.getBoundingClientRect();
+  positionPopover(menu, anchor.getBoundingClientRect());
+}
+
+function positionPopover(menu, anchorRect) {
   const margin = 12;
   const gap = 8;
   const viewport = window.visualViewport;
@@ -1503,8 +1535,9 @@ function closeLinkDialog() {
 
 // A link to another Grapho page is stored root-relative, so it keeps working
 // on any host or port the library is served from.
-function documentLinkHref(id) {
-  return "/doc/" + encodeURIComponent(id);
+function documentLinkHref(id, anchor) {
+  const page = "/doc/" + encodeURIComponent(id);
+  return anchor ? page + "#" + encodeURIComponent(anchor) : page;
 }
 
 function normalizeLink(raw) {
@@ -1545,8 +1578,8 @@ function insertLink(href, label) {
   editor.focusEditor();
 }
 
-function insertPageLink(page) {
-  insertLink(documentLinkHref(page.id), page.title);
+function insertLinkResult(result) {
+  insertLink(documentLinkHref(result.id, result.anchor), result.title);
 }
 
 function showLinkError(message) {
@@ -1564,9 +1597,10 @@ function applyLink(event) {
   // pick one with the arrow keys); with no row picked, the field is the target.
   const picked = linkPicker.visible[linkPicker.selected];
   if (picked) {
-    insertPageLink(picked);
+    insertLinkResult(picked);
     return;
   }
+  if (linkPicker.headingView) return;
   const address = els.linkInput.value.trim();
   const url = normalizeLink(address);
   if (!url) {
@@ -1623,34 +1657,40 @@ async function loadLinkDocuments() {
     }
     linkPicker.documents = null;
   }
-  renderLinkResults();
+  if (!linkPicker.headingView) renderLinkResults();
 }
 
 // The dialog is closed (or reopened) while a listing is still arriving: drop
 // it instead of painting it into a dialog the writer is no longer looking at.
 function resetLinkPicker() {
   linkPicker.requestId += 1;
-  linkPicker.visible = [];
-  linkPicker.options = [];
-  linkPicker.selected = -1;
-  els.linkResults.hidden = true;
-  els.linkResultsList.replaceChildren();
-  els.linkInput.setAttribute("aria-expanded", "false");
-  els.linkInput.removeAttribute("aria-activedescendant");
+  clearLinkHeadings();
+  hideLinkResults();
 }
 
 function handleLinkInput() {
   els.linkError.hidden = true;
+  clearLinkHeadings();
   renderLinkResults();
 }
 
 function handleLinkInputKeydown(event) {
-  if (event.defaultPrevented || event.isComposing || els.linkResults.hidden) {
+  if (event.defaultPrevented || event.isComposing || els.linkResults.hidden ||
+      event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
     return;
   }
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     event.preventDefault();
     moveLinkSelection(event.key === "ArrowDown" ? 1 : -1);
+  } else if (event.key === "ArrowLeft" && linkPicker.headingView) {
+    event.preventDefault();
+    returnToLinkDocuments();
+  } else if (event.key === "ArrowRight" && !linkPicker.headingView) {
+    const page = linkPicker.visible[linkPicker.selected];
+    if (page) {
+      event.preventDefault();
+      openLinkHeadings(page);
+    }
   }
 }
 
@@ -1672,9 +1712,70 @@ function handleLinkResultClick(event) {
     return;
   }
   const picked = linkPicker.visible[Number(option.getAttribute("data-index"))];
-  if (picked) {
-    insertPageLink(picked);
+  if (!picked) return;
+  if (event.target.closest(".link-result-arrow")) openLinkHeadings(picked);
+  else insertLinkResult(picked);
+}
+
+async function openLinkHeadings(page) {
+  const view = { page, scrollTop: els.linkResultsList.scrollTop, controller: new AbortController() };
+  linkPicker.headingView = view;
+  els.linkResultsBack.hidden = false;
+  els.linkResultsLabel.textContent = "Headings in " + page.title;
+  els.linkResultsLabel.title = page.title;
+  els.linkError.hidden = true;
+  renderLinkOptions([], []);
+  showLinkHeadingStatus("Loading headings…");
+  els.linkInput.focus({ preventScroll: true });
+
+  try {
+    const target = await request("/api/documents/" + encodeURIComponent(page.id), {
+      cache: "no-store",
+      signal: view.controller.signal,
+    });
+    if (linkPicker.headingView !== view || !els.linkDialog.open) return;
+    const blocks = parseDocument(target.content);
+    const headings = headingAnchors(blocks).flatMap((anchor, index) => {
+      if (!anchor) return [];
+      const block = blocks[index];
+      return {
+        id: page.id,
+        anchor,
+        level: block.type[1],
+        title: blockText(block).replace(/\s+/g, " ").trim() || "Untitled heading",
+      };
+    });
+    renderLinkOptions(headings, []);
+    showLinkHeadingStatus(headings.length ? "" : "This document has no headings.");
+    selectLinkResult(0, false);
+  } catch (error) {
+    if (linkPicker.headingView === view && els.linkDialog.open) {
+      showLinkHeadingStatus("Couldn't load headings. Go back and try again.");
+    }
   }
+}
+
+function showLinkHeadingStatus(message) {
+  els.linkResultsStatus.textContent = message;
+  els.linkResultsStatus.hidden = !message;
+}
+
+function clearLinkHeadings() {
+  if (!linkPicker.headingView) return;
+  linkPicker.headingView.controller.abort();
+  linkPicker.headingView = null;
+  els.linkResultsBack.hidden = true;
+  els.linkResultsLabel.removeAttribute("title");
+  showLinkHeadingStatus("");
+}
+
+function returnToLinkDocuments() {
+  const { page, scrollTop } = linkPicker.headingView;
+  clearLinkHeadings();
+  renderLinkResults();
+  els.linkResultsList.scrollTop = scrollTop;
+  selectLinkResult(linkPicker.visible.findIndex((result) => result.id === page.id), true);
+  els.linkInput.focus({ preventScroll: true });
 }
 
 // A typed web address is not also a search: URLs, mailto targets, and internal
@@ -1686,12 +1787,7 @@ function linkInputIsAddress(value) {
 }
 
 function renderLinkResults() {
-  if (!els.linkDialog || !els.linkDialog.open) {
-    return;
-  }
-  linkPicker.selected = -1;
-  linkPicker.visible = [];
-  linkPicker.options = [];
+  if (!els.linkDialog.open) return;
 
   const query = els.linkInput.value.trim();
   if (!linkPicker.documents || linkInputIsAddress(query)) {
@@ -1706,19 +1802,9 @@ function renderLinkResults() {
     return;
   }
 
-  const fragment = document.createDocumentFragment();
-  const options = [];
-  visible.forEach((documentSummary, index) => {
-    const option = createLinkResult(documentSummary, index, terms);
-    options.push(option);
-    fragment.appendChild(option);
-  });
-  els.linkResultsList.replaceChildren(fragment);
   els.linkResultsLabel.textContent = query ? "Documents" : "Recent documents";
   els.linkResults.hidden = false;
-  els.linkInput.setAttribute("aria-expanded", "true");
-  linkPicker.visible = visible;
-  linkPicker.options = options;
+  renderLinkOptions(visible, terms);
   // Typing narrows the list to a search, so the best match is offered as the
   // Enter target. The recent list itself starts with nothing picked: opening
   // the dialog and pressing Enter must not link the latest document by accident.
@@ -1729,11 +1815,24 @@ function renderLinkResults() {
 
 function hideLinkResults() {
   els.linkResults.hidden = true;
-  els.linkResultsList.replaceChildren();
-  els.linkInput.setAttribute("aria-expanded", "false");
+  renderLinkOptions([], []);
+}
+
+function renderLinkOptions(visible, terms) {
+  const fragment = document.createDocumentFragment();
+  const options = visible.map((result, index) => {
+    const option = createLinkResult(result, index, terms);
+    fragment.appendChild(option);
+    return option;
+  });
+  els.linkResultsList.replaceChildren(fragment);
+  els.linkResultsList.scrollTop = 0;
+  els.linkResultsList.hidden = !visible.length;
+  els.linkApply.disabled = Boolean(linkPicker.headingView) && !visible.length;
+  els.linkInput.setAttribute("aria-expanded", String(visible.length > 0));
   els.linkInput.removeAttribute("aria-activedescendant");
-  linkPicker.visible = [];
-  linkPicker.options = [];
+  linkPicker.visible = visible;
+  linkPicker.options = options;
   linkPicker.selected = -1;
 }
 
@@ -1801,32 +1900,54 @@ function linkStartsWord(title, index) {
   return !/[\p{L}\p{N}]/u.test(title.charAt(index - 1));
 }
 
-function createLinkResult(documentSummary, index, terms) {
+function createLinkResult(result, index, terms) {
   const option = document.createElement("li");
   option.className = "link-result";
   option.id = "linkResultOption" + index;
-  option.setAttribute("role", "option");
+  option.setAttribute("role", "row");
   option.setAttribute("aria-selected", "false");
-  option.setAttribute("data-index", String(index));
+  option.dataset.index = index;
+
+  const info = document.createElement("span");
+  info.className = "link-result-info";
+  info.setAttribute("role", "gridcell");
+  option.appendChild(info);
+
+  const title = document.createElement("span");
+  title.className = "link-result-title";
+  const label = result.title || "Untitled document";
+  appendLinkHighlight(title, label, terms);
+  title.title = label;
+  info.appendChild(title);
+
+  if (result.anchor) {
+    option.classList.add("link-heading", "link-heading-" + result.level);
+    return option;
+  }
 
   const glyph = document.createElement("span");
   glyph.className = "link-result-glyph";
   glyph.setAttribute("aria-hidden", "true");
   glyph.innerHTML = LINK_PAGE_ICON;
-
-  const title = document.createElement("span");
-  title.className = "link-result-title";
-  const label = String(documentSummary.title || "Untitled document");
-  appendLinkHighlight(title, label, terms);
-  title.title = label;
+  info.prepend(glyph);
 
   const meta = document.createElement("span");
   meta.className = "link-result-meta";
-  meta.textContent = linkEditedLabel(documentSummary.updated_at);
+  meta.textContent = linkEditedLabel(result.updated_at);
+  info.appendChild(meta);
 
-  option.appendChild(glyph);
-  option.appendChild(title);
-  option.appendChild(meta);
+  const action = document.createElement("span");
+  action.setAttribute("role", "gridcell");
+  const arrow = document.createElement("button");
+  arrow.type = "button";
+  arrow.className = "link-result-arrow";
+  arrow.tabIndex = -1;
+  arrow.title = "Show headings";
+  arrow.setAttribute("aria-label", "Show headings in " + label);
+  arrow.setAttribute("aria-keyshortcuts", "ArrowRight");
+  arrow.innerHTML = LINK_ARROW_ICON;
+  action.appendChild(arrow);
+  option.appendChild(action);
   return option;
 }
 
@@ -1872,11 +1993,10 @@ function selectLinkResult(index, scroll) {
   if (index < 0 || index >= linkPicker.options.length) {
     return;
   }
+  linkPicker.options[linkPicker.selected]?.setAttribute("aria-selected", "false");
   linkPicker.selected = index;
-  linkPicker.options.forEach((option, optionIndex) => {
-    option.setAttribute("aria-selected", optionIndex === index ? "true" : "false");
-  });
   const selected = linkPicker.options[index];
+  selected.setAttribute("aria-selected", "true");
   els.linkInput.setAttribute("aria-activedescendant", selected.id);
   if (scroll) {
     revealLinkResult(selected);
@@ -2374,6 +2494,7 @@ function imageDownloadName(block) {
 
 function handleDocumentPointer(event) {
   if (!els.spellingMenu.contains(event.target)) spelling.close(false);
+  if (!els.headingMenu.contains(event.target)) closeHeadingMenu(true);
   if (!els.linkPopover.hidden && !els.linkPopover.contains(event.target)) closeLinkPopover();
   if (!els.imageMenu.hidden && !els.imageMenu.contains(event.target)) {
     closeImageMenu();
@@ -2429,9 +2550,6 @@ function toggleDocumentMenu() {
     closeDocumentMenu(true);
     return;
   }
-  // A heading is the only thing with an address to copy, so the item only
-  // exists while the caret is in one.
-  els.copyHeadingLink.hidden = !editor.headingAnchor();
   els.documentMenu.hidden = false;
   els.documentMenuButton.setAttribute("aria-expanded", "true");
   closeAlignMenu();
@@ -2475,9 +2593,6 @@ function handleDocumentMenuAction(event) {
       exportPdf();
       els.documentMenuButton.focus();
       break;
-    case "copy-heading-link":
-      copyHeadingLink();
-      break;
     case "focus":
       toggleFocusMode();
       break;
@@ -2496,18 +2611,40 @@ function handleDocumentMenuAction(event) {
   }
 }
 
-// A heading's deep link. The fragment is the anchor the editor derives from the
-// heading text, so the stored document format stays untouched.
-function headingAnchorLink(anchor) {
-  return (
-    window.location.origin +
-    "/doc/" +
-    encodeURIComponent(state.documentId) +
-    "#" +
-    encodeURIComponent(anchor)
-  );
+/* --------------------------------------------------------------------------
+   Heading context menu
+   -------------------------------------------------------------------------- */
+
+function openTextContextMenu(blockIndex, rect, misspelling) {
+  if (!state.loaded || editor.composing) return false;
+  const anchor = editor.headingAnchor(blockIndex);
+  if (spelling.open(misspelling, anchor ? () => copyHeadingLink(anchor) : null)) return true;
+  if (!anchor) return false;
+
+  spelling.close(false);
+  closeLinkPopover();
+  closeImageMenu();
+  closeStyleMenu();
+  closeAlignMenu();
+  closeDocumentMenu();
+  closeMoreFormatting();
+  state.contextHeadingAnchor = anchor;
+  els.headingMenu.hidden = false;
+  positionPopover(els.headingMenu, rect);
+  els.copyHeadingLink.focus({ preventScroll: true });
+  return true;
 }
 
+function closeHeadingMenu(restoreFocus) {
+  if (els.headingMenu.hidden) return;
+  const ownedFocus = els.headingMenu.contains(document.activeElement);
+  els.headingMenu.hidden = true;
+  state.contextHeadingAnchor = "";
+  if (restoreFocus && ownedFocus) editor.focusEditor();
+}
+
+// A heading's deep link. The fragment is the anchor the editor derives from the
+// heading text, so the stored document format stays untouched.
 // The clipboard API needs a secure context, and a library served from a plain
 // http:// address on the network is not one. The old selection-and-copy path
 // still works there, and it cannot disturb a document selection: the field it
@@ -2529,24 +2666,21 @@ function copyTextFallback(text) {
   return copied;
 }
 
-async function copyHeadingLink() {
-  const anchor = editor.headingAnchor();
-  if (!anchor) {
-    return;
-  }
+async function copyHeadingLink(anchor) {
+  editor.focusEditor();
   if (state.draft && (!(await flushBeforeLeaving()) || state.draft)) {
     return;
   }
-  const link = headingAnchorLink(anchor);
+  const link = window.location.origin + documentLinkHref(state.documentId, anchor);
   let copied = false;
   try {
     await navigator.clipboard.writeText(link);
     copied = true;
   } catch (error) {
     copied = copyTextFallback(link);
+    if (document.activeElement === document.body) editor.focusEditor();
   }
   showToast(copied ? "Link to this heading copied." : "That link couldn't be copied.", !copied);
-  editor.focusEditor();
 }
 
 /* --------------------------------------------------------------------------
@@ -3209,6 +3343,11 @@ function handleSpellcheckShortcut(event) {
 
 function handleGlobalKeydown(event) {
   if (event.key === "Escape") {
+    if (!els.headingMenu.hidden) {
+      event.preventDefault();
+      closeHeadingMenu(true);
+      return;
+    }
     if (!els.linkPopover.hidden) {
       event.preventDefault();
       closeLinkPopover();

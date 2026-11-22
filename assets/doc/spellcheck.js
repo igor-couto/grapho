@@ -23,6 +23,7 @@ export class Spellcheck {
     this.requestId = 0;
     this.status = menu.querySelector("[role=status]");
     this.choices = menu.querySelector(".spelling-suggestions");
+    this.headingCopy = menu.querySelector(".spelling-copy-heading");
 
     menu.addEventListener("click", (event) => this.choose(event));
     menu.addEventListener("keydown", (event) => this.navigate(event));
@@ -113,12 +114,13 @@ export class Spellcheck {
     this.onError();
   }
 
-  open(match) {
+  open(match, copyHeadingLink) {
     if (!match || !this.worker || this.editor.composing) return false;
     const { index, range, element } = match;
     this.beforeOpen();
-    this.active = { index, range, element, block: this.blocks[index], id: ++this.requestId };
+    this.active = { index, range, element, block: this.blocks[index], id: ++this.requestId, copyHeadingLink };
     this.choices.replaceChildren();
+    this.headingCopy.hidden = !copyHeadingLink;
     this.status.textContent = "Finding suggestions…";
     this.menu.hidden = false;
     this.positionMenu(this.menu, element);
@@ -158,8 +160,12 @@ export class Spellcheck {
   choose(event) {
     const button = event.target.closest("button");
     if (!button || !this.active) return;
-    const { index, block, range } = this.active;
+    const { index, block, range, copyHeadingLink } = this.active;
     this.close(false);
+    if (button === this.headingCopy) {
+      copyHeadingLink?.();
+      return;
+    }
     if (button.hasAttribute("data-replacement")) {
       this.editor.replaceMisspelling(index, block, range, button.dataset.replacement);
     } else if (button.matches(".spelling-add")) {
@@ -179,7 +185,7 @@ export class Spellcheck {
       event.stopPropagation();
       this.close(true);
     } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      const buttons = [...this.menu.querySelectorAll("button")];
+      const buttons = [...this.menu.querySelectorAll("button:not([hidden])")];
       const current = buttons.indexOf(document.activeElement);
       const next = event.key === "ArrowDown" ? current + 1 : (current <= 0 ? buttons.length - 1 : current - 1);
       event.preventDefault();

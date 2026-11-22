@@ -2425,7 +2425,8 @@ async function main() {
           if (!saved.ok) throw new Error("save failed: " + saved.status);
           return document.id;
         };
-        const target = await create("Link target page", "<p>Target body.</p>");
+        const target = await create("Link target page",
+          "<p>Target body.</p><h2>Target <em>heading</em></h2><h3>Target heading</h3><h1>Résumé</h1>");
         const filler = "<p>A paragraph of the release notes.</p>".repeat(30);
         return {
           blank: await create("Blank link source", ""),
@@ -2591,7 +2592,7 @@ async function main() {
         linkPicker.placeholder.includes("web address") &&
         linkPicker.combobox === "combobox" &&
         linkPicker.expanded === "true" &&
-        linkPicker.listRole === "listbox",
+        linkPicker.listRole === "grid",
       JSON.stringify(linkPicker),
     );
     check(
@@ -2621,27 +2622,46 @@ async function main() {
       await waitForSavedLinkContent(linkPages.source, 'href="' + targetHref + '"'),
     );
 
-    // A heading fragment rides the same root-relative link, so a deep link can
-    // be written from the dialog; the store sanitizer keeps the fragment.
+    // Heading choices reuse the editor's deduplicated anchors and preserve
+    // the selected words in the source document.
     await pressKey("z", "KeyZ", 90, 2);
     await selectWholeDocument();
-    check("the link dialog reopens for a heading fragment", await openLinkDialogForTest());
+    check("the link dialog reopens to choose a heading", await openLinkDialogForTest());
     await waitForExpression(
       cdp,
       `document.activeElement && document.activeElement.id === "linkInput"`,
       PAGE_TIMEOUT_MS,
     );
-    await cdp.send("Input.insertText", { text: targetHref + "#target-heading" });
+    await cdp.send("Input.insertText", { text: "Link target page" });
+    await waitForLinkResults();
+    await pressKey("ArrowRight", "ArrowRight", 39);
+    check(
+      "Right shows all headings in document order",
+      await waitForExpression(cdp,
+        `Array.from(document.querySelectorAll("#linkResultsList .link-heading .link-result-title"),
+          (heading) => heading.textContent).join("|") === "Target heading|Target heading|Résumé"`,
+        PAGE_TIMEOUT_MS),
+    );
+    await pressKey("ArrowLeft", "ArrowLeft", 37);
+    check(
+      "Left restores the search and its selected document",
+      await evaluate(cdp, `linkInput.value === "Link target page" && linkResultsBack.hidden &&
+        document.querySelector('#linkResultsList [aria-selected="true"] .link-result-title')
+          ?.textContent === "Link target page"`),
+    );
+    await clickSelector("#linkResultsList .link-result-arrow");
+    await waitForExpression(cdp, `document.querySelectorAll("#linkResultsList .link-heading").length === 3`, PAGE_TIMEOUT_MS);
+    await pressKey("ArrowDown", "ArrowDown", 40);
     await pressEnter();
     const fragmentLink = await paintedLink();
     check(
-      "a root-relative link keeps its heading fragment",
-      fragmentLink && fragmentLink.href === targetHref + "#target-heading",
+      "choosing a repeated heading links its own anchor and keeps the selected wording",
+      fragmentLink?.href === targetHref + "#target-heading-2" && fragmentLink.text === "Link this phrase now.",
       JSON.stringify(fragmentLink),
     );
     check(
       "the fragment link is saved",
-      await waitForSavedLinkContent(linkPages.source, 'href="' + targetHref + '#target-heading"'),
+      await waitForSavedLinkContent(linkPages.source, 'href="' + targetHref + '#target-heading-2"'),
     );
 
     // The dialog still adds a web address: pasting one hides the page list and
@@ -3022,8 +3042,8 @@ async function main() {
       JSON.stringify(duplicateAnchorOpen),
     );
 
-    // The menu item only exists while the caret is in a heading, and the link it
-    // copies is the absolute URL of that heading.
+    // The context menu acts on the heading under the pointer, even while
+    // the editing caret is elsewhere.
     await cdp.send("Page.navigate", { url: base + "/doc/" + anchorDocumentId });
     await waitForPage(cdp, base + "/doc/" + anchorDocumentId, PAGE_TIMEOUT_MS);
     await waitForEditor(cdp, PAGE_TIMEOUT_MS);
@@ -3035,24 +3055,6 @@ async function main() {
         return { x: box.left + 6, y: box.top + box.height / 2 };
       })()`,
     );
-    await clickAt(paragraphPoint);
-    const paragraphMenu = await evaluate(
-      cdp,
-      `(() => {
-        document.getElementById("documentMenuButton").click();
-        const item = document.getElementById("copyHeadingLink");
-        const hidden = item.hidden;
-        const display = getComputedStyle(item).display;
-        document.getElementById("documentMenuButton").click();
-        return { hidden, display };
-      })()`,
-    );
-    check(
-      "the copy-link item is not offered outside a heading",
-      paragraphMenu.hidden === true && paragraphMenu.display === "none",
-      JSON.stringify(paragraphMenu),
-    );
-
     const headingPoint = await evaluate(
       cdp,
       `(() => {
@@ -3062,52 +3064,55 @@ async function main() {
       })()`,
     );
     await clickAt(headingPoint);
-    // Stub the clipboard write so the copied address can be read back.
+    await clickSelector("#documentMenuButton");
+    check(
+      "the document menu no longer offers to copy the heading link",
+      await evaluate(cdp, `!document.querySelector("#documentMenu").textContent.includes("Copy link to heading")`),
+    );
+    await clickAt(paragraphPoint);
     await evaluate(
       cdp,
       `(() => {
         window.__copiedAnchorLink = "";
-        try {
-          Object.defineProperty(navigator, "clipboard", {
-            configurable: true,
-            value: {
-              writeText: async (text) => {
-                window.__copiedAnchorLink = text;
-              },
-            },
-          });
-        } catch (error) {
-          window.__copiedAnchorLink = "unavailable";
-        }
-        return true;
+        Object.defineProperty(navigator, "clipboard", {
+          configurable: true,
+          value: { writeText: async (text) => { window.__copiedAnchorLink = text; } },
+        });
+        document.addEventListener("contextmenu", (event) => {
+          window.__usedCustomMenu = event.defaultPrevented;
+          event.preventDefault();
+        });
       })()`,
     );
-    const copyMenu = await evaluate(
-      cdp,
-      `(() => {
-        document.getElementById("documentMenuButton").click();
-        const item = document.getElementById("copyHeadingLink");
-        const visible = !item.hidden;
-        const display = getComputedStyle(item).display;
-        const label = item.textContent.trim();
-        if (visible) {
-          item.click();
-        }
-        return { visible, display, label };
-      })()`,
-    );
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    const copiedAnchorLink = await evaluate(cdp, `window.__copiedAnchorLink || ""`);
-    const expectedAnchorLink = base + "/doc/" + anchorDocumentId + "#anchors-check";
+    await rightClickAt(paragraphPoint);
     check(
-      "the document menu offers a link to the heading the caret is in",
-      copyMenu.visible && copyMenu.display !== "none" && copyMenu.label === "Copy link to heading",
-      JSON.stringify(copyMenu),
+      "a right click in a paragraph does not open heading options",
+      await evaluate(cdp, `window.__usedCustomMenu === false && document.getElementById("headingMenu").hidden`),
     );
+    await rightClickAt(headingPoint);
     check(
-      "copying the heading link writes the anchored URL",
-      copiedAnchorLink === expectedAnchorLink,
+      "right-clicking a heading opens its context menu and focuses Copy link to heading",
+      await evaluate(cdp, `window.__usedCustomMenu && !document.getElementById("headingMenu").hidden &&
+        document.activeElement.id === "copyHeadingLink" &&
+        document.activeElement.textContent.trim() === "Copy link to heading"`),
+    );
+    await clickSelector("#copyHeadingLink");
+    const copiedAnchorLink = await evaluate(cdp, `window.__copiedAnchorLink`);
+    check(
+      "copying writes the URL of the clicked heading even when the caret is in a paragraph",
+      copiedAnchorLink === base + "/doc/" + anchorDocumentId + "#anchors-check",
       copiedAnchorLink,
+    );
+    await clickAt(headingPoint);
+    await pressKey("F10", "F10", 121, 8);
+    check(
+      "Shift+F10 opens the heading context menu from the caret",
+      await evaluate(cdp, `document.activeElement.id === "copyHeadingLink"`),
+    );
+    await pressKey("Escape", "Escape", 27);
+    check(
+      "Escape closes the heading context menu and returns focus to the editor",
+      await evaluate(cdp, `document.getElementById("headingMenu").hidden && document.activeElement.id === "docInput"`),
     );
 
     await evaluate(
