@@ -154,12 +154,15 @@ async function init() {
   els.editor = document.getElementById("editor");
   els.docInput = document.getElementById("docInput");
   els.loadError = document.getElementById("loadError");
-  const query = new URLSearchParams(location.search).get("q");
-  if (query) {
-    const params = new URLSearchParams({ q: query, from: documentIdFromPath() });
-    els.backToLibrary.search = params.toString();
-    els.loadError.querySelector("a").search = params.toString();
+  const context = new URLSearchParams(location.search);
+  const library = new URLSearchParams();
+  if (context.has("space")) library.set("space", context.get("space"));
+  if (context.has("q")) {
+    library.set("q", context.get("q"));
+    library.set("from", documentIdFromPath());
   }
+  els.backToLibrary.search = library.toString();
+  els.loadError.querySelector("a").search = library.toString();
   els.toast = document.getElementById("toast");
 
   els.linkDialog = document.getElementById("linkDialog");
@@ -356,7 +359,7 @@ function showLoadFailure(error) {
   titleNode.textContent = notFound ? "This page isn't here." : "Couldn't open this document.";
   textNode.textContent = notFound
     ? "It may have been deleted, or the link might be incomplete."
-    : "Grapho couldn't reach the document. Check the server, then refresh the page.";
+    : error?.userMessage || "Grapho couldn't reach the document. Check the server, then refresh the page.";
 
   hideSaveStatus();
   els.saveStatus.disabled = true;
@@ -486,7 +489,10 @@ function isEmptyDraft(payload) {
 }
 
 function savePath() {
-  return "/api/documents/" + encodeURIComponent(state.documentId) + (state.draft ? "/draft" : "");
+  const path = "/api/documents/" + encodeURIComponent(state.documentId);
+  if (!state.draft) return path;
+  const space = new URLSearchParams(location.search).get("space");
+  return path + "/draft" + (space && space !== "general" ? "?space=" + encodeURIComponent(space) : "");
 }
 
 function scheduleSave(delay) {
@@ -3314,7 +3320,8 @@ async function deleteDocument() {
     }
     state.loaded = false;
     state.dirty = false;
-    window.location.assign("/");
+    const space = new URLSearchParams(location.search).get("space");
+    window.location.assign(space ? "/?space=" + encodeURIComponent(space) : "/");
   } catch (error) {
     showToast(error.userMessage || "That document couldn't be deleted.", true);
   } finally {

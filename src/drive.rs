@@ -325,6 +325,15 @@ impl Drive {
             .ok_or_else(|| "Google did not return the uploaded file id.".to_owned())
     }
 
+    pub fn download_text(&self, token: &str, file_id: &str) -> Result<String, String> {
+        let url = format!(
+            "{}/files/{}?alt=media",
+            self.api_url,
+            percent_encode(file_id)
+        );
+        Ok(self.call(self.authorized_get(token, &url), None)?.body)
+    }
+
     pub fn delete(&self, token: &str, file_id: &str) -> Result<(), String> {
         let url = format!("{}/files/{}", self.api_url, file_id);
         self.call(

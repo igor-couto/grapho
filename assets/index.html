@@ -95,6 +95,10 @@
     </div>
 
     <div class="library-search shell">
+      <select class="library-space-select" id="librarySpace" aria-label="Space" disabled>
+        <option value="">All documents</option>
+        <option value="general">General</option>
+      </select>
       <label class="search-box">
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <circle cx="10.8" cy="10.8" r="6.3" stroke="currentColor" stroke-width="1.7"/>
@@ -195,6 +199,7 @@
         <span class="document-copy">
           <span class="document-label">
             <span class="document-card-title"></span>
+            <span class="document-space" hidden></span>
             <span class="document-search-excerpt" hidden></span>
           </span>
           <span class="document-meta">
@@ -223,6 +228,10 @@
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="8.5" y="8.5" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M15.5 8.5V6.2c0-.94-.76-1.7-1.7-1.7H6.2c-.94 0-1.7.76-1.7 1.7v7.6c0 .94.76 1.7 1.7 1.7h2.3" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
             Duplicate document
           </button>
+          <button class="menu-item card-move" type="button" role="menuitem" hidden>
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 8V6h6l2 2h8v11H4v-3m3-4h8m-3-3 3 3-3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Move to Space
+          </button>
           <div class="menu-rule" role="separator"></div>
           <button class="menu-item menu-item-danger card-delete" type="button" role="menuitem">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 7h14M9 7V4.8h6V7M7 7l.8 12.2h8.4L17 7M10 11v4.5M14 11v4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -242,6 +251,11 @@
         <span>Title</span>
         <input id="renameInput" type="text" maxlength="200" autocomplete="off" placeholder="Untitled document">
       </label>
+      <label class="field" id="moveField" hidden>
+        <span>Destination Space</span>
+        <select id="moveSpace"></select>
+      </label>
+      <p class="field-error" id="moveError" role="alert" hidden></p>
       <div class="modal-actions">
         <button class="button button-quiet" type="button" id="actionCancel">Cancel</button>
         <button class="button button-primary" type="button" id="actionConfirm">Save</button>

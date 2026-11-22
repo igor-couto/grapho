@@ -63,6 +63,8 @@
 
   function init() {
     els.documents = document.getElementById("documents");
+    els.librarySpace = document.getElementById("librarySpace");
+    els.newDocument = document.getElementById("newDocument");
     els.searchDocuments = document.getElementById("searchDocuments");
     els.libraryMessage = document.getElementById("libraryMessage");
     els.libraryMessageText = document.getElementById("libraryMessageText");
@@ -87,6 +89,9 @@
     els.actionIcon = document.getElementById("actionIcon");
     els.renameField = document.getElementById("renameField");
     els.renameInput = document.getElementById("renameInput");
+    els.moveField = document.getElementById("moveField");
+    els.moveSpace = document.getElementById("moveSpace");
+    els.moveError = document.getElementById("moveError");
     els.actionCancel = document.getElementById("actionCancel");
     els.actionConfirm = document.getElementById("actionConfirm");
     els.recentlyDeletedButton = document.getElementById("recentlyDeletedButton");
@@ -134,6 +139,23 @@
 
   function bindStaticEvents() {
     els.searchDocuments.addEventListener("input", updateSearch);
+    els.librarySpace.addEventListener("change", function () {
+      syncSearchUrl();
+      var url = new URL(window.location.href);
+      var space = els.librarySpace.value;
+      if (space) url.searchParams.set("space", space);
+      else url.searchParams.delete("space");
+      url.searchParams.delete("from");
+      window.history.pushState(null, "", url);
+      readLibraryLocation();
+      updateSearch(true);
+    });
+    window.addEventListener("popstate", function () {
+      if (state.loaded) {
+        readLibraryLocation();
+        updateSearch(true);
+      }
+    });
 
     els.searchDocuments.addEventListener("keydown", function (event) {
       if (event.key === "Escape" && els.searchDocuments.value) {
@@ -206,11 +228,19 @@
       }
     });
 
+    els.actionDialog.addEventListener("cancel", function (event) {
+      if (state.pending?.type === "move" && els.actionConfirm.disabled) {
+        event.preventDefault();
+      }
+    });
+
     els.actionDialog.addEventListener("close", function () {
       var returnFocus = state.returnFocus;
       state.pending = null;
       state.returnFocus = null;
+      els.moveError.hidden = true;
       els.actionConfirm.disabled = false;
+      els.actionCancel.disabled = false;
       if (returnFocus && returnFocus.isConnected) {
         returnFocus.focus();
       }
@@ -294,6 +324,15 @@
     try {
       var payload = await request("/api/documents");
       state.documents = Array.isArray(payload.documents) ? payload.documents : [];
+      state.unavailableSpaces = new Set();
+      state.spaces = new Map((payload.spaces || []).map(function (space) {
+        var unavailable = space.available === false;
+        if (unavailable) state.unavailableSpaces.add(space.id);
+        els.librarySpace.add(new Option(space.name + (unavailable ? " (unavailable)" : ""), space.id));
+        return [space.id, space.name];
+      }));
+      readLibraryLocation();
+      els.librarySpace.disabled = false;
       state.loaded = true;
       els.signOut.hidden = !payload.auth_required;
       els.signOutRule.hidden = !payload.auth_required;
@@ -306,8 +345,21 @@
       if (!state.loaded) {
         els.documents.setAttribute("aria-busy", "false");
       }
-      els.searchDocuments.disabled = false;
+      els.searchDocuments.disabled = state.loaded && state.unavailableSpaces.has(state.space);
     }
+  }
+
+  function readLibraryLocation() {
+    var params = new URLSearchParams(window.location.search);
+    var space = params.get("space");
+    state.space = space === "general" || state.spaces.has(space) ? space : "";
+    state.returnDocument = params.get("from");
+    els.searchDocuments.value = params.get("q") || "";
+    els.librarySpace.value = state.space;
+    var unavailable = state.unavailableSpaces.has(state.space);
+    els.searchDocuments.disabled = unavailable;
+    els.newDocument.hidden = unavailable;
+    els.newDocument.href = state.space ? "/doc/new?space=" + encodeURIComponent(state.space) : "/doc/new";
   }
 
   // The page ships a few placeholder rows so the very first paint is never an
@@ -396,6 +448,7 @@
     state.searchResults = null;
     state.searchError = "";
     renderDocuments();
+    if (state.unavailableSpaces.has(state.space)) return;
     if (state.query) {
       state.searchTimer = window.setTimeout(searchDocuments, immediate === true ? 0 : 230);
     } else {
@@ -409,6 +462,7 @@
     var controller = new AbortController();
     state.searchRequest = controller;
     var params = new URLSearchParams({ q: state.query });
+    if (state.space) params.set("space", state.space);
 
     try {
       var payload = await request("/api/documents/search?" + params, {
@@ -455,6 +509,20 @@
       return;
     }
 
+    if (state.unavailableSpaces.has(state.space)) {
+      els.documents.setAttribute("aria-busy", "false");
+      els.documents.hidden = true;
+      els.libraryToolbar.hidden = true;
+      els.emptyState.hidden = true;
+      els.libraryMessage.classList.remove("is-searching");
+      els.libraryMessage.hidden = false;
+      els.libraryMessageText.textContent =
+        "The storage folder for " + state.spaces.get(state.space) +
+        " is unavailable. Reconnect the folder, then restart Grapho.";
+      els.retryLoad.hidden = true;
+      return;
+    }
+
     var searching = Boolean(state.query);
     var waiting = searching && !state.searchResults && !state.searchError;
     els.documents.setAttribute("aria-busy", String(waiting));
@@ -465,13 +533,19 @@
     els.retryLoad.disabled = !state.searchError;
     els.documents.classList.toggle("is-search-results", searching);
 
+    var inSpace = state.space
+      ? state.documents.filter(function (document) {
+          return (document.space_id || "general") === state.space;
+        })
+      : state.documents;
     var visible = searching
       ? (state.searchResults || []).slice().sort(compareDocuments)
-      : state.documents;
-    els.libraryToolbar.hidden = state.documents.length === 0 && visible.length === 0;
+      : inSpace;
+    els.libraryToolbar.hidden = inSpace.length === 0 && visible.length === 0;
 
-    if (!searching && state.documents.length === 0) {
-      forgetCards();
+    if (!searching && visible.length === 0) {
+      if (state.documents.length === 0) forgetCards();
+      else state.cards.forEach(stopObservingCard);
       els.documents.replaceChildren();
       els.documents.hidden = true;
       showEmptyState(false);
@@ -556,6 +630,7 @@
       link: fragment.querySelector(".document-card-link"),
       preview: fragment.querySelector(".document-preview"),
       title: fragment.querySelector(".document-card-title"),
+      space: fragment.querySelector(".document-space"),
       excerpt: fragment.querySelector(".document-search-excerpt"),
       edited: fragment.querySelector(".document-edited"),
       previewFilled: false,
@@ -565,10 +640,12 @@
     var openItem = fragment.querySelector(".card-open");
     var renameItem = fragment.querySelector(".card-rename");
     var duplicateItem = fragment.querySelector(".card-duplicate");
+    var moveItem = fragment.querySelector(".card-move");
     var deleteItem = fragment.querySelector(".card-delete");
 
     card.element.dataset.documentId = document.id;
     card.openItem = openItem;
+    moveItem.hidden = !state.spaces.size;
     syncCard(card, document);
 
     menuButton.addEventListener("click", function (event) {
@@ -592,6 +669,9 @@
 
     duplicateItem.addEventListener("click", function () {
       duplicateDocument(card.document);
+    });
+    moveItem.addEventListener("click", function () {
+      openMoveDialog(card.document);
     });
 
     deleteItem.addEventListener("click", function () {
@@ -629,12 +709,16 @@
   function syncCard(card, document) {
     card.document = document;
     card.link.href = "/doc/" + encodeURIComponent(document.id);
+    var params = new URLSearchParams();
+    if (state.space) params.set("space", state.space);
     if (state.query) {
-      var params = new URLSearchParams({ q: state.query });
+      params.set("q", state.query);
       if (document.body_match) params.set("passage", "1");
-      card.link.search = params.toString();
     }
-    card.link.setAttribute("aria-label", "Open " + document.title);
+    card.link.search = params.toString();
+    var spaceName = state.spaces.get(document.space_id) || "General";
+    var showSpace = !state.space && state.spaces.size > 0;
+    card.link.setAttribute("aria-label", "Open " + document.title + (showSpace ? " in " + spaceName : ""));
     card.title.title = document.title_match ? document.title : "";
     if (document.title_match) {
       showMatch(card.title, document.title_match);
@@ -649,6 +733,8 @@
       card.link.removeAttribute("aria-description");
     }
     card.excerpt.hidden = !document.body_match;
+    card.space.hidden = !showSpace;
+    card.space.textContent = spaceName;
     card.openItem.href = card.link.href;
 
     var updated = new Date(document.updated_at);
@@ -784,6 +870,7 @@
     els.actionIcon.innerHTML = ICON_RENAME;
     els.actionIcon.hidden = false;
     els.renameField.hidden = false;
+    els.moveField.hidden = true;
     els.renameInput.value = document.title;
     els.actionConfirm.textContent = "Save";
     els.actionConfirm.className = "button button-primary";
@@ -809,6 +896,7 @@
     els.actionIcon.innerHTML = "";
     els.actionIcon.hidden = true;
     els.renameField.hidden = true;
+    els.moveField.hidden = true;
     els.actionConfirm.textContent = "Delete";
     els.actionConfirm.className = "button button-danger";
     els.actionConfirm.disabled = false;
@@ -821,8 +909,32 @@
     });
   }
 
+  function openMoveDialog(document) {
+    state.pending = { type: "move", document: document };
+    state.returnFocus = cardMenuButton(document.id);
+    els.actionTitle.textContent = "Move to Space";
+    els.actionDescription.textContent = document.title;
+    els.actionIcon.hidden = true;
+    els.renameField.hidden = true;
+    els.moveField.hidden = false;
+    els.moveError.hidden = true;
+    els.moveSpace.replaceChildren(new Option("General", ""));
+    state.spaces.forEach(function (name, id) {
+      var unavailable = state.unavailableSpaces.has(id);
+      var option = new Option(name + (unavailable ? " (unavailable)" : ""), id);
+      option.disabled = unavailable;
+      els.moveSpace.add(option);
+    });
+    els.moveSpace.value = document.space_id || "";
+    els.actionConfirm.textContent = "Move";
+    els.actionConfirm.className = "button button-primary";
+    els.actionConfirm.disabled = false;
+    els.actionDialog.showModal();
+    els.moveSpace.focus();
+  }
+
   function closeActionDialog() {
-    if (els.actionDialog.open) {
+    if (els.actionDialog.open && !(state.pending?.type === "move" && els.actionConfirm.disabled)) {
       els.actionDialog.close();
     }
   }
@@ -833,13 +945,12 @@
       return;
     }
 
-    var isRename = pending.type === "rename";
     var confirmLabel = els.actionConfirm.textContent;
     els.actionConfirm.disabled = true;
-    els.actionConfirm.textContent = isRename ? "Saving…" : "Deleting…";
+    els.actionConfirm.textContent = pending.type === "delete" ? "Deleting…" : "Saving…";
 
     try {
-      if (isRename) {
+      if (pending.type === "rename") {
         var newTitle = els.renameInput.value.trim() || "Untitled document";
         if (newTitle === pending.document.title) {
           closeActionDialog();
@@ -858,15 +969,7 @@
           if (document.id !== pending.document.id) {
             return document;
           }
-          return {
-            id: document.id,
-            title: updated.title,
-            excerpt: document.excerpt,
-            preview: document.preview,
-            word_count: document.word_count,
-            created_at: document.created_at,
-            updated_at: updated.updated_at,
-          };
+          return Object.assign({}, document, { title: updated.title, updated_at: updated.updated_at });
         });
         applySort();
         state.returnFocus = null;
@@ -874,6 +977,27 @@
         await refreshAfterChange();
         showToast("Document renamed.");
         focusCard(pending.document.id);
+      } else if (pending.type === "move") {
+        var destination = els.moveSpace.value || null;
+        if (destination === (pending.document.space_id || null)) {
+          els.actionDialog.close();
+          return;
+        }
+        els.actionCancel.disabled = true;
+        els.moveError.hidden = true;
+        var moved = await request(
+          "/api/documents/" + encodeURIComponent(pending.document.id) + "/space",
+          { method: "PUT", body: { space_id: destination } },
+        );
+        state.documents = state.documents.map(function (document) {
+          return document.id === moved.id ? moved : document;
+        });
+        state.returnFocus = null;
+        els.actionDialog.close();
+        await refreshAfterChange();
+        showToast("Moved to " + (state.spaces.get(destination) || "General") + ".");
+        if (state.space) els.librarySpace.focus();
+        else focusCard(moved.id);
       } else {
         await request(
           "/api/documents/" + encodeURIComponent(pending.document.id),
@@ -893,6 +1017,12 @@
     } catch (error) {
       els.actionConfirm.disabled = false;
       els.actionConfirm.textContent = confirmLabel;
+      if (pending.type === "move") {
+        els.actionCancel.disabled = false;
+        els.moveError.textContent = error.userMessage || "The document couldn't be moved. Try again.";
+        els.moveError.hidden = false;
+        return;
+      }
       showToast(
         error.userMessage || "That change couldn't be saved. Please try again.",
         true,
@@ -916,7 +1046,10 @@
       if (load !== state.deletedLoad || !els.recentlyDeletedDialog.open) {
         return;
       }
-      payload.documents.forEach(function (document) {
+      var deleted = payload.documents.filter(function (document) {
+        return !state.space || (document.space_id || "general") === state.space;
+      });
+      deleted.forEach(function (document) {
         var row = els.recentlyDeletedRow.content.firstElementChild.cloneNode(true);
         row.dataset.documentId = document.id;
         row.querySelector(".deleted-title").textContent = document.title;
@@ -933,7 +1066,7 @@
         });
         els.recentlyDeletedList.appendChild(row);
       });
-      showDeletedStatus(payload.documents.length ? "" : "No deleted documents.");
+      showDeletedStatus(deleted.length ? "" : "No deleted documents.");
     } catch (error) {
       if (load === state.deletedLoad && els.recentlyDeletedDialog.open) {
         showDeletedStatus("Couldn't load deleted documents.", true);

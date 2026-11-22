@@ -106,6 +106,10 @@ pub fn upload(local_name: &str, remote: &str) -> String {
     format!("put {} {}\n", quote(local_name), quote(remote))
 }
 
+pub fn download(remote: &str, local_name: &str) -> String {
+    format!("get {} {}\n", quote(remote), quote(local_name))
+}
+
 pub fn remove(remote: &str) -> String {
     format!("rm {}\n", quote(remote))
 }
@@ -114,7 +118,7 @@ pub fn list(dir: &str) -> String {
     format!("ls -1 {}\n", quote(dir))
 }
 
-/// Document names in an `ls -1` listing. The batch echo lines and anything else
+/// Document names and the metadata index in an `ls -1` listing. The batch echo lines and anything else
 /// the client prints are ignored.
 pub fn parse_listing(output: &str) -> Vec<String> {
     output
@@ -124,7 +128,7 @@ pub fn parse_listing(output: &str) -> Vec<String> {
         // such as "Removing /backups/<id>.md" that ends in a document name.
         .filter(|line| line.starts_with('/') || !line.contains('/'))
         .filter_map(|line| line.rsplit('/').next())
-        .filter(|name| store::managed_file_id(name).is_some())
+        .filter(|name| *name == store::INDEX_FILE || store::managed_file_id(name).is_some())
         .map(str::to_owned)
         .collect()
 }

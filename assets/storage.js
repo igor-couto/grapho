@@ -29,6 +29,20 @@
     free: document.getElementById("storageFree"),
     bar: document.getElementById("storageBar"),
     barFill: document.getElementById("storageBarFill"),
+    spaceAdd: document.getElementById("spaceAdd"),
+    spaceList: document.getElementById("spaceList"),
+    spaceStatus: document.getElementById("spaceStatus"),
+    spaceTemplate: document.getElementById("spaceRowTemplate"),
+    spaceDialog: document.getElementById("spaceDialog"),
+    spaceForm: document.getElementById("spaceForm"),
+    spaceTitle: document.getElementById("spaceTitle"),
+    spaceName: document.getElementById("spaceName"),
+    spaceFolder: document.getElementById("spaceFolder"),
+    spaceImportOption: document.getElementById("spaceImportOption"),
+    spaceImport: document.getElementById("spaceImport"),
+    spaceError: document.getElementById("spaceError"),
+    spaceSave: document.getElementById("spaceSave"),
+    spaceCancel: document.getElementById("spaceCancel"),
     backupList: document.getElementById("backupList"),
     backupsEmpty: document.getElementById("backupsEmpty"),
     backupsLocked: document.getElementById("backupsLocked"),
@@ -66,6 +80,9 @@
     mode: null,
     opener: null,
     backupsEditable: false,
+    editingSpace: null,
+    spaceBusy: false,
+    spaceOpener: null,
   };
 
   var SOURCE_NOTES = {
@@ -321,7 +338,88 @@
           : "Grapho can't remember a folder choice on this system, so the folder can't be changed here.";
     }
 
+    renderSpaces(data.spaces);
     renderBackups(data);
+  }
+
+  function renderSpaces(spaces) {
+    els.spaceList.replaceChildren();
+    for (var space of spaces) {
+      var row = els.spaceTemplate.content.firstElementChild.cloneNode(true);
+      row.dataset.spaceId = space.id;
+      row.querySelector(".storage-space-name").textContent = space.name;
+      row.querySelector(".backup-path").textContent = space.folder || "Main data folder";
+      row.querySelector(".backup-state").hidden = space.available !== false;
+      var button = row.querySelector("button");
+      button.setAttribute("aria-label", "Edit " + space.name);
+      button.title = "Edit Space";
+      els.spaceList.append(row);
+    }
+    els.spaceList.hidden = spaces.length === 0;
+    els.spaceAdd.hidden = false;
+    state.spaces = spaces;
+  }
+
+  function openSpaceDialog(space, opener) {
+    state.editingSpace = space;
+    state.spaceOpener = opener;
+    els.spaceTitle.textContent = space ? "Edit Space" : "New Space";
+    els.spaceName.value = space ? space.name : "";
+    els.spaceFolder.value = space ? space.folder || "" : "";
+    els.spaceImportOption.hidden = Boolean(space);
+    els.spaceImport.checked = false;
+    syncSpaceImport();
+    els.spaceSave.textContent = space ? "Save" : "Create Space";
+    els.spaceError.hidden = true;
+    showStatus(els.spaceStatus, "", null);
+    els.spaceDialog.showModal();
+    els.spaceName.focus();
+  }
+
+  function syncSpaceImport() {
+    els.spaceImport.disabled = state.spaceBusy || els.spaceImportOption.hidden || !els.spaceFolder.value.trim();
+  }
+
+  function setSpaceBusy(busy) {
+    state.spaceBusy = busy;
+    els.spaceForm.setAttribute("aria-busy", String(busy));
+    els.spaceSave.disabled = busy;
+    els.spaceCancel.disabled = busy;
+    els.spaceName.disabled = busy;
+    els.spaceFolder.disabled = busy;
+    syncSpaceImport();
+    els.spaceSave.textContent = busy ? "Saving…" : state.editingSpace ? "Save" : "Create Space";
+  }
+
+  async function saveSpace(event) {
+    event.preventDefault();
+    if (state.spaceBusy) return;
+    var space = state.editingSpace;
+    var body = {
+      name: els.spaceName.value,
+      folder: els.spaceFolder.value,
+      import_markdown: !els.spaceImport.disabled && els.spaceImport.checked,
+    };
+    els.spaceError.hidden = true;
+    setSpaceBusy(true);
+    try {
+      var data = await request("/api/storage/spaces" + (space ? "/" + encodeURIComponent(space.id) : ""), {
+        method: space ? "PUT" : "POST",
+        body: body,
+      });
+      render(data);
+      els.spaceDialog.close();
+      var message = space ? "Space saved." : "Space created.";
+      if (data.imported_documents === 0) message += " No Markdown files found.";
+      if (data.imported_documents === 1) message += " Imported 1 Markdown file.";
+      if (data.imported_documents > 1) message += " Imported " + data.imported_documents + " Markdown files.";
+      showStatus(els.spaceStatus, message, "done");
+    } catch (error) {
+      els.spaceError.textContent = error.userMessage || "The Space couldn't be saved. Try again.";
+      els.spaceError.hidden = false;
+    } finally {
+      setSpaceBusy(false);
+    }
   }
 
   function showFolderError(message) {
@@ -507,6 +605,33 @@
   if (els.edit) {
     els.edit.addEventListener("click", openFolderDialog);
   }
+
+  els.spaceAdd.addEventListener("click", function () {
+    openSpaceDialog(null, els.spaceAdd);
+  });
+  els.spaceList.addEventListener("click", function (event) {
+    var button = event.target.closest("button");
+    if (!button) return;
+    var id = button.closest("[data-space-id]").dataset.spaceId;
+    openSpaceDialog(state.spaces.find(function (space) { return space.id === id; }), button);
+  });
+  els.spaceForm.addEventListener("submit", saveSpace);
+  els.spaceFolder.addEventListener("input", syncSpaceImport);
+  els.spaceCancel.addEventListener("click", function () {
+    els.spaceDialog.close();
+  });
+  els.spaceDialog.addEventListener("cancel", function (event) {
+    if (state.spaceBusy) event.preventDefault();
+  });
+  els.spaceDialog.addEventListener("close", function () {
+    var opener = state.spaceOpener;
+    if (!opener.isConnected && state.editingSpace) {
+      opener = els.spaceList.querySelector('[data-space-id="' + CSS.escape(state.editingSpace.id) + '"] button');
+    }
+    (opener || els.spaceAdd).focus();
+    state.editingSpace = null;
+    state.spaceOpener = null;
+  });
 
   if (els.folderDialog) {
     els.folderForm.addEventListener("submit", function (event) {

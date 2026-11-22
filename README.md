@@ -78,12 +78,16 @@ directory that already holds Grapho Markdown documents is used instead, so an ex
 checkout keeps its documents where they are. Set `GRAPHO_DATA_DIR=data` in a
 fresh checkout if you want them next to the source.
 
-The **Storage** page (the library's ⋯ menu, under Management) shows the folder
-in use, how many documents it holds, how much room they take, and the free space
-on that disk. Change the folder there and Grapho copies the library into it and
-keeps writing there; the old folder is left untouched. The same page adds
-backups — a folder, an SSH server, or a Google Drive folder — that receive a copy
-of every save.
+Open **Storage** from the library's menu to manage folders and backups.
+Under **Spaces**, create a named group and optionally give it its own folder
+for Markdown and images. Existing documents are in **General**. Pick a Space
+in the library to browse, search, and write in it. Use **Move to Space** in a
+document's menu to change its group while keeping its link.
+
+When creating a Space, choose an existing folder and check **Import existing
+Markdown files** to add its UTF-8 `.md` files. Grapho uses the filenames as
+titles and edits the original files in place. Import reads the selected folder
+only. Images linked from other files need to be added through the editor.
 
 Every shortcut is listed on the **Shortcuts** page (the menu on any page). The
 most useful: `Ctrl+O` opens documents by title, `Ctrl+S` saves now,
@@ -188,17 +192,21 @@ bind-mounted host directory must be writable by that user.
 
 ## Data
 
-Each document has a `<document-id>.md` file containing its body. The shared
-`metadata.json` keeps titles, dates, paper widths, and image layout. Images sit
-beside the Markdown and use relative links. A few rich-text features, such as
-centered paragraphs, use HTML inside the Markdown. Stop Grapho before editing
-these files by hand, then restart it to pick up your changes. Earlier JSON
-document files are ignored.
+Each document's body is a Markdown file named after its title, such as
+`Project Notes.md`. Grapho replaces characters that filenames cannot use and
+adds a number when a name is taken. Renaming in Grapho changes the filename.
+The shared `metadata.json` keeps filenames, stable document IDs, Spaces, dates,
+paper widths, and image layout. Images sit beside the Markdown and use relative
+links. A few rich-text features, such as centered paragraphs, use HTML inside
+the Markdown. Stop Grapho before editing Markdown by hand, and rename
+documents in Grapho so the index stays in sync. Older library formats require
+a fresh data folder.
 
 Deleted documents stay in the data directory. Use **Recently deleted** in the
 library menu to restore them with their original links. Grapho keeps them until
-restored, and their files count toward the space used. Copy the whole directory
-to back it up. Stop Grapho first if you want a consistent snapshot.
+restored, and their files count toward the space used. Copy the main and any
+separate Space folders for a manual backup. Stop Grapho first if you want a
+consistent snapshot.
 
 **Add to dictionary** saves words for body spellcheck in `spelling-words.json`
 in the data directory. The list is shared across browsers on the same Grapho
@@ -206,16 +214,22 @@ server and follows the library when you move the data folder.
 
 The folder is chosen in this order: `GRAPHO_DATA_DIR`, the folder saved on the
 Storage page, a `data/` folder in the working directory that already holds
-documents, and the per-user default. A folder chosen in the app is remembered in
+documents or Spaces, and the per-user default. A folder chosen in the app is remembered in
 `~/.config/grapho/config.json` on Linux, `~/Library/Preferences/Grapho/` on
 macOS, and `%APPDATA%\Grapho\` on Windows, outside the data directory itself.
-Changing the folder copies every document before switching, so a folder that
-already holds another library's documents is refused rather than merged; choose
-the previous folder again and Grapho updates its copies instead.
+Changing the main folder copies its files before switching. Dedicated Space
+folders keep their paths. Changing a Space's folder copies its files before
+switching and keeps any previous dedicated folder as a copy. Leave the Space's
+folder blank to use the main folder.
+If a Space folder is unreachable at startup, Grapho marks that Space as
+unavailable and opens the rest of the library. Reconnect the folder and
+restart Grapho to load the Space.
 
 Backup locations are listed on the same page and configured in the same file.
-Add one and Grapho copies your active documents, their images, and their metadata
-index. Saves update the mirrored copies, deletions remove them, and restores
+Add one and Grapho mirrors active documents and images from all Spaces together
+with their grouping. Mirrors use document IDs for filenames so each backup can
+track the same copy after a rename. A restored mirror starts with all Spaces
+using its main folder. Saves update the mirrored copies, deletions remove them, and restores
 copy the documents again. Use a local
 folder, a mounted network share, or a Google
 Drive, OneDrive, or Dropbox folder that its desktop app keeps in sync. Copies run

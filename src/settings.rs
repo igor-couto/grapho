@@ -15,7 +15,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-use crate::store::{document_file_id, replace_file};
+use crate::store::{replace_file, INDEX_FILE};
 
 /// Which rule picked the data directory, so the storage page can explain it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -134,23 +134,26 @@ pub fn per_user_data_dir(
     }
 }
 
-/// `./data` stays in use while it already holds documents, so a checkout or a
+/// `./data` stays in use while it holds documents or Spaces, so a checkout or a
 /// folder copied around still behaves the way it did before the per-user
 /// default existed.
 pub fn portable_data_dir() -> Option<PathBuf> {
     let candidate = env::current_dir().ok()?.join("data");
-    directory_holds_documents(&candidate).then_some(candidate)
+    directory_has_library(&candidate).then_some(candidate)
 }
 
-pub fn directory_holds_documents(directory: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return false;
-    };
-
-    entries.flatten().any(|entry| {
-        entry.file_type().is_ok_and(|kind| kind.is_file())
-            && document_file_id(&entry.path()).is_some()
-    })
+fn directory_has_library(directory: &Path) -> bool {
+    std::fs::read(directory.join(INDEX_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|index| {
+            ["documents", "spaces"].iter().any(|key| {
+                index
+                    .get(key)
+                    .and_then(serde_json::Value::as_object)
+                    .is_some_and(|entries| !entries.is_empty())
+            })
+        })
 }
 
 /// The per-user settings file. It sits beside the other files the platform
@@ -419,11 +422,11 @@ mod tests {
     }
 
     #[test]
-    fn only_a_folder_with_markdown_documents_is_a_portable_store() {
+    fn a_folder_with_markdown_documents_or_spaces_is_a_portable_store() {
         let root = env::temp_dir().join(format!("grapho-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
 
-        assert!(!directory_holds_documents(&root));
+        assert!(!directory_has_library(&root));
 
         std::fs::write(root.join("README.md"), b"not a document").unwrap();
         std::fs::write(root.join("metadata.json"), b"{}").unwrap();
@@ -432,10 +435,20 @@ mod tests {
             b"{}",
         )
         .unwrap();
-        assert!(!directory_holds_documents(&root));
+        assert!(!directory_has_library(&root));
 
-        std::fs::write(root.join("6f9c1f2e-0000-4000-8000-000000000000.md"), b"{}").unwrap();
-        assert!(directory_holds_documents(&root));
+        let index = serde_json::json!({
+            "version": 2, "documents": {}, "spaces": { Uuid::new_v4().to_string(): { "name": "Work" } }
+        });
+        std::fs::write(root.join("metadata.json"), index.to_string()).unwrap();
+        assert!(directory_has_library(&root));
+
+        let index = serde_json::json!({
+            "version": 2, "documents": { Uuid::new_v4().to_string(): { "filename": "Notes.md" } }
+        });
+        std::fs::write(root.join("metadata.json"), index.to_string()).unwrap();
+        std::fs::write(root.join("Notes.md"), b"Notes").unwrap();
+        assert!(directory_has_library(&root));
 
         std::fs::remove_dir_all(&root).unwrap();
     }

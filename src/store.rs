@@ -11,11 +11,18 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
+use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::markdown::{self, ImageAttributes};
 
+mod filenames;
+mod spaces;
+use filenames::{filename_key, valid_filename, FilenameSet};
+pub use spaces::{Space, SpaceError, SpaceSummary};
+
 const SCHEMA_VERSION: u32 = 1;
+const INDEX_VERSION: u32 = 2;
 const DEFAULT_TITLE: &str = "Untitled document";
 pub(crate) const INDEX_FILE: &str = "metadata.json";
 const SPELLING_WORDS_FILE: &str = "spelling-words.json";
@@ -40,6 +47,8 @@ pub struct Document {
     #[serde(default = "schema_version")]
     pub version: u32,
     pub id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<Uuid>,
     pub title: String,
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -53,6 +62,10 @@ pub struct Document {
 #[derive(Clone, Serialize, Deserialize)]
 struct DocumentMetadata {
     title: String,
+    #[serde(default)]
+    filename: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    space_id: Option<Uuid>,
     created_at: u64,
     updated_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -64,9 +77,11 @@ struct DocumentMetadata {
 }
 
 impl DocumentMetadata {
-    fn from_document(document: &Document, images: ImageAttributes) -> Self {
+    fn from_document(document: &Document, filename: String, images: ImageAttributes) -> Self {
         Self {
             title: document.title.clone(),
+            filename,
+            space_id: document.space_id,
             created_at: document.created_at,
             updated_at: document.updated_at,
             paper_width: document.paper_width,
@@ -79,6 +94,7 @@ impl DocumentMetadata {
         Document {
             version: SCHEMA_VERSION,
             id,
+            space_id: self.space_id,
             title: normalize_title(&self.title),
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -92,13 +108,19 @@ impl DocumentMetadata {
 #[derive(Clone, Serialize, Deserialize)]
 struct LibraryIndex {
     version: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    backup: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    spaces: BTreeMap<Uuid, Space>,
     documents: BTreeMap<Uuid, DocumentMetadata>,
 }
 
 impl Default for LibraryIndex {
     fn default() -> Self {
         Self {
-            version: SCHEMA_VERSION,
+            version: INDEX_VERSION,
+            backup: false,
+            spaces: BTreeMap::new(),
             documents: BTreeMap::new(),
         }
     }
@@ -107,6 +129,7 @@ impl Default for LibraryIndex {
 pub(crate) struct BackupSnapshot {
     pub known: HashSet<Uuid>,
     pub changed: HashSet<Uuid>,
+    pub index_changed: bool,
     pub files: BTreeMap<String, Vec<u8>>,
     pub index: Vec<u8>,
 }
@@ -125,6 +148,7 @@ impl Document {
         Self {
             version: SCHEMA_VERSION,
             id,
+            space_id: None,
             title: DEFAULT_TITLE.to_owned(),
             content: String::new(),
             paper_width: None,
@@ -139,6 +163,7 @@ impl Document {
 #[derive(Clone, Debug, Serialize)]
 pub struct DocumentSummary {
     pub id: Uuid,
+    pub space_id: Option<Uuid>,
     pub title: String,
     pub excerpt: String,
     pub preview: String,
@@ -150,6 +175,7 @@ pub struct DocumentSummary {
 #[derive(Serialize)]
 pub struct DeletedDocument {
     id: Uuid,
+    space_id: Option<Uuid>,
     title: String,
     deleted_at: u64,
 }
@@ -174,6 +200,8 @@ struct SearchExcerpt {
 #[derive(Debug)]
 pub enum StoreError {
     EmptyDraft,
+    UnknownSpace,
+    UnavailableSpace,
     Io(io::Error),
     Corrupt { path: PathBuf, message: String },
 }
@@ -182,6 +210,8 @@ impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyDraft => write!(f, "empty untitled draft"),
+            Self::UnknownSpace => write!(f, "space does not exist"),
+            Self::UnavailableSpace => write!(f, "the Space's storage folder is unavailable"),
             Self::Io(error) => write!(f, "{error}"),
             Self::Corrupt { path, message } => {
                 write!(f, "{}: {message}", path.display())
@@ -194,7 +224,10 @@ impl std::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::EmptyDraft | Self::Corrupt { .. } => None,
+            Self::EmptyDraft
+            | Self::UnknownSpace
+            | Self::UnavailableSpace
+            | Self::Corrupt { .. } => None,
         }
     }
 }
@@ -225,6 +258,7 @@ pub struct Relocated {
 pub enum RelocateError {
     NotAbsolute,
     SameDirectory,
+    SpaceDirectory,
     Occupied { documents: usize },
     Io { path: PathBuf, message: String },
 }
@@ -253,6 +287,7 @@ struct State {
     directory: PathBuf,
     documents: HashMap<Uuid, Document>,
     index: LibraryIndex,
+    unavailable_spaces: HashSet<Uuid>,
 }
 
 impl Store {
@@ -260,53 +295,83 @@ impl Store {
         fs::create_dir_all(&directory).await?;
 
         let mut index = read_index(&directory).await?;
+        index.backup = false;
         let mut documents = HashMap::new();
-        let mut bodies = Vec::new();
-        let mut attachments: HashMap<Uuid, Vec<String>> = HashMap::new();
-        let mut entries = fs::read_dir(&directory).await?;
-
-        while let Some(entry) = entries.next_entry().await? {
-            if !entry.file_type().await?.is_file() {
-                continue;
-            }
-            let Ok(name) = entry.file_name().into_string() else {
-                continue;
-            };
-            if let Some(id) = document_file_id(Path::new(&name)) {
-                bodies.push(id);
-            } else if let Some(id) = markdown::attachment_owner(&name) {
-                attachments.entry(id).or_default().push(name);
+        let mut folder_keys = HashSet::from([directory_key(&directory).await?]);
+        let mut configured_paths = HashSet::from([directory.as_path()]);
+        let mut dedicated_documents = BTreeMap::new();
+        for (&space_id, space) in &index.spaces {
+            if let Some(folder) = space.folder.as_deref() {
+                if !folder.is_absolute() || !configured_paths.insert(folder) {
+                    return Err(StoreError::Corrupt {
+                        path: directory.join(INDEX_FILE),
+                        message: format!("invalid or shared Space folder {}", folder.display()),
+                    });
+                }
+                dedicated_documents.insert(space_id, Vec::new());
             }
         }
 
-        for id in bodies {
-            let source = fs::read_to_string(directory.join(document_file_name(id))).await?;
-            let metadata = index.documents.entry(id).or_insert_with(|| {
-                DocumentMetadata::from_document(&Document::blank(id), ImageAttributes::new())
+        for (&id, metadata) in &mut index.documents {
+            if metadata
+                .space_id
+                .is_some_and(|space| !index.spaces.contains_key(&space))
+            {
+                metadata.space_id = None;
+            }
+            if let Some(entries) = metadata
+                .space_id
+                .and_then(|space| dedicated_documents.get_mut(&space))
+            {
+                entries.push((id, metadata.clone()));
+            } else {
+                documents.insert(id, load_document(&directory, id, metadata).await?);
+            }
+        }
+
+        // Probe separate folders concurrently so startup does not wait through
+        // each unreachable mount in turn.
+        let mut loads = JoinSet::new();
+        for (id, entries) in dedicated_documents {
+            let folder = index.spaces[&id].folder.clone().expect("dedicated folder");
+            loads.spawn(async move {
+                let result = spaces::load_folder(&folder, entries).await;
+                (id, folder, result)
             });
-            let mut images = BTreeMap::new();
-            for name in attachments.remove(&id).into_iter().flatten() {
-                if source.contains(&name) {
-                    let bytes = fs::read(directory.join(&name)).await?;
-                    metadata.images.entry(name.clone()).or_default();
-                    images.insert(name, bytes);
+        }
+        let mut unavailable_spaces = HashSet::new();
+        while let Some(result) = loads.join_next().await {
+            let (id, folder, result) = result.map_err(io::Error::other)?;
+            match result {
+                Ok((key, loaded)) => {
+                    if !folder_keys.insert(key) {
+                        return Err(StoreError::Corrupt {
+                            path: directory.join(INDEX_FILE),
+                            message: format!("shared Space folder {}", folder.display()),
+                        });
+                    }
+                    for (document, metadata) in loaded {
+                        index.documents.insert(document.id, metadata);
+                        documents.insert(document.id, document);
+                    }
+                }
+                Err(error) => {
+                    eprintln!(
+                        "could not load Space {} from {}: {error}",
+                        index.spaces[&id].name,
+                        folder.display()
+                    );
+                    unavailable_spaces.insert(id);
                 }
             }
-            metadata.images.retain(|name, _| images.contains_key(name));
-
-            // Markdown and index edits cross the same trust boundary as API saves.
-            let content =
-                sanitize_document_content(markdown::decode(&source, &images, &metadata.images));
-            let document = metadata.document(id, content);
-            documents.insert(id, document);
         }
-        index.documents.retain(|id, _| documents.contains_key(id));
 
         Ok(Self {
             state: RwLock::new(State {
                 directory,
                 documents,
                 index,
+                unavailable_spaces,
             }),
         })
     }
@@ -314,6 +379,19 @@ impl Store {
     /// The folder documents are written to right now.
     pub async fn directory(&self) -> PathBuf {
         self.state.read().await.directory.clone()
+    }
+
+    pub async fn directories(&self) -> Vec<PathBuf> {
+        let state = self.state.read().await;
+        std::iter::once(state.directory.clone())
+            .chain(
+                state
+                    .index
+                    .spaces
+                    .values()
+                    .filter_map(|space| space.folder.clone()),
+            )
+            .collect()
     }
 
     pub async fn spelling_words(&self) -> io::Result<BTreeSet<String>> {
@@ -330,26 +408,26 @@ impl Store {
         Ok(words)
     }
 
-    /// What the folder holds, counted from the files themselves rather than the
-    /// in-memory map, so a hand-edited folder is reported honestly.
+    /// The live library across all of its folders, including deleted file bytes.
     pub async fn usage(&self) -> Usage {
         let state = self.state.read().await;
-        let files = document_files(&state.directory).await;
-        Usage {
-            documents: files
-                .iter()
-                .filter(|(id, _)| {
-                    !state
-                        .documents
-                        .get(id)
-                        .is_some_and(|doc| doc.deleted_at.is_some())
-                })
-                .count(),
-            bytes: files.iter().fold(
-                library_overhead(&state.directory, &state.index).await,
-                |total: u64, (_, bytes)| total.saturating_add(*bytes),
-            ),
+        let mut usage = Usage {
+            bytes: file_size(&state.directory.join(INDEX_FILE)).await,
+            ..Usage::default()
+        };
+        for metadata in state.index.documents.values() {
+            usage.documents += usize::from(metadata.deleted_at.is_none());
+            if !state.space_is_available(metadata.space_id) {
+                continue;
+            }
+            let folder = state.folder_for(metadata.space_id);
+            for name in document_files_for(metadata) {
+                usage.bytes = usage
+                    .bytes
+                    .saturating_add(file_size(&folder.join(name)).await);
+            }
         }
+        usage
     }
 
     pub async fn list(&self) -> Vec<DocumentSummary> {
@@ -377,6 +455,7 @@ impl Store {
             .filter_map(|document| {
                 Some(DeletedDocument {
                     id: document.id,
+                    space_id: document.space_id,
                     deleted_at: document.deleted_at?,
                     title: document.title.clone(),
                 })
@@ -391,7 +470,7 @@ impl Store {
         documents
     }
 
-    pub async fn search(&self, query: &str) -> Vec<DocumentMatch> {
+    pub async fn search(&self, query: &str, space: Option<Option<Uuid>>) -> Vec<DocumentMatch> {
         let query = fold_for_search(&query.split_whitespace().collect::<Vec<_>>().join(" "));
         if query.is_empty() {
             return Vec::new();
@@ -401,7 +480,7 @@ impl Store {
         state
             .documents
             .values()
-            .filter(|document| document.deleted_at.is_none())
+            .filter(|document| document.deleted_at.is_none() && in_space(document, space))
             .filter_map(|document| {
                 let text = html_to_text(&document.content);
                 let title_match = search_excerpt(&document.title, &query);
@@ -422,6 +501,14 @@ impl Store {
         self.state.read().await.active_document(id).cloned()
     }
 
+    pub async fn require_document_space(&self, id: Uuid) -> Result<(), StoreError> {
+        self.state.read().await.require_document_space(id)
+    }
+
+    pub async fn require_available_space(&self, id: Uuid) -> Result<(), StoreError> {
+        self.state.read().await.require_available_space(Some(id))
+    }
+
     pub async fn title(&self, id: Uuid) -> Option<String> {
         self.state
             .read()
@@ -431,16 +518,13 @@ impl Store {
     }
 
     pub(crate) async fn contains_active(&self, id: Uuid) -> bool {
-        self.is_deleted(id).await == Some(false)
-    }
-
-    async fn is_deleted(&self, id: Uuid) -> Option<bool> {
         self.state
             .read()
             .await
+            .index
             .documents
             .get(&id)
-            .map(|document| document.deleted_at.is_some())
+            .is_some_and(|document| document.deleted_at.is_none())
     }
 
     /// Read the files and index while they describe the same committed state.
@@ -451,36 +535,72 @@ impl Store {
     ) -> io::Result<BackupSnapshot> {
         let state = self.state.read().await;
         let mut index = state.index.clone();
+        // Mirrors store all bodies together. Keep the groups, and let a
+        // restored copy use its own folder until the owner chooses new paths.
+        for space in index.spaces.values_mut() {
+            space.folder = None;
+        }
         index
             .documents
             .retain(|_, metadata| metadata.deleted_at.is_none());
         let known: HashSet<_> = index.documents.keys().copied().collect();
+        let index_changed = ids.is_some_and(|ids| ids.contains(&Uuid::nil()));
         let changed: HashSet<_> = match ids {
             Some(ids) => ids
                 .iter()
-                .filter(|id| state.documents.contains_key(id))
+                .filter(|id| state.index.documents.contains_key(id))
                 .copied()
                 .collect(),
             None => known.clone(),
         };
         let mut files = BTreeMap::new();
         for id in changed.intersection(&known) {
-            for name in document_files_for(*id, &index.documents[id]) {
-                let bytes = fs::read(state.directory.join(&name)).await?;
-                files.insert(name, bytes);
+            let metadata = &index.documents[id];
+            if let Some(space) = metadata
+                .space_id
+                .filter(|id| state.unavailable_spaces.contains(id))
+            {
+                return Err(io::Error::other(format!(
+                    "the storage folder for {} is unavailable",
+                    state.index.spaces[&space].name
+                )));
             }
+            let folder = state.folder_for(metadata.space_id);
+            for name in document_files_for(metadata) {
+                let bytes = fs::read(folder.join(name)).await?;
+                let mirror_name = if name == metadata.filename {
+                    mirror_filename(*id)
+                } else {
+                    name.to_owned()
+                };
+                files.insert(mirror_name, bytes);
+            }
+        }
+        index.backup = true;
+        // Mirrors share a flat namespace. Stable body names let every
+        // connector retry or remove copies by ID after a local rename.
+        for (&id, metadata) in &mut index.documents {
+            metadata.filename = mirror_filename(id);
         }
         Ok(BackupSnapshot {
             known,
             changed,
+            index_changed,
             files,
             index: index_bytes(&index)?,
         })
     }
 
+    #[cfg(test)]
     pub async fn create(&self) -> Result<Document, StoreError> {
+        self.create_in_space(None).await
+    }
+
+    pub async fn create_in_space(&self, space_id: Option<Uuid>) -> Result<Document, StoreError> {
         let mut state = self.state.write().await;
-        let document = Document::blank(Uuid::new_v4());
+        state.require_space(space_id)?;
+        let mut document = Document::blank(Uuid::new_v4());
+        document.space_id = space_id;
 
         state.persist(document.clone()).await?;
         Ok(document)
@@ -495,6 +615,7 @@ impl Store {
     /// failure leaves the library exactly as it was.
     pub async fn duplicate(&self, id: Uuid) -> Result<Option<Document>, StoreError> {
         let mut state = self.state.write().await;
+        state.require_document_space(id)?;
         let Some(source) = state.active_document(id).cloned() else {
             return Ok(None);
         };
@@ -514,6 +635,7 @@ impl Store {
         let document = Document {
             version: SCHEMA_VERSION,
             id: Uuid::new_v4(),
+            space_id: source.space_id,
             title,
             content: source.content,
             paper_width: source.paper_width,
@@ -535,11 +657,12 @@ impl Store {
         content: Option<String>,
         paper_width: Option<u32>,
     ) -> Result<Option<Document>, StoreError> {
-        self.save(id, title, content, paper_width, false).await
+        self.save(id, title, content, paper_width, None).await
     }
 
     /// A draft already has an id, so a retry of the first save updates the
     /// same file even if the first response never reached the editor.
+    #[cfg(test)]
     pub async fn save_draft(
         &self,
         id: Uuid,
@@ -547,7 +670,20 @@ impl Store {
         content: Option<String>,
         paper_width: Option<u32>,
     ) -> Result<Option<Document>, StoreError> {
-        self.save(id, title, content, paper_width, true).await
+        self.save_draft_in_space(id, title, content, paper_width, None)
+            .await
+    }
+
+    pub async fn save_draft_in_space(
+        &self,
+        id: Uuid,
+        title: Option<String>,
+        content: Option<String>,
+        paper_width: Option<u32>,
+        space_id: Option<Uuid>,
+    ) -> Result<Option<Document>, StoreError> {
+        self.save(id, title, content, paper_width, Some(space_id))
+            .await
     }
 
     async fn save(
@@ -556,12 +692,18 @@ impl Store {
         title: Option<String>,
         content: Option<String>,
         paper_width: Option<u32>,
-        allow_create: bool,
+        draft_space: Option<Option<Uuid>>,
     ) -> Result<Option<Document>, StoreError> {
         let mut state = self.state.write().await;
+        state.require_document_space(id)?;
         let (mut document, creating) = match state.documents.get(&id) {
             Some(document) if document.deleted_at.is_none() => (document.clone(), false),
-            None if allow_create => (Document::blank(id), true),
+            None if draft_space.is_some() => {
+                let mut document = Document::blank(id);
+                document.space_id = draft_space.flatten();
+                state.require_space(document.space_id)?;
+                (document, true)
+            }
             _ => return Ok(None),
         };
 
@@ -609,6 +751,7 @@ impl Store {
 
     pub async fn delete(&self, id: Uuid) -> Result<bool, StoreError> {
         let mut state = self.state.write().await;
+        state.require_document_space(id)?;
         let Some(mut document) = state.active_document(id).cloned() else {
             return Ok(false);
         };
@@ -620,6 +763,7 @@ impl Store {
 
     pub async fn restore(&self, id: Uuid) -> Result<Option<Document>, StoreError> {
         let mut state = self.state.write().await;
+        state.require_document_space(id)?;
         let Some(mut document) = state.documents.get(&id).cloned() else {
             return Ok(None);
         };
@@ -647,27 +791,41 @@ impl Store {
         let current_key = directory_key(&state.directory)
             .await
             .map_err(|error| RelocateError::io(&state.directory, error))?;
-        if current_key
-            == directory_key(&target)
-                .await
-                .map_err(|error| RelocateError::io(&target, error))?
-        {
+        let target_key = directory_key(&target)
+            .await
+            .map_err(|error| RelocateError::io(&target, error))?;
+        if current_key == target_key {
             return Err(RelocateError::SameDirectory);
         }
+        state
+            .check_space_folders(&target, &target_key, None)
+            .await?;
 
         fs::create_dir_all(&target)
             .await
             .map_err(|error| RelocateError::io(&target, error))?;
 
-        let existing = document_files(&target).await;
-        let strangers = existing
-            .iter()
-            .filter(|(id, _)| !state.documents.contains_key(id))
+        let target_index = read_index(&target)
+            .await
+            .map_err(|error| RelocateError::io(&target, error))?;
+        let strangers = target_index
+            .documents
+            .keys()
+            .filter(|id| !state.index.documents.contains_key(id))
             .count();
         if strangers > 0 {
             return Err(RelocateError::Occupied {
                 documents: strangers,
             });
+        }
+        // A library with dedicated Space folders can have an index and no
+        // local Markdown files. Protect that index just like its bodies.
+        if target_index
+            .spaces
+            .keys()
+            .any(|id| !state.index.spaces.contains_key(id))
+        {
+            return Err(RelocateError::SpaceDirectory);
         }
 
         let spelling_words = read_spelling_words(&state.directory)
@@ -677,22 +835,39 @@ impl Store {
         // Copies this call creates are the only ones a failure may remove; a
         // file that was already there belongs to the folder's previous use.
         let mut created = Vec::new();
-        for (id, metadata) in &state.index.documents {
-            for name in document_files_for(*id, metadata) {
-                let destination = target.join(&name);
-                let existed = fs::symlink_metadata(&destination).await.is_ok();
-                let copy = async {
-                    let bytes = fs::read(state.directory.join(name)).await?;
-                    write_data_file(&destination, &bytes).await
-                };
-                if let Err(error) = copy.await {
-                    remove_copies(&created).await;
-                    return Err(RelocateError::io(&target, error));
+        let mut index = state.index.clone();
+        let copy = async {
+            let mut filenames = FilenameSet::read(&target).await?;
+            for (&id, metadata) in &mut index.documents {
+                if state.folder_for(metadata.space_id) != state.directory {
+                    continue;
                 }
-                if !existed {
-                    created.push(destination);
-                }
+                let owned = target_index
+                    .documents
+                    .get(&id)
+                    .filter(|entry| {
+                        folder_for(&target, &target_index.spaces, entry.space_id) == target
+                    })
+                    .map(|entry| entry.filename.as_str());
+                let filename = filenames
+                    .claim(&metadata.title, Some(&metadata.filename), owned)
+                    .await?;
+                copy_document_files(
+                    metadata,
+                    &filename,
+                    &state.directory,
+                    &target,
+                    owned == Some(&filename),
+                    &mut created,
+                )
+                .await?;
+                metadata.filename = filename;
             }
+            Ok::<_, io::Error>(())
+        };
+        if let Err(error) = copy.await {
+            remove_copies(&created).await;
+            return Err(RelocateError::io(&target, error));
         }
 
         // When returning to a previous data folder, retain any words added there.
@@ -709,13 +884,25 @@ impl Store {
             }
         }
 
-        let index = index_bytes(&state.index).map_err(|error| RelocateError::io(&target, error))?;
-        if let Err(error) = write_data_file(&target.join(INDEX_FILE), &index).await {
+        let write =
+            async { write_data_file(&target.join(INDEX_FILE), &index_bytes(&index)?).await };
+        if let Err(error) = write.await {
             remove_copies(&created).await;
             return Err(RelocateError::io(&target, error));
         }
 
+        for metadata in target_index.documents.values() {
+            if folder_for(&target, &target_index.spaces, metadata.space_id) == target
+                && !index.documents.values().any(|entry| {
+                    state.folder_for(entry.space_id) == state.directory
+                        && filename_key(&entry.filename) == filename_key(&metadata.filename)
+                })
+            {
+                remove_old_body(&target, &metadata.filename).await;
+            }
+        }
         state.directory = target.clone();
+        state.index = index;
         Ok(Relocated {
             directory: target,
             documents: state
@@ -735,6 +922,10 @@ async fn read_spelling_words(directory: &Path) -> io::Result<BTreeSet<String>> {
     }
 }
 
+fn in_space(document: &Document, space: Option<Option<Uuid>>) -> bool {
+    space.is_none_or(|id| document.space_id == id)
+}
+
 impl State {
     fn active_document(&self, id: Uuid) -> Option<&Document> {
         self.documents
@@ -743,9 +934,24 @@ impl State {
     }
 
     async fn persist(&mut self, document: Document) -> Result<(), StoreError> {
+        self.require_available_space(document.space_id)?;
         let id = document.id;
-        let path = self.directory.join(document_file_name(id));
+        let folder = self.folder_for(document.space_id).to_path_buf();
         let old_metadata = self.index.documents.get(&id);
+        let old_name = old_metadata.map(|metadata| metadata.filename.as_str());
+        let filename = match old_metadata {
+            Some(old) if old.title == document.title && old.filename != mirror_filename(id) => {
+                old.filename.clone()
+            }
+            _ => {
+                FilenameSet::read(&folder)
+                    .await?
+                    .claim(&document.title, None, old_name)
+                    .await?
+            }
+        };
+        let new_path = old_name != Some(&filename);
+        let path = folder.join(&filename);
         let mut created = Vec::new();
         let mut old_body = None;
         let body_changed = self
@@ -754,12 +960,12 @@ impl State {
             .is_none_or(|old| old.content != document.content);
         let image_attributes = if body_changed {
             let body = markdown::encode(id, &document.content);
-            if old_metadata.is_some() {
+            if !new_path {
                 old_body = Some(fs::read(&path).await?);
             }
             let write = async {
                 for (name, bytes) in body.images {
-                    let image = self.directory.join(name);
+                    let image = folder.join(name);
                     if !fs::symlink_metadata(&image)
                         .await
                         .is_ok_and(|file| file.is_file())
@@ -768,7 +974,13 @@ impl State {
                         created.push(image);
                     }
                 }
-                write_data_file(&path, body.markdown.as_bytes()).await
+                if new_path {
+                    write_new_data_file(&path, body.markdown.as_bytes()).await?;
+                    created.push(path.clone());
+                    Ok(())
+                } else {
+                    write_data_file(&path, body.markdown.as_bytes()).await
+                }
             };
             if let Err(error) = write.await {
                 remove_copies(&created).await;
@@ -776,10 +988,15 @@ impl State {
             }
             body.image_attributes
         } else {
+            if new_path {
+                let previous = folder.join(old_name.expect("unchanged document has a body"));
+                write_new_data_file(&path, &fs::read(previous).await?).await?;
+                created.push(path.clone());
+            }
             old_metadata.map_or_else(ImageAttributes::new, |old| old.images.clone())
         };
 
-        let metadata = DocumentMetadata::from_document(&document, image_attributes);
+        let metadata = DocumentMetadata::from_document(&document, filename, image_attributes);
         let previous = self.index.documents.insert(id, metadata);
         let index = async {
             let bytes = index_bytes(&self.index)?;
@@ -790,33 +1007,59 @@ impl State {
             if let Some(previous) = previous {
                 self.index.documents.insert(id, previous);
             }
-            if body_changed {
-                let restored = match old_body {
-                    Some(bytes) => write_data_file(&path, &bytes).await,
-                    None => fs::remove_file(path).await,
-                };
-                if let Err(rollback) = restored {
+            if let Some(bytes) = old_body {
+                if let Err(rollback) = write_data_file(&path, &bytes).await {
                     eprintln!("could not roll back Markdown save for {id}: {rollback}");
-                } else {
-                    remove_copies(&created).await;
+                    return Err(error.into());
                 }
             }
+            remove_copies(&created).await;
             return Err(error.into());
         }
 
         if let Some(previous) = previous {
             let current = &self.index.documents[&id];
+            if new_path {
+                remove_old_body(&folder, &previous.filename).await;
+            }
             for name in previous
                 .images
                 .keys()
                 .filter(|name| !current.images.contains_key(*name))
             {
-                let _ = fs::remove_file(self.directory.join(name)).await;
+                let _ = fs::remove_file(folder.join(name)).await;
             }
         }
         self.documents.insert(id, document);
         Ok(())
     }
+}
+
+async fn load_document(
+    folder: &Path,
+    id: Uuid,
+    metadata: &mut DocumentMetadata,
+) -> Result<Document, StoreError> {
+    let path = folder.join(&metadata.filename);
+    let source = fs::read_to_string(&path)
+        .await
+        .map_err(|error| StoreError::Corrupt {
+            path,
+            message: format!("could not read the document's Markdown file: {error}"),
+        })?;
+    let mut images = BTreeMap::new();
+    for name in metadata.images.keys().filter(|name| source.contains(*name)) {
+        match fs::read(folder.join(name)).await {
+            Ok(bytes) => {
+                images.insert(name.clone(), bytes);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    metadata.images.retain(|name, _| images.contains_key(name));
+    let content = sanitize_document_content(markdown::decode(&source, &images, &metadata.images));
+    Ok(metadata.document(id, content))
 }
 
 async fn read_index(directory: &Path) -> Result<LibraryIndex, StoreError> {
@@ -831,13 +1074,44 @@ async fn read_index(directory: &Path) -> Result<LibraryIndex, StoreError> {
             path: path.clone(),
             message: error.to_string(),
         })?;
-    if index.version != SCHEMA_VERSION {
+    if index.version != INDEX_VERSION {
         return Err(StoreError::Corrupt {
             path,
             message: format!("unsupported metadata index version {}", index.version),
         });
     }
+    let mut filenames = HashSet::new();
+    for (&id, metadata) in &index.documents {
+        let folder = folder_for(directory, &index.spaces, metadata.space_id);
+        if !valid_filename(&metadata.filename)
+            || !filenames.insert((folder, filename_key(&metadata.filename)))
+            || metadata
+                .images
+                .keys()
+                .any(|name| markdown::attachment_owner(name) != Some(id))
+        {
+            return Err(StoreError::Corrupt {
+                path,
+                message: format!("invalid or duplicate filename for document {id}"),
+            });
+        }
+    }
     Ok(index)
+}
+
+fn folder_for<'a>(
+    directory: &'a Path,
+    spaces: &'a BTreeMap<Uuid, Space>,
+    space_id: Option<Uuid>,
+) -> &'a Path {
+    space_id
+        .and_then(|id| spaces.get(&id)?.folder.as_deref())
+        .unwrap_or(directory)
+}
+
+pub(crate) fn is_backup_index(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<LibraryIndex>(bytes)
+        .is_ok_and(|index| index.version == INDEX_VERSION && index.backup)
 }
 
 fn index_bytes(index: &LibraryIndex) -> io::Result<Vec<u8>> {
@@ -846,27 +1120,62 @@ fn index_bytes(index: &LibraryIndex) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-async fn library_overhead(directory: &Path, index: &LibraryIndex) -> u64 {
-    let mut bytes = fs::metadata(directory.join(INDEX_FILE))
-        .await
-        .map_or(0, |file| file.len());
-    for metadata in index.documents.values() {
-        for name in metadata.images.keys() {
-            if let Ok(file) = fs::metadata(directory.join(name)).await {
-                bytes = bytes.saturating_add(file.len());
+async fn copy_document_files(
+    metadata: &DocumentMetadata,
+    filename: &str,
+    source: &Path,
+    target: &Path,
+    replace_body: bool,
+    created: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    for name in metadata.images.keys() {
+        let destination = target.join(name);
+        let bytes = fs::read(source.join(name)).await?;
+        match write_new_data_file(&destination, &bytes).await {
+            Ok(()) => created.push(destination),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if !fs::symlink_metadata(&destination).await?.is_file()
+                    || fs::read(&destination).await? != bytes
+                {
+                    return Err(error);
+                }
             }
+            Err(error) => return Err(error),
         }
     }
-    bytes
+    let destination = target.join(filename);
+    let body = fs::read(source.join(&metadata.filename)).await?;
+    if replace_body
+        && fs::symlink_metadata(&destination)
+            .await
+            .is_ok_and(|file| file.is_file())
+    {
+        write_data_file(&destination, &body).await?;
+    } else {
+        write_new_data_file(&destination, &body).await?;
+        created.push(destination);
+    }
+    Ok(())
+}
+
+async fn remove_old_body(folder: &Path, name: &str) {
+    if let Err(error) = fs::remove_file(folder.join(name)).await {
+        if error.kind() != io::ErrorKind::NotFound {
+            eprintln!("could not remove previous copy of {name}: {error}");
+        }
+    }
+}
+
+async fn file_size(path: &Path) -> u64 {
+    fs::metadata(path).await.map_or(0, |file| file.len())
 }
 
 fn schema_version() -> u32 {
     SCHEMA_VERSION
 }
 
-/// A document file is a UUID name with an .md extension. Anything else in the
-/// folder belongs to someone else and is never counted, copied, or removed.
-pub(crate) fn document_file_id(path: &Path) -> Option<Uuid> {
+/// Backup bodies use UUID names so the connectors can recognize old copies.
+pub(crate) fn mirror_document_id(path: &Path) -> Option<Uuid> {
     if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
         return None;
     }
@@ -880,42 +1189,35 @@ pub(crate) fn managed_file_id(name: &str) -> Option<Uuid> {
     if path.file_name()?.to_str()? != name {
         return None;
     }
-    document_file_id(path).or_else(|| markdown::attachment_owner(name))
+    mirror_document_id(path).or_else(|| markdown::attachment_owner(name))
 }
 
-pub(crate) fn document_file_name(id: Uuid) -> String {
+fn mirror_filename(id: Uuid) -> String {
     format!("{id}.md")
 }
 
-fn document_files_for(id: Uuid, metadata: &DocumentMetadata) -> impl Iterator<Item = String> + '_ {
+fn document_files_for(metadata: &DocumentMetadata) -> impl Iterator<Item = &str> {
     metadata
         .images
         .keys()
-        .cloned()
-        .chain(std::iter::once(document_file_name(id)))
+        .map(String::as_str)
+        .chain(std::iter::once(metadata.filename.as_str()))
 }
 
-/// Every document file in a folder, with its size. Names that are not UUID
-/// document files are ignored, and an unreadable folder simply has none.
-pub(crate) async fn document_files(directory: &Path) -> Vec<(Uuid, u64)> {
-    let mut files = Vec::new();
-    let Ok(mut entries) = fs::read_dir(directory).await else {
-        return files;
-    };
-
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let Some(id) = document_file_id(&entry.path()) else {
-            continue;
-        };
-        let Ok(metadata) = entry.metadata().await else {
-            continue;
-        };
-        if metadata.is_file() {
-            files.push((id, metadata.len()));
-        }
+/// An unindexed body can be written directly. A failed write leaves the
+/// previous index usable and never replaces a file already at this path.
+async fn write_new_data_file(destination: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = fs::File::create_new(destination).await?;
+    let result = async {
+        file.write_all(bytes).await?;
+        file.sync_all().await
     }
-
-    files
+    .await;
+    drop(file);
+    if result.is_err() {
+        let _ = fs::remove_file(destination).await;
+    }
+    result
 }
 
 /// Resolve aliases before comparing folders. Newly chosen folders can have
@@ -1371,6 +1673,7 @@ fn summarize(document: &Document, text: &str) -> DocumentSummary {
     }
     DocumentSummary {
         id: document.id,
+        space_id: document.space_id,
         title: document.title.clone(),
         excerpt: make_excerpt(text),
         preview,
@@ -1856,10 +2159,11 @@ mod tests {
     #[tokio::test]
     async fn fenced_code_keeps_its_leading_newlines_on_disk() {
         let directory = temp_directory("fenced-code");
-        fs::create_dir_all(&directory).await.unwrap();
-        let id = Uuid::new_v4();
+        let store = Store::load(directory.clone()).await.unwrap();
+        let id = store.create().await.unwrap().id;
+        drop(store);
         fs::write(
-            directory.join(document_file_name(id)),
+            directory.join("Untitled document.md"),
             "\x60\x60\x60\n\n\nreturn 42;\n\x60\x60\x60\n",
         )
         .await
@@ -2042,7 +2346,13 @@ mod tests {
             .await;
         assert!(matches!(blank, Err(StoreError::EmptyDraft)));
         assert!(store.list().await.is_empty());
-        assert!(document_files(&directory).await.is_empty());
+        assert!(fs::read_dir(&directory)
+            .await
+            .unwrap()
+            .next_entry()
+            .await
+            .unwrap()
+            .is_none());
 
         // Dividers and embedded images both count as content without text.
         for content in ["<hr>", "<img src=\"data:image/png;base64,AA==\">"] {
@@ -2060,7 +2370,9 @@ mod tests {
             assert_eq!(retry.id, first.id);
             assert_eq!(retry.updated_at, first.updated_at);
         }
-        assert_eq!(document_files(&directory).await.len(), 2);
+        assert!(directory.join("Untitled document.md").is_file());
+        assert!(directory.join("Untitled document (2).md").is_file());
+        assert_eq!(read_index(&directory).await.unwrap().documents.len(), 2);
 
         assert!(store.delete(id).await.unwrap());
         assert!(store
@@ -2122,7 +2434,7 @@ mod tests {
             .is_none());
         assert!(reloaded.duplicate(document.id).await.unwrap().is_none());
         assert!(reloaded.list().await.is_empty());
-        assert!(reloaded.search("field note").await.is_empty());
+        assert!(reloaded.search("field note", None).await.is_empty());
         assert_eq!(reloaded.usage().await.documents, 0);
         assert!(reloaded.usage().await.bytes > 0);
 
@@ -2178,7 +2490,7 @@ mod tests {
 
         // The copy is part of the library and has its own file.
         assert_eq!(store.list().await.len(), 2);
-        assert!(directory.join(format!("{}.md", copy.id)).exists());
+        assert!(directory.join("A field note (copy).md").exists());
 
         // Copying again numbers the title instead of stacking the suffix, and a
         // copy of a copy continues the same series.
@@ -2288,9 +2600,9 @@ mod tests {
         assert!(usage.bytes > 0, "the copied documents have a size");
 
         // The old folder keeps its copy.
-        for id in [first.id, second.id] {
-            assert!(old.join(format!("{id}.md")).exists());
-            assert!(new.join(format!("{id}.md")).exists());
+        for filename in ["A field note.md", "Untitled document (2).md"] {
+            assert!(old.join(filename).exists());
+            assert!(new.join(filename).exists());
         }
 
         // Writes and deletes follow the store to the new folder.
@@ -2308,9 +2620,9 @@ mod tests {
         assert!(!left_behind.contains("After moving"));
 
         assert!(store.delete(first.id).await.expect("delete succeeds"));
-        assert!(new.join(format!("{}.md", first.id)).exists());
+        assert!(new.join("A field note.md").exists());
         assert!(
-            old.join(format!("{}.md", first.id)).exists(),
+            old.join("A field note.md").exists(),
             "the old copy is never deleted"
         );
 
@@ -2332,11 +2644,8 @@ mod tests {
     async fn relocating_refuses_a_folder_that_already_holds_documents() {
         let old = temp_directory("occupied-old");
         let occupied = temp_directory("occupied-target");
-        fs::create_dir_all(&occupied).await.unwrap();
-        let stranger = Uuid::new_v4();
-        fs::write(occupied.join(format!("{stranger}.md")), b"{}")
-            .await
-            .unwrap();
+        let foreign = Store::load(occupied.clone()).await.unwrap();
+        foreign.create().await.unwrap();
 
         let store = Store::load(old.clone()).await.expect("store loads");
         store.create().await.expect("document is created");
@@ -2423,7 +2732,7 @@ mod tests {
     async fn usage_counts_the_library_files_and_ignores_unrelated_files() {
         let directory = temp_directory("usage");
         let store = Store::load(directory.clone()).await.expect("store loads");
-        let document = store.create().await.expect("document is created");
+        store.create().await.expect("document is created");
 
         fs::write(directory.join("notes.txt"), b"hello")
             .await
@@ -2434,7 +2743,7 @@ mod tests {
 
         let usage = store.usage().await;
         assert_eq!(usage.documents, 1);
-        let size = fs::metadata(directory.join(format!("{}.md", document.id)))
+        let size = fs::metadata(directory.join("Untitled document.md"))
             .await
             .unwrap()
             .len();
@@ -2472,7 +2781,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let body_path = directory.join(document_file_name(id));
+        let body_path = directory.join("Document title.md");
         let body = fs::read_to_string(&body_path).await.unwrap();
         assert!(body.starts_with(
             "## Notes\n\nOne **important** thing.\n\n- Parent\n    1. Nested\n- Sibling\n"
@@ -2492,7 +2801,13 @@ mod tests {
             .update(id, Some("Renamed".into()), None, None)
             .await
             .unwrap();
-        assert_eq!(fs::read_to_string(&body_path).await.unwrap(), body);
+        assert!(!body_path.exists());
+        assert_eq!(
+            fs::read_to_string(directory.join("Renamed.md"))
+                .await
+                .unwrap(),
+            body
+        );
         store.relocate(target.clone()).await.unwrap();
         let reopened = Store::load(target.clone()).await.unwrap();
         let restored = reopened.get(id).await.unwrap();
@@ -2514,7 +2829,7 @@ mod tests {
                 .count(),
             2
         );
-        assert_eq!(reopened.search("important thing").await.len(), 1);
+        assert_eq!(reopened.search("important thing", None).await.len(), 1);
 
         fs::remove_dir_all(directory).await.unwrap();
         fs::remove_dir_all(target).await.unwrap();
@@ -2530,13 +2845,24 @@ mod tests {
         let id = Uuid::new_v4();
         let create = || store.save_draft(id, Some("New".into()), Some("<p>New</p>".into()), None);
         assert!(create().await.is_err());
-        assert!(!directory.join(document_file_name(id)).exists());
+        assert!(!directory.join("New.md").exists());
         assert!(store.get(id).await.is_none());
+        assert!(store
+            .update(
+                document.id,
+                Some("Renamed".into()),
+                Some("<p>Changed</p>".into()),
+                None
+            )
+            .await
+            .is_err());
+        assert!(!directory.join("Renamed.md").exists());
+        assert_eq!(store.get(document.id).await.unwrap().title, DEFAULT_TITLE);
         assert!(store
             .update(document.id, None, Some("<p>Changed</p>".into()), None)
             .await
             .is_err());
-        assert!(fs::read(directory.join(document_file_name(document.id)))
+        assert!(fs::read(directory.join("Untitled document.md"))
             .await
             .unwrap()
             .is_empty());
@@ -2548,13 +2874,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_space_move_keeps_the_committed_document_in_its_original_folder() {
+        let directory = temp_directory("space-move");
+        let folder = directory.join("work");
+        let store = Store::load(directory.clone()).await.unwrap();
+        store
+            .save_space(
+                None,
+                Space {
+                    name: "Work".to_owned(),
+                    folder: Some(folder.clone()),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+        let space = store.spaces().await[0].0;
+        let document = store.create().await.unwrap();
+        let file = "Untitled document.md";
+        let blocked = directory.join(".metadata.json.tmp");
+        fs::create_dir(&blocked).await.unwrap();
+
+        assert!(store.move_document(document.id, Some(space)).await.is_err());
+        assert!(directory.join(file).is_file());
+        assert!(!folder.join(file).exists());
+        assert_eq!(store.get(document.id).await.unwrap().space_id, None);
+
+        fs::remove_dir(blocked).await.unwrap();
+        let moved = store
+            .move_document(document.id, Some(space))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(moved.space_id, Some(space));
+        assert!(folder.join(file).is_file());
+        assert!(!directory.join(file).exists());
+        fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn external_markdown_edits_are_read_and_sanitized_on_open() {
         let directory = temp_directory("manual-markdown");
         let store = Store::load(directory.clone()).await.unwrap();
         let document = store.create().await.unwrap();
         drop(store);
         fs::write(
-            directory.join(document_file_name(document.id)),
+            directory.join("Untitled document.md"),
             "# Edited\n\nA **new paragraph** with [a link](/doc/test#part).\n\n\
              ![Remote](https://example.com/cover.png)\n\n<p onclick=\"bad()\">Safe</p>\n",
         )
@@ -2573,6 +2938,87 @@ mod tests {
         assert!(!document.content.contains("https://example.com"));
         assert_eq!(reopened.list().await.len(), 1);
         assert_eq!(fs::read_to_string(legacy).await.unwrap(), "legacy content");
+        fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_titles_can_live_in_separate_space_folders_and_keep_both_bodies_on_move() {
+        let directory = temp_directory("filename-collision");
+        let folder = directory.join("work");
+        let store = Store::load(directory.clone()).await.unwrap();
+        store
+            .save_space(
+                None,
+                Space {
+                    name: "Work".into(),
+                    folder: Some(folder.clone()),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+        let space = store.spaces().await[0].0;
+        let general = Uuid::new_v4();
+        let work = Uuid::new_v4();
+
+        fs::write(directory.join("PROJECT - NOTES.md"), b"Unrelated")
+            .await
+            .unwrap();
+        store
+            .save_draft(
+                general,
+                Some("Project / Notes".into()),
+                Some("<p>General</p>".into()),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .save_draft_in_space(
+                work,
+                Some("Project / Notes".into()),
+                Some("<p>Work</p>".into()),
+                None,
+                Some(space),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(folder.join("Project - Notes.md"))
+                .await
+                .unwrap(),
+            "Work\n"
+        );
+
+        // Even a deleted document still owns its filename.
+        assert!(store.delete(general).await.unwrap());
+        store.move_document(work, None).await.unwrap();
+        assert!(!folder.join("Project - Notes.md").exists());
+        assert_eq!(
+            fs::read_to_string(directory.join("PROJECT - NOTES.md"))
+                .await
+                .unwrap(),
+            "Unrelated"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.join("Project - Notes (2).md"))
+                .await
+                .unwrap(),
+            "General\n"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.join("Project - Notes (3).md"))
+                .await
+                .unwrap(),
+            "Work\n"
+        );
+
+        let reloaded = Store::load(directory.clone()).await.unwrap();
+        assert_eq!(reloaded.get(work).await.unwrap().title, "Project / Notes");
+        assert_eq!(
+            reloaded.restore(general).await.unwrap().unwrap().content,
+            "<p>General</p>"
+        );
         fs::remove_dir_all(directory).await.unwrap();
     }
 }

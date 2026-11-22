@@ -9,7 +9,7 @@
 //   GRAPHO_BIN=/path/to/grapho CHROME_PATH=/path/to/chrome node test/app-check.mjs
 
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -4666,7 +4666,7 @@ async function main() {
     await waitForExpression(cdp, `location.pathname === "/"`, PAGE_TIMEOUT_MS);
     check(
       "leaving a whitespace-only untitled draft writes no file",
-      !(await possibleBinary(path.join(dataDir, emptyDraftId + ".md"))),
+      !(emptyDraftId in JSON.parse(await readFile(path.join(dataDir, "metadata.json"), "utf8")).documents),
     );
 
     const titledDraftId = await openNewDraft();
@@ -4686,7 +4686,7 @@ async function main() {
     );
     const index = JSON.parse(await readFile(path.join(dataDir, "metadata.json"), "utf8"));
     equal("a title-only draft keeps its title in the index", index.documents[titledDraftId].title, "Title only");
-    equal("a title-only draft keeps an empty Markdown file", await readFile(path.join(dataDir, titledDraftId + ".md"), "utf8"), "");
+    equal("a title-only draft keeps an empty Markdown file", await readFile(path.join(dataDir, "Title only.md"), "utf8"), "");
 
     await cdp.send("Emulation.setDeviceMetricsOverride", {
       width: 390,
@@ -4732,6 +4732,7 @@ async function main() {
     );
 
     await checkSpellcheck(cdp, base, pressKey, tapToolbar);
+    await checkSpaces(cdp, base, dataDir);
   } finally {
     if (cdp) {
       cdp.close();
@@ -4758,6 +4759,83 @@ async function main() {
   if (failures.length) {
     process.exitCode = 1;
   }
+}
+
+async function checkSpaces(cdp, base, dataDir) {
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 1,
+    mobile: true,
+  });
+  await cdp.send("Page.navigate", { url: base + "/storage" });
+  await waitForPage(cdp, base + "/storage", PAGE_TIMEOUT_MS);
+  await waitForExpression(cdp, `document.getElementById("spaceAdd")?.hidden === false`, PAGE_TIMEOUT_MS);
+  const folder = path.join(dataDir, "work");
+  const notes = "# Draft notes\n\nMarkdown that was here before the Space.\n";
+  await mkdir(folder);
+  await writeFile(path.join(folder, "Draft notes.md"), notes);
+  await evaluate(cdp, `(() => {
+    document.getElementById("spaceAdd").click();
+    document.getElementById("spaceName").value = "Work";
+    const folder = document.getElementById("spaceFolder");
+    folder.value = ${JSON.stringify(folder)};
+    folder.dispatchEvent(new Event("input", { bubbles: true }));
+  })()`);
+  check("the Space dialog fits a 390px viewport", await evaluate(cdp, `document.documentElement.scrollWidth <= innerWidth + 1`));
+  await evaluate(cdp, `(() => {
+    document.getElementById("spaceImport").click();
+    document.getElementById("spaceForm").requestSubmit();
+  })()`);
+  await waitForExpression(cdp, `document.querySelector("#spaceList [data-space-id]")`, PAGE_TIMEOUT_MS);
+  check("Storage reports the imported Markdown file", await evaluate(cdp, `document.getElementById("spaceStatus").textContent.includes("Imported 1 Markdown file.")`));
+  equal("the import leaves the original Markdown untouched", await readFile(path.join(folder, "Draft notes.md"), "utf8"), notes);
+  const space = await evaluate(cdp, `document.querySelector("#spaceList [data-space-id]").dataset.spaceId`);
+  check("Space storage fits a 390px viewport", await evaluate(cdp, `document.documentElement.scrollWidth <= innerWidth + 1`));
+  await cdp.send("Page.navigate", { url: base + "/" });
+  await waitForExpression(cdp, `location.pathname === "/" && document.querySelector('#librarySpace option[value="${space}"]')`, PAGE_TIMEOUT_MS);
+  check("the library Space picker fits a 390px viewport", await evaluate(cdp, `document.documentElement.scrollWidth <= innerWidth + 1`));
+
+  async function chooseSpace(value) {
+    await evaluate(cdp, `(() => {
+      const picker = document.getElementById("librarySpace");
+      picker.value = ${JSON.stringify(value)};
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+    })()`);
+  }
+
+  await chooseSpace(space);
+  equal(
+    "choosing a Space shows its imported document",
+    await evaluate(cdp, `Array.from(document.querySelectorAll(".document-card-title"), (title) => title.textContent).join(", ")`),
+    "Draft notes",
+  );
+  await evaluate(cdp, `document.getElementById("newDocument").click()`);
+  await waitForPage(cdp, base + "/doc/new/", PAGE_TIMEOUT_MS);
+  await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+  const id = await evaluate(cdp, `location.pathname.split("/").pop()`);
+  await evaluate(cdp, `(() => {
+    const title = document.getElementById("documentTitle");
+    title.value = "Space test document";
+    title.dispatchEvent(new Event("input", { bubbles: true }));
+    document.getElementById("backToLibrary").click();
+  })()`);
+  await waitForExpression(cdp, `location.pathname === "/" && document.querySelector('[data-document-id="${id}"]')`, PAGE_TIMEOUT_MS);
+  equal("returning from the editor keeps the Space selected", await evaluate(cdp, `document.getElementById("librarySpace").value`), space);
+  equal("a draft saves into the selected Space folder", await readFile(path.join(folder, "Space test document.md"), "utf8"), "");
+
+  await evaluate(cdp, `(() => {
+    const card = document.querySelector('[data-document-id="${id}"]');
+    card.querySelector(".card-menu-button").click();
+    card.querySelector(".card-move").click();
+    document.getElementById("moveSpace").value = "";
+    document.getElementById("actionConfirm").click();
+  })()`);
+  await waitForExpression(cdp, `!document.getElementById("actionDialog").open && !document.querySelector('[data-document-id="${id}"]')`, PAGE_TIMEOUT_MS);
+  await chooseSpace("general");
+  check("the same document appears in General after moving", await evaluate(cdp, `Boolean(document.querySelector('[data-document-id="${id}"]'))`));
+  equal("the moved Markdown now lives in the main folder", await readFile(path.join(dataDir, "Space test document.md"), "utf8"), "");
+  await cdp.send("Emulation.clearDeviceMetricsOverride");
 }
 
 async function checkSpellcheck(cdp, base, pressKey, tap) {

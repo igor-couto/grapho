@@ -139,6 +139,7 @@ fn separate_folders(data: &Path, backup: &Path) -> Result<(), BackupError> {
 
 enum Job {
     Sync(Uuid),
+    SyncImport(Vec<Uuid>),
     Forget(Uuid),
     /// Copy the whole library, used when a connector is added.
     Seed(BackupLocation, oneshot::Sender<Result<(), BackupError>>),
@@ -200,6 +201,16 @@ impl BackupMirror {
         let _ = self.jobs.send(Job::Sync(id));
     }
 
+    pub fn mirror_space(&self, imported: Vec<Uuid>) {
+        if imported.is_empty() {
+            // The Space changed the index alone.
+            self.mirror_document(Uuid::nil());
+        } else {
+            // Write all imported bodies before publishing their index entries.
+            let _ = self.jobs.send(Job::SyncImport(imported));
+        }
+    }
+
     pub async fn connectors(&self) -> Vec<BackupLocation> {
         self.connectors.read().await.clone()
     }
@@ -257,7 +268,7 @@ impl BackupMirror {
         match &location.target {
             BackupTarget::Folder { path } => {
                 let backup = folder_key(path).await?;
-                separate_folders(&folder_key(&self.store.directory().await).await?, &backup)?;
+                self.validate_backup_folder(&backup).await?;
                 for connector in self.connectors().await {
                     if let BackupTarget::Folder { path: existing } = connector.target {
                         if existing == *path
@@ -409,7 +420,7 @@ impl BackupMirror {
             .backup_snapshot(ids)
             .await
             .map_err(|error| BackupError::io(&data, error))?;
-        if !seed && snapshot.changed.is_empty() {
+        if !seed && !snapshot.index_changed && snapshot.changed.is_empty() {
             return Ok(());
         }
         match &location.target {
@@ -423,10 +434,8 @@ impl BackupMirror {
                 {
                     return Ok(());
                 }
-                separate_folders(
-                    &folder_key(&self.store.directory().await).await?,
-                    &folder_key(path).await?,
-                )?;
+                self.validate_backup_folder(&folder_key(path).await?)
+                    .await?;
                 sync_folder(path, &snapshot, seed).await
             }
             BackupTarget::Ssh { .. } => {
@@ -457,6 +466,13 @@ impl BackupMirror {
 
     async fn seed(&self, location: &BackupLocation) -> Result<(), BackupError> {
         self.sync(location, None).await
+    }
+
+    async fn validate_backup_folder(&self, backup: &Path) -> Result<(), BackupError> {
+        for directory in self.store.directories().await {
+            separate_folders(&folder_key(&directory).await?, backup)?;
+        }
+        Ok(())
     }
 
     fn google_credentials(
@@ -496,13 +512,22 @@ fn check_foreign_files<'a>(
         .filter_map(|name| {
             let path = Path::new(name);
             (path.file_name()?.to_str()? == name)
-                .then(|| store::document_file_id(path))
+                .then(|| store::mirror_document_id(path))
                 .flatten()
         })
         .filter(|id| !known.contains(id))
         .count();
     if documents > 0 {
         return Err(BackupError::Occupied { documents });
+    }
+    Ok(())
+}
+
+fn check_backup_index(bytes: &[u8]) -> Result<(), BackupError> {
+    if !store::is_backup_index(bytes) {
+        return Err(BackupError::invalid(
+            "That folder already holds a metadata.json file that is not a Grapho backup. Choose another folder.",
+        ));
     }
     Ok(())
 }
@@ -516,6 +541,12 @@ async fn sync_folder(
         tokio::fs::create_dir_all(folder)
             .await
             .map_err(|error| BackupError::io(folder, error))?;
+    }
+    let index = folder.join(store::INDEX_FILE);
+    match tokio::fs::read(&index).await {
+        Ok(bytes) => check_backup_index(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(BackupError::io(&index, error)),
     }
     let mut entries = tokio::fs::read_dir(folder)
         .await
@@ -568,12 +599,12 @@ async fn sync_ssh(
         .map_err(|error| BackupError::io(&folder, error))?;
     let result = async {
         let list = sftp::list(&target.dir);
-        let initial_list = if seed {
-            format!("-{list}")
-        } else {
-            list.clone()
-        };
-        let listing = sftp::run(target, &folder, &initial_list)
+        let index_path = sftp::remote_path(&target.dir, store::INDEX_FILE);
+        let download = sftp::download(&index_path, store::INDEX_FILE);
+        // An empty destination has no index yet. If the listing shows one,
+        // require the download to succeed before writing anything.
+        let inspect = format!("{}{list}-{download}", if seed { "-" } else { "" });
+        let listing = sftp::run(target, &folder, &inspect)
             .await
             .map_err(|message| {
                 eprintln!("backup to {} failed: {message}", target.label());
@@ -582,6 +613,13 @@ async fn sync_ssh(
         let names = sftp::parse_listing(&listing);
         if seed {
             check_foreign_files(names.iter().map(String::as_str), &snapshot.known)?;
+        }
+        if names.iter().any(|name| name == store::INDEX_FILE) {
+            let index = folder.join(store::INDEX_FILE);
+            let bytes = tokio::fs::read(&index)
+                .await
+                .map_err(|error| BackupError::io(&index, error))?;
+            check_backup_index(&bytes)?;
         }
         let mut script = sftp::mkdir(&target.dir);
         for (name, bytes) in &snapshot.files {
@@ -634,6 +672,12 @@ fn sync_google(
         .iter()
         .map(|file| (file.name.as_str(), file.id.as_str()))
         .collect();
+    if let Some(index_id) = by_name.get(store::INDEX_FILE) {
+        let index = drive
+            .download_text(&token, index_id)
+            .map_err(google_error)?;
+        check_backup_index(index.as_bytes())?;
+    }
     for (name, bytes) in &snapshot.files {
         drive
             .upload(
@@ -824,6 +868,7 @@ async fn run(
                 Job::Sync(id) => {
                     seen.insert(id);
                 }
+                Job::SyncImport(imported) => seen.extend(imported),
                 Job::Forget(id) => {
                     retries_changed |= retries.remove(&id).is_some();
                 }
@@ -1058,16 +1103,19 @@ mod tests {
     async fn a_folder_from_another_library_is_refused() {
         let (mirror, directory) = test_mirror("stranger").await;
         let target = folder("stranger-target");
-        tokio::fs::create_dir_all(&target).await.unwrap();
-        tokio::fs::write(target.join(format!("{}.md", Uuid::new_v4())), b"{}")
-            .await
-            .unwrap();
+        let foreign = Store::load(target.clone()).await.unwrap();
+        let note = foreign.create().await.unwrap();
+        let index_path = target.join(store::INDEX_FILE);
+        let index = tokio::fs::read(&index_path).await.unwrap();
 
         match add_folder(&mirror, target.clone()).await {
-            Err(BackupError::Occupied { documents }) => assert_eq!(documents, 1),
+            Err(BackupError::Invalid { message }) => assert!(message.contains("metadata.json")),
             other => panic!("expected a refusal, got {other:?}"),
         }
         assert!(mirror.connectors().await.is_empty());
+        assert_eq!(tokio::fs::read(index_path).await.unwrap(), index);
+        let restored = Store::load(target.clone()).await.unwrap();
+        assert!(restored.get(note.id).await.is_some());
 
         let _ = tokio::fs::remove_dir_all(directory).await;
         let _ = tokio::fs::remove_dir_all(target).await;

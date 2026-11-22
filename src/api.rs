@@ -26,7 +26,7 @@ use crate::secrets::{Secret, Secrets};
 use crate::settings::{self, BackupLocation, BackupTarget, Source};
 use crate::store::{
     summary_for, DeletedDocument, Document, DocumentMatch, DocumentSummary, RelocateError,
-    SharedStore, StoreError,
+    SharedStore, Space, SpaceError, SpaceSummary, StoreError,
 };
 
 const BODY_LIMIT_BYTES: usize = 24 * 1024 * 1024;
@@ -118,6 +118,8 @@ pub fn router(store: SharedStore, auth: Option<Arc<Auth>>, options: ServerOption
         .route("/storage", get(storage_page))
         .route("/shortcuts", get(shortcuts_page))
         .route("/api/storage", get(get_storage).put(update_storage))
+        .route("/api/storage/spaces", post(add_space))
+        .route("/api/storage/spaces/{id}", put(update_space))
         .route("/api/storage/backups", post(add_backup))
         .route("/api/storage/backups/ssh", post(add_ssh_backup))
         .route("/api/storage/backups/google", post(start_google_backup))
@@ -142,6 +144,7 @@ pub fn router(store: SharedStore, auth: Option<Arc<Auth>>, options: ServerOption
         // A copy is a new document, so it is created with POST under its source.
         .route("/api/documents/{id}/duplicate", post(duplicate_document))
         .route("/api/documents/{id}/restore", post(restore_document))
+        .route("/api/documents/{id}/space", put(move_document))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let public = Router::new()
@@ -180,18 +183,53 @@ async fn home_page() -> Response {
     )
 }
 
-async fn new_document_page() -> Response {
-    redirect_to(&format!("/doc/new/{}", Uuid::new_v4()))
+#[derive(Deserialize)]
+struct SpaceSelection {
+    space: Option<Uuid>,
 }
 
-async fn draft_page(State(state): State<AppState>, Path(raw_id): Path<String>) -> Response {
+#[derive(Deserialize)]
+struct LibrarySelection {
+    space: Option<String>,
+}
+
+impl LibrarySelection {
+    fn scope(&self) -> Result<Option<Option<Uuid>>, ApiError> {
+        match self.space.as_deref() {
+            None => Ok(None),
+            Some("general") => Ok(Some(None)),
+            Some(id) => Uuid::parse_str(id)
+                .map(|id| Some(Some(id)))
+                .map_err(|_| ApiError::not_found()),
+        }
+    }
+
+    fn document_location(&self, path: String) -> Response {
+        match self.scope() {
+            Ok(None) => redirect_to(&path),
+            Ok(Some(None)) => redirect_to(&format!("{path}?space=general")),
+            Ok(Some(Some(space))) => redirect_to(&format!("{path}?space={space}")),
+            Err(_) => page_not_found(),
+        }
+    }
+}
+
+async fn new_document_page(Query(selection): Query<LibrarySelection>) -> Response {
+    selection.document_location(format!("/doc/new/{}", Uuid::new_v4()))
+}
+
+async fn draft_page(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+    Query(selection): Query<LibrarySelection>,
+) -> Response {
     let Some(id) = parse_document_id(&raw_id) else {
         return page_not_found();
     };
     if state.store.contains_active(id).await {
         // A reload can follow an unload save before the browser has updated
         // the address bar. Reopen the document if its first save made it.
-        return redirect_to(&format!("/doc/{id}"));
+        return selection.document_location(format!("/doc/{id}"));
     }
     editor_html()
 }
@@ -306,6 +344,7 @@ fn encode_query_value(value: &str) -> String {
 #[derive(Serialize)]
 struct DocumentList {
     documents: Vec<DocumentSummary>,
+    spaces: Vec<SpaceSummary>,
     /// Whether this server asks for a password, so the UI knows to offer sign out.
     auth_required: bool,
 }
@@ -313,6 +352,7 @@ struct DocumentList {
 async fn list_documents(State(state): State<AppState>) -> Json<DocumentList> {
     Json(DocumentList {
         documents: state.store.list().await,
+        spaces: state.store.space_summaries().await,
         auth_required: state.auth.is_some(),
     })
 }
@@ -331,6 +371,8 @@ async fn list_deleted_documents(State(state): State<AppState>) -> Json<DeletedDo
 #[derive(Deserialize)]
 struct DocumentSearch {
     q: String,
+    #[serde(flatten)]
+    library: LibrarySelection,
 }
 
 #[derive(Serialize)]
@@ -341,15 +383,20 @@ struct DocumentSearchResults {
 async fn search_documents(
     State(state): State<AppState>,
     Query(query): Query<DocumentSearch>,
-) -> Json<DocumentSearchResults> {
-    Json(DocumentSearchResults {
-        matches: state.store.search(&query.q).await,
-    })
+) -> Result<Json<DocumentSearchResults>, ApiError> {
+    let scope = query.library.scope()?;
+    if let Some(Some(id)) = scope {
+        state.store.require_available_space(id).await?;
+    }
+    Ok(Json(DocumentSearchResults {
+        matches: state.store.search(&query.q, scope).await,
+    }))
 }
 
 #[derive(Serialize)]
 struct DocumentView {
     id: Uuid,
+    space_id: Option<Uuid>,
     title: String,
     content: String,
     paper_width: Option<u32>,
@@ -361,6 +408,7 @@ impl From<Document> for DocumentView {
     fn from(document: Document) -> Self {
         Self {
             id: document.id,
+            space_id: document.space_id,
             title: document.title,
             content: document.content,
             paper_width: document.paper_width,
@@ -370,8 +418,11 @@ impl From<Document> for DocumentView {
     }
 }
 
-async fn create_document(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
-    let document = state.store.create().await?;
+async fn create_document(
+    State(state): State<AppState>,
+    Query(selection): Query<SpaceSelection>,
+) -> Result<impl IntoResponse, ApiError> {
+    let document = state.store.create_in_space(selection.space).await?;
     state.backups.mirror_document(document.id);
     Ok((StatusCode::CREATED, Json(DocumentView::from(document))))
 }
@@ -401,6 +452,7 @@ async fn get_document(
     Path(raw_id): Path<String>,
 ) -> Result<Json<DocumentView>, ApiError> {
     let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
+    state.store.require_document_space(id).await?;
     let document = state.store.get(id).await.ok_or_else(ApiError::not_found)?;
     Ok(Json(DocumentView::from(document)))
 }
@@ -410,6 +462,7 @@ async fn get_document_title(
     Path(raw_id): Path<String>,
 ) -> Result<Json<String>, ApiError> {
     let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
+    state.store.require_document_space(id).await?;
     state
         .store
         .title(id)
@@ -491,12 +544,19 @@ async fn update_document(
 async fn save_draft(
     State(state): State<AppState>,
     Path(raw_id): Path<String>,
+    Query(selection): Query<SpaceSelection>,
     Json(patch): Json<UpdateDocumentRequest>,
 ) -> Result<Json<DocumentView>, ApiError> {
     let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
     let document = state
         .store
-        .save_draft(id, patch.title, patch.content, patch.paper_width)
+        .save_draft_in_space(
+            id,
+            patch.title,
+            patch.content,
+            patch.paper_width,
+            selection.space,
+        )
         .await?
         .ok_or_else(ApiError::not_found)?;
     state.backups.mirror_document(document.id);
@@ -524,6 +584,25 @@ async fn restore_document(
     let document = state
         .store
         .restore(id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    state.backups.mirror_document(id);
+    Ok(Json(summary_for(&document)))
+}
+
+#[derive(Deserialize)]
+struct MoveDocumentRequest {
+    space_id: Option<Uuid>,
+}
+
+async fn move_document(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<MoveDocumentRequest>,
+) -> Result<Json<DocumentSummary>, ApiError> {
+    let document = state
+        .store
+        .move_document(id, payload.space_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
     state.backups.mirror_document(id);
@@ -603,9 +682,20 @@ struct StorageView {
     bytes: u64,
     /// Absent when the platform or the folder cannot answer.
     disk: Option<disk::DiskSpace>,
+    spaces: Vec<SpaceStorageView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    imported_documents: Option<usize>,
     backups: Vec<BackupView>,
     /// False when the platform gives nowhere to remember backup folders.
     backups_editable: bool,
+}
+
+#[derive(Serialize)]
+struct SpaceStorageView {
+    id: Uuid,
+    name: String,
+    folder: Option<String>,
+    available: bool,
 }
 
 async fn storage_view(state: &AppState) -> StorageView {
@@ -644,6 +734,19 @@ async fn storage_view(state: &AppState) -> StorageView {
         documents: usage.documents,
         bytes: usage.bytes,
         disk: disk::space_for(&path),
+        imported_documents: None,
+        spaces: state
+            .store
+            .spaces()
+            .await
+            .into_iter()
+            .map(|(id, space, available)| SpaceStorageView {
+                id,
+                name: space.name,
+                folder: space.folder.map(|folder| folder.display().to_string()),
+                available,
+            })
+            .collect(),
         backups,
         backups_editable: state.settings_file.is_some(),
     }
@@ -651,6 +754,79 @@ async fn storage_view(state: &AppState) -> StorageView {
 
 async fn get_storage(State(state): State<AppState>) -> Json<StorageView> {
     Json(storage_view(&state).await)
+}
+
+#[derive(Deserialize)]
+struct SaveSpaceRequest {
+    name: String,
+    folder: Option<String>,
+    #[serde(default)]
+    import_markdown: bool,
+}
+
+async fn add_space(
+    State(state): State<AppState>,
+    Json(payload): Json<SaveSpaceRequest>,
+) -> Result<(StatusCode, Json<StorageView>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        save_space(&state, None, payload).await?,
+    ))
+}
+
+async fn update_space(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<SaveSpaceRequest>,
+) -> Result<Json<StorageView>, ApiError> {
+    save_space(&state, Some(id), payload).await
+}
+
+async fn save_space(
+    state: &AppState,
+    id: Option<Uuid>,
+    payload: SaveSpaceRequest,
+) -> Result<Json<StorageView>, ApiError> {
+    let folder = payload
+        .folder
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
+    if folder.is_some_and(|path| path.contains('\0') || path.chars().count() > 4096) {
+        return Err(ApiError::bad_request("That folder path can't be used."));
+    }
+    let folder = folder.map(PathBuf::from);
+    let imported = {
+        let _guard = state.settings_lock.lock().await;
+        if let Some(id) = id {
+            state.store.require_available_space(id).await?;
+        }
+        if let Some(path) = &folder {
+            state
+                .backups
+                .validate_data_folder(path)
+                .await
+                .map_err(backup_error)?;
+        }
+        state.store.save_space(id, Space { name: payload.name, folder }, payload.import_markdown)
+            .await
+            .map_err(|error| match error {
+                SpaceError::Name => ApiError::bad_request("Enter a Space name of up to 80 characters."),
+                SpaceError::NameTaken => ApiError::conflict("That Space name is already in use."),
+                SpaceError::Missing => ApiError::not_found(),
+                SpaceError::Import(message) => ApiError::bad_request(message),
+                SpaceError::Folder(RelocateError::Occupied { .. }) => ApiError::conflict(
+                    "That folder holds documents from another library or Space. Choose an empty folder.",
+                ),
+                SpaceError::Folder(error) => relocation_error(error),
+                SpaceError::Store(error) => error.into(),
+            })?
+    };
+    let count = imported.len();
+    state.backups.mirror_space(imported);
+    let mut view = storage_view(state).await;
+    view.imported_documents = payload.import_markdown.then_some(count);
+    Ok(Json(view))
 }
 
 #[derive(Deserialize)]
@@ -1129,6 +1305,9 @@ fn relocation_error(error: RelocateError) -> ApiError {
         RelocateError::SameDirectory => {
             ApiError::bad_request("That is already the folder Grapho uses.")
         }
+        RelocateError::SpaceDirectory => {
+            ApiError::conflict("That folder is already used by Grapho. Choose a different folder.")
+        }
         RelocateError::Occupied { documents } => {
             let what = if documents == 1 {
                 "a document from another Grapho library".to_owned()
@@ -1490,6 +1669,15 @@ impl From<StoreError> for ApiError {
         if matches!(error, StoreError::EmptyDraft) {
             return Self::bad_request("Add a title or some content before saving.");
         }
+        if matches!(error, StoreError::UnknownSpace) {
+            return Self::bad_request("That Space doesn't exist.");
+        }
+        if matches!(error, StoreError::UnavailableSpace) {
+            return Self {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                message: "This Space's storage folder is unavailable. Reconnect the folder, then restart Grapho.".to_owned(),
+            };
+        }
         eprintln!("document store error: {error}");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -1549,8 +1737,17 @@ mod tests {
         drive: Drive,
     ) -> (Router, PathBuf, Arc<BackupMirror>) {
         let directory = std::env::temp_dir().join(format!("grapho-api-test-{}", Uuid::new_v4()));
+        let (app, backups) = test_app_for_directory(&directory, password, drive).await;
+        (app, directory, backups)
+    }
+
+    async fn test_app_for_directory(
+        directory: &std::path::Path,
+        password: Option<&str>,
+        drive: Drive,
+    ) -> (Router, Arc<BackupMirror>) {
         let store = Arc::new(
-            Store::load(directory.clone())
+            Store::load(directory.to_owned())
                 .await
                 .expect("test store loads"),
         );
@@ -1577,7 +1774,6 @@ mod tests {
                     secrets,
                 },
             ),
-            directory,
             backups,
         )
     }
@@ -1725,7 +1921,7 @@ mod tests {
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        let file = directory.join(format!("{id}.md"));
+        let file = directory.join("Title only.md");
         let endpoint = format!("/api/documents/{id}/draft");
         let mut request = put_json(&endpoint, serde_json::json!({}));
         with_cookie(&mut request, &cookie);
@@ -1800,6 +1996,16 @@ mod tests {
             response.headers().get(header::CACHE_CONTROL).unwrap(),
             "no-store"
         );
+
+        let response = app
+            .clone()
+            .oneshot(post_json(
+                "/api/storage/spaces",
+                serde_json::json!({ "name": "Work" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
         let duplicate = Request::builder()
             .method("POST")
@@ -2128,6 +2334,381 @@ mod tests {
         ))));
     }
 
+    #[tokio::test]
+    async fn an_unreachable_space_is_reported_without_blocking_the_library() {
+        use serde_json::json;
+
+        let (app, root) = test_app(None).await;
+        let desktop = root.join("desktop");
+        let reachable = root.join("reachable");
+        for (name, folder) in [("Desktop", &desktop), ("Reachable", &reachable)] {
+            let response = app
+                .clone()
+                .oneshot(post_json(
+                    "/api/storage/spaces",
+                    json!({ "name": name, "folder": folder }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+
+        let storage = json_body(app.clone().oneshot(get("/api/storage")).await.unwrap()).await;
+        let desktop_id = storage["spaces"][0]["id"].as_str().unwrap();
+        let reachable_id = storage["spaces"][1]["id"].as_str().unwrap();
+        let offline_id = Uuid::new_v4();
+        let reachable_doc = Uuid::new_v4();
+        for (space, doc) in [(desktop_id, offline_id), (reachable_id, reachable_doc)] {
+            let response = app
+                .clone()
+                .oneshot(put_json(
+                    &format!("/api/documents/{doc}/draft?space={space}"),
+                    json!({ "title": "Project notes", "content": "<p>Original body</p>" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        drop(app);
+
+        let disconnected = root.join("disconnected");
+        tokio::fs::rename(&desktop, &disconnected).await.unwrap();
+        let (app, _) = test_app_for_directory(&root, None, Drive::new()).await;
+        let listing = json_body(app.clone().oneshot(get("/api/documents")).await.unwrap()).await;
+        assert_eq!(listing["spaces"][0]["available"], false);
+        assert_eq!(listing["spaces"][1]["available"], true);
+        assert_eq!(listing["documents"].as_array().unwrap().len(), 1);
+        assert_eq!(listing["documents"][0]["id"], reachable_doc.to_string());
+
+        let storage = json_body(app.clone().oneshot(get("/api/storage")).await.unwrap()).await;
+        assert_eq!(storage["spaces"][0]["available"], false);
+
+        let doc_path = format!("/api/documents/{offline_id}");
+        let response = app
+            .clone()
+            .oneshot(get(&format!("/doc/{offline_id}")))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the editor can display the error"
+        );
+        for request in [
+            get(&doc_path),
+            get(&format!("/api/documents/search?q=notes&space={desktop_id}")),
+            post_json(&format!("/api/documents?space={desktop_id}"), json!({})),
+            put_json(
+                &format!("{doc_path}/draft"),
+                json!({ "title": "An old tab's edit" }),
+            ),
+            put_json(
+                &format!("/api/storage/spaces/{desktop_id}"),
+                json!({ "name": "Desktop", "folder": desktop }),
+            ),
+            put_json(
+                &format!("/api/documents/{reachable_doc}/space"),
+                json!({ "space_id": desktop_id }),
+            ),
+        ] {
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(json_body(response).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("storage folder is unavailable"));
+        }
+        let response = app
+            .oneshot(post_json("/api/documents", json!({})))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::CREATED,
+            "General is still writable"
+        );
+        assert!(
+            !desktop.exists(),
+            "a save must not recreate the missing folder"
+        );
+
+        // An unmounted share can also leave an empty mount point behind.
+        tokio::fs::create_dir(&desktop).await.unwrap();
+        let (app, _) = test_app_for_directory(&root, None, Drive::new()).await;
+        let response = app.oneshot(get(&doc_path)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        tokio::fs::remove_dir(&desktop).await.unwrap();
+        tokio::fs::rename(&disconnected, &desktop).await.unwrap();
+
+        let (app, _) = test_app_for_directory(&root, None, Drive::new()).await;
+        let document = json_body(app.oneshot(get(&doc_path)).await.unwrap()).await;
+        assert_eq!(document["space_id"], desktop_id);
+        assert_eq!(document["content"], "<p>Original body</p>");
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn space_folders_keep_documents_searchable_and_mirrored() {
+        use serde_json::json;
+
+        let (app, root, mirror) = test_app_with_mirror(None, Drive::new()).await;
+        let folder = root.with_extension("work");
+        let new_folder = root.join("project");
+        let backup = std::env::temp_dir().join(format!("grapho-space-backup-{}", Uuid::new_v4()));
+        let request =
+            |request| async { json_body(app.clone().oneshot(request).await.unwrap()).await };
+
+        let document = request(post_json("/api/documents", json!({}))).await;
+        let id = document["id"].as_str().unwrap();
+        let doc_path = format!("/api/documents/{id}");
+        let body = "Project brief.md";
+        let image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/1i9fWwAAAABJRU5ErkJggg==";
+        let document = request(put_json(
+            &doc_path,
+            json!({ "title": "Project brief", "content": format!("<p>shared phrase</p><p><img src=\"{image}\" alt=\"diagram\"></p>") }),
+        )).await;
+        assert!(document["space_id"].is_null());
+        assert!(root.join(body).is_file());
+
+        let storage = request(post_json("/api/storage/spaces", json!({ "name": "Work" }))).await;
+        let space = storage["spaces"][0]["id"].as_str().unwrap();
+        let space_path = format!("/api/storage/spaces/{space}");
+        let move_path = format!("{doc_path}/space");
+        let moved = request(put_json(&move_path, json!({ "space_id": space }))).await;
+        assert_eq!(moved["id"], id);
+        assert_eq!(moved["space_id"], space);
+        assert_eq!(moved["updated_at"], document["updated_at"]);
+        assert!(root.join(body).is_file());
+
+        let storage = request(put_json(
+            &space_path,
+            json!({ "name": "Work", "folder": folder }),
+        ))
+        .await;
+        assert_eq!(storage["spaces"][0]["folder"], json!(folder));
+        assert!(!root.join(body).exists());
+        let source = std::fs::read_to_string(folder.join(body)).unwrap();
+        assert!(source.contains("shared phrase") && !source.contains("data:image"));
+        let general = request(get("/api/documents/search?q=shared+phrase&space=general")).await;
+        assert_eq!(general["matches"], json!([]));
+        let work = request(get(&format!(
+            "/api/documents/search?q=shared+phrase&space={space}"
+        )))
+        .await;
+        assert_eq!(work["matches"][0]["id"], id);
+
+        let draft_id = Uuid::new_v4();
+        let draft = request(put_json(
+            &format!("/api/documents/{draft_id}/draft?space={space}"),
+            json!({ "title": "Work notes" }),
+        ))
+        .await;
+        assert_eq!(draft["space_id"], space);
+        assert!(folder.join("Work notes.md").is_file());
+
+        let copy = request(post_json(&format!("{doc_path}/duplicate"), json!({}))).await;
+        let copy_id = copy["id"].as_str().unwrap();
+        let copy_file = "Project brief (copy).md";
+        assert_eq!(copy["space_id"], space);
+        assert!(folder.join(copy_file).is_file());
+        let deleted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/documents/{copy_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+
+        let conflict = app
+            .clone()
+            .oneshot(post_json("/api/storage/backups", json!({ "path": folder })))
+            .await
+            .unwrap();
+        assert!(!conflict.status().is_success());
+        let storage = request(post_json("/api/storage/backups", json!({ "path": backup }))).await;
+        assert_eq!(storage["backups"].as_array().unwrap().len(), 1);
+
+        let changed = request(put_json(
+            &space_path,
+            json!({ "name": "Project", "folder": new_folder }),
+        ))
+        .await;
+        assert_eq!(changed["spaces"][0]["name"], "Project");
+        assert!(new_folder.join(copy_file).is_file());
+        assert!(
+            folder.join(body).is_file(),
+            "the previous custom folder keeps its copy"
+        );
+        let reopened = Store::load(root.clone()).await.unwrap();
+        let reopened_doc = reopened.get(id.parse().unwrap()).await.unwrap();
+        assert_eq!(reopened_doc.space_id, Some(space.parse().unwrap()));
+        assert!(reopened_doc.content.contains(image));
+        assert_eq!(reopened.list_deleted().await.len(), 1);
+
+        assert!(mirror.flush(Duration::from_secs(3)).await);
+        let recovered = Store::load(backup.clone()).await.unwrap();
+        let recovered_doc = recovered.get(id.parse().unwrap()).await.unwrap();
+        assert_eq!(recovered_doc.space_id, reopened_doc.space_id);
+        assert_eq!(recovered_doc.content, reopened_doc.content);
+        let spaces = recovered.spaces().await;
+        assert_eq!(spaces[0].1.name, "Project");
+        assert_eq!(spaces[0].1.folder, None);
+        assert!(!backup.join(copy_file).exists());
+
+        let moved_back = request(put_json(&move_path, json!({ "space_id": null }))).await;
+        assert_eq!(moved_back["id"], id);
+        assert!(moved_back["space_id"].is_null());
+        assert!(root.join(body).is_file());
+        assert!(!new_folder.join(body).exists());
+        assert!(mirror.flush(Duration::from_secs(3)).await);
+        let _ = tokio::fs::remove_dir_all(root).await;
+        let _ = tokio::fs::remove_dir_all(folder).await;
+        let _ = tokio::fs::remove_dir_all(backup).await;
+    }
+
+    #[tokio::test]
+    async fn creating_a_space_imports_markdown_in_place_and_mirrors_the_batch() {
+        use serde_json::json;
+        use tokio::fs;
+
+        let (app, root, mirror) = test_app_with_mirror(None, Drive::new()).await;
+        let folder = root.join("notes");
+        let backup = root.with_extension("backup");
+        let source = "# Draft\r\n\r\nWork with **Grapho**.\r\n";
+        fs::create_dir_all(folder.join("subfolder")).await.unwrap();
+        fs::write(folder.join("Project notes.md"), source)
+            .await
+            .unwrap();
+        fs::write(folder.join("Ideas.MD"), "Another idea.")
+            .await
+            .unwrap();
+        fs::write(folder.join("subfolder").join("Nested.md"), "Nested")
+            .await
+            .unwrap();
+        fs::write(folder.join("Readme.txt"), "Other file")
+            .await
+            .unwrap();
+        let response = app
+            .clone()
+            .oneshot(post_json("/api/storage/backups", json!({ "path": backup })))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(post_json(
+                "/api/storage/spaces",
+                json!({ "name": "Notes", "folder": folder, "import_markdown": true }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let storage = json_body(response).await;
+        assert_eq!(storage["imported_documents"], 2);
+        assert_eq!(storage["documents"], 2);
+        let space = storage["spaces"][0]["id"].as_str().unwrap();
+        let results = json_body(
+            app.oneshot(get(&format!(
+                "/api/documents/search?q=Work+with+Grapho&space={space}"
+            )))
+            .await
+            .unwrap(),
+        )
+        .await;
+        let matches = results["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0]["title"], "Project notes");
+        let id: Uuid = matches[0]["id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(
+            fs::read_to_string(folder.join("Project notes.md"))
+                .await
+                .unwrap(),
+            source
+        );
+
+        let reopened = Store::load(root.clone()).await.unwrap();
+        let document = reopened.get(id).await.unwrap();
+        assert_eq!(document.space_id, Some(space.parse().unwrap()));
+        assert_eq!(
+            document.content,
+            "<h1>Draft</h1><p>Work with <b>Grapho</b>.</p>"
+        );
+        assert_eq!(reopened.list().await.len(), 2);
+
+        assert!(mirror.flush(Duration::from_secs(3)).await);
+        let mirrored = Store::load(backup.clone()).await.unwrap();
+        assert_eq!(mirrored.list().await.len(), 2);
+        assert_eq!(mirrored.get(id).await.unwrap().space_id, document.space_id);
+
+        let updated = reopened
+            .update(id, None, Some("<p>Updated in Grapho.</p>".to_owned()), None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.title, "Project notes");
+        assert_eq!(
+            fs::read_to_string(folder.join("Project notes.md"))
+                .await
+                .unwrap(),
+            "Updated in Grapho.\n"
+        );
+        fs::remove_dir_all(root).await.unwrap();
+        fs::remove_dir_all(backup).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn import_is_optional_and_an_unreadable_markdown_file_leaves_no_partial_space() {
+        use serde_json::json;
+        use tokio::fs;
+
+        let (app, root) = test_app(None).await;
+        let folder = root.join("notes");
+        fs::create_dir(&folder).await.unwrap();
+        fs::write(folder.join("Notes.md"), "Existing text")
+            .await
+            .unwrap();
+        fs::write(folder.join("Invalid.md"), [0xff]).await.unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(post_json(
+                "/api/storage/spaces",
+                json!({ "name": "Notes", "folder": folder, "import_markdown": true }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(json_body(response).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid.md"));
+        assert!(!root.join(crate::store::INDEX_FILE).exists());
+        assert_eq!(
+            fs::read_to_string(folder.join("Notes.md")).await.unwrap(),
+            "Existing text"
+        );
+
+        let response = app
+            .oneshot(post_json(
+                "/api/storage/spaces",
+                json!({ "name": "Notes", "folder": folder }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let storage = json_body(response).await;
+        assert_eq!(storage["documents"], 0);
+        assert_eq!(storage["spaces"].as_array().unwrap().len(), 1);
+        assert!(storage.get("imported_documents").is_none());
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
     fn put_json(uri: &str, body: serde_json::Value) -> Request {
         Request::builder()
             .method("PUT")
@@ -2358,9 +2939,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
-        let created = json_body(response).await;
-        let id = created["id"].as_str().expect("a document id").to_owned();
-
         let response = app
             .clone()
             .oneshot(put_json(
@@ -2378,9 +2956,9 @@ mod tests {
             "the page reports the choice it just saved"
         );
         assert_eq!(body["documents"], 1);
-        assert!(target.join(format!("{id}.md")).exists());
+        assert!(target.join("Untitled document.md").exists());
         assert!(
-            directory.join(format!("{id}.md")).exists(),
+            directory.join("Untitled document.md").exists(),
             "the old folder keeps its copy"
         );
 
@@ -2433,8 +3011,10 @@ mod tests {
         );
 
         let occupied = std::env::temp_dir().join(format!("grapho-api-full-{}", Uuid::new_v4()));
-        tokio::fs::create_dir_all(&occupied).await.unwrap();
-        tokio::fs::write(occupied.join(format!("{}.md", Uuid::new_v4())), b"{}")
+        Store::load(occupied.clone())
+            .await
+            .unwrap()
+            .create()
             .await
             .unwrap();
 
@@ -2832,7 +3412,7 @@ mod tests {
         );
 
         // The copy is a file on disk like any other document.
-        assert!(directory.join(format!("{copy_id}.md")).exists());
+        assert!(directory.join("Field notes (copy).md").exists());
 
         // An unknown document has nothing to copy.
         let response = app

@@ -42,7 +42,7 @@
   <main class="storage-main shell">
     <section class="storage-card" aria-labelledby="storageTitle">
       <h1 id="storageTitle">Storage</h1>
-      <p class="storage-intro">Grapho keeps your Markdown documents, metadata, and images in a folder you choose.</p>
+      <p class="storage-intro">Choose where Grapho keeps your documents and backups.</p>
 
       <section class="storage-section" aria-labelledby="statisticsTitle">
         <h2 id="statisticsTitle">Statistics</h2>
@@ -56,7 +56,7 @@
             <dd id="storageUsed">—</dd>
           </div>
           <div class="storage-fact" id="storageFreeRow" hidden>
-            <dt>Disk space</dt>
+            <dt>Main disk space</dt>
             <dd id="storageFree">—</dd>
           </div>
         </dl>
@@ -64,7 +64,7 @@
       </section>
 
       <section class="storage-section" aria-labelledby="storageFolderTitle">
-        <h2 id="storageFolderTitle">Storage folder</h2>
+        <h2 id="storageFolderTitle">Main data folder</h2>
         <div class="storage-path-row">
           <p class="storage-path is-loading" id="storagePath">Reading the folder…</p>
           <button class="storage-edit" type="button" id="storageEdit" title="Change data folder" aria-label="Change data folder" aria-haspopup="dialog" aria-controls="folderDialog" hidden>
@@ -77,6 +77,16 @@
         <p class="storage-source" id="storageSource" hidden></p>
         <p class="storage-status storage-folder-status" id="storageStatus" role="status" aria-live="polite"></p>
         <p class="storage-locked" id="storageLocked" hidden></p>
+      </section>
+
+      <section class="storage-section" id="spaces" aria-labelledby="storageSpacesTitle">
+        <div class="storage-spaces-header">
+          <h2 id="storageSpacesTitle">Spaces</h2>
+          <button class="button button-quiet" type="button" id="spaceAdd" aria-haspopup="dialog" hidden>New Space</button>
+        </div>
+        <p class="storage-intro">General uses the main data folder. Give any other Space its own folder for Markdown files and images.</p>
+        <ul class="storage-space-list" id="spaceList" aria-label="Spaces" hidden></ul>
+        <p class="storage-status storage-folder-status" id="spaceStatus" role="status"></p>
       </section>
 
       <section class="storage-section backups" aria-labelledby="backupsTitle">
@@ -189,16 +199,43 @@
   <dialog class="modal modal-small" id="folderDialog" aria-labelledby="folderTitle">
     <form class="modal-panel" id="folderForm">
       <h2 id="folderTitle">Change data folder</h2>
-      <p class="modal-description">Grapho keeps your Markdown documents, metadata, and images in this folder.</p>
+      <p class="modal-description">This folder holds the library's metadata and the documents that use the main folder.</p>
       <label class="field">
         <span>Folder path</span>
         <input id="folderPathInput" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="Paste a folder path" aria-describedby="folderHint">
       </label>
-      <p class="folder-hint" id="folderHint">Your documents are copied to the new folder, and Grapho writes there from then on. The old folder is left exactly as it is.</p>
+      <p class="folder-hint" id="folderHint">Grapho copies the files from the current main folder and writes to the new folder from then on.</p>
       <p class="field-error" id="folderError" role="alert" hidden></p>
       <div class="modal-actions">
         <button class="button button-quiet" type="button" id="folderCancel">Cancel</button>
         <button class="button button-primary" type="submit" id="folderConfirm">Use this folder</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="modal modal-small" id="spaceDialog" aria-labelledby="spaceTitle">
+    <form class="modal-panel" id="spaceForm">
+      <h2 id="spaceTitle">New Space</h2>
+      <label class="field">
+        <span>Name</span>
+        <input id="spaceName" type="text" maxlength="80" autocomplete="off" required autofocus>
+      </label>
+      <label class="field">
+        <span>Folder path</span>
+        <input id="spaceFolder" type="text" maxlength="4096" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="Use the main data folder" aria-describedby="spaceFolderHint">
+      </label>
+      <p class="folder-hint" id="spaceFolderHint">Enter a full path on the machine running Grapho, or leave it blank to use the main data folder.</p>
+      <div id="spaceImportOption" hidden>
+        <label class="space-import">
+          <input type="checkbox" id="spaceImport" aria-describedby="spaceImportHint" disabled>
+          <span>Import existing Markdown files</span>
+        </label>
+        <p class="folder-hint" id="spaceImportHint">Grapho uses filenames as titles and edits the original files in this folder.</p>
+      </div>
+      <p class="field-error" id="spaceError" role="alert" hidden></p>
+      <div class="modal-actions">
+        <button class="button button-quiet" type="button" id="spaceCancel">Cancel</button>
+        <button class="button button-primary" type="submit" id="spaceSave">Create Space</button>
       </div>
     </form>
   </dialog>
@@ -235,6 +272,21 @@
         <p class="backup-state"></p>
       </div>
       <button class="text-button backup-remove" type="button">Remove</button>
+    </li>
+  </template>
+  <template id="spaceRowTemplate">
+    <li class="storage-space-row">
+      <div class="backup-copy">
+        <p class="storage-space-name"></p>
+        <p class="backup-path"></p>
+        <p class="backup-state is-error" hidden>Storage folder unavailable. Reconnect it, then restart Grapho.</p>
+      </div>
+      <button class="storage-edit" type="button" aria-haspopup="dialog">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="m4 20 4.2-1L19 8.2 15.8 5 5 15.8 4 20Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+          <path d="m13.8 7 3.2 3.2" stroke="currentColor" stroke-width="1.5"/>
+        </svg>
+      </button>
     </li>
   </template>
 </body>

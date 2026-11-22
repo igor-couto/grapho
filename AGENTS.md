@@ -117,20 +117,34 @@ Data flow is deliberately simple:
 1. The browser loads static HTML/CSS/JS. When a password is configured, every
    page and API call also needs a session cookie.
 2. The UI uses the JSON API for document operations.
-3. The Rust store keeps documents in an in-memory map. A `<uuid>.md` file holds
-   the body, `metadata.json` holds titles, dates, deletion state and layout, and
-   relative links point to image files beside the Markdown.
-4. The store reads and sanitizes Markdown on startup. Keep the index versioned
-   and use `#[serde(default)]` when adding optional fields. Earlier per-document
-   JSON files are ignored.
+3. The Rust store keeps documents in an in-memory map. A title-based `.md` file
+   holds the body. The shared `metadata.json` maps stable UUIDs to filenames and
+   stores titles, dates, deletion state and layout. Relative links point to image
+   files beside the Markdown.
+4. The store reads the indexed files and sanitizes Markdown on startup. Keep the
+   index versioned and use `#[serde(default)]` when adding optional fields.
+   Earlier storage formats are unsupported.
+
+Spaces are defined in the same `metadata.json`, which lives in the main data
+folder. Documents without a Space ID belong to General. A named Space can use
+the main folder or an absolute path configured in Storage. Bodies and images
+move together while the document ID stays stable. Use the store's folder lookup
+for file access. A move copies files first and commits the shared index
+before cleaning up the previous location. Renames use the same order, and
+case-only edits preserve filename capitalization. Backups keep UUID filenames,
+retain all groups in their index, and omit machine-specific Space paths.
+Creating a Space can opt into importing the folder's existing Markdown. Read
+regular top-level `.md` files using the usual Markdown parser and sanitizer,
+keep the filenames and bodies, and commit all document entries with the Space
+in one metadata write. Queue their IDs as one batch for the backup worker.
 
 The default data directory is per-user, not the working directory:
 `$XDG_DATA_HOME/grapho` or `~/.local/share/grapho` on Linux,
 `~/Library/Application Support/Grapho` on macOS, and `%LOCALAPPDATA%\Grapho` on
 Windows. Package managers start the binary from arbitrary directories
 (`brew services` from `/`, a Chocolatey shim from `System32`), so a relative
-default would scatter documents. A `./data` folder that already holds `<uuid>.md`
-files wins, which keeps checkouts and copied folders portable, and
+default would scatter documents. A `./data` folder with documents or Spaces
+in its index wins, which keeps checkouts and copied folders portable, and
 `GRAPHO_DATA_DIR` overrides everything. The container image sets that variable
 to `/data` explicitly.
 
@@ -147,13 +161,11 @@ unreadable, or malformed settings file just means "no saved choice".
 
 The Storage page (`/storage`, protected like the documents because it reveals a
 filesystem path) shows the folder, document count, bytes used, and free space
-from `statvfs` or `GetDiskFreeSpaceExW`. Changing the folder copies every
-document into the new folder through the same temporary-file-and-replace path
-before the store switches, so the previous folder is left behind as a complete
-copy. A folder holding documents that are not in the library is refused instead
-of merged; a folder holding copies of the library's own documents (such as the
-previous folder) is accepted. `GRAPHO_DATA_DIR` cannot be overruled from the
-browser.
+from `statvfs` or `GetDiskFreeSpaceExW`. Changing the main folder copies its
+documents, dictionary, and shared metadata before the store switches. The
+previous files stay in place and Spaces with dedicated folders keep their
+paths. A target can be empty or hold the library's own copies.
+`GRAPHO_DATA_DIR` sets the main folder when supplied.
 
 The same page adds backup connectors: a folder that receives a copy of every
 save, an SSH server reached over SFTP, or a Google Drive folder. A OneDrive or
@@ -638,12 +650,11 @@ These should not be casually changed:
   first, then the folder saved on the Storage page, then `./data` when it holds
   documents, then the per-user default. The Storage page must not overrule the
   environment.
-- Changing the folder copies every document before the switch and never deletes
-  the previous folder's files. A target holding documents from another library is
-  refused, not merged; the store's own copies are accepted, which is what makes
-  choosing the previous folder again work.
-- `/storage` and `/api/storage` stay on the protected router: the page reveals a
-  filesystem path and the route moves the whole library. The settings file is
+- Changing the main folder copies the documents stored there before the switch
+  and leaves the previous folder's files in place. A target can be empty or hold
+  the store's own copies, which makes choosing the previous folder again work.
+- `/storage` and its API routes stay on the protected router because they reveal
+  filesystem paths and change where documents are written. The settings file is
   written outside the data directory it describes.
 - Free space is best effort (`disk.rs`). When the platform or the folder cannot
   answer, hide the numbers instead of guessing or failing the page.
