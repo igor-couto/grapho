@@ -123,7 +123,9 @@ Data flow is deliberately simple:
    files beside the Markdown.
 4. The store reads the indexed files and sanitizes Markdown on startup. Keep the
    index versioned and use `#[serde(default)]` when adding optional fields.
-   Earlier storage formats are unsupported.
+   Version 1 Markdown indexes discover bodies and attachments by UUID on read.
+   Startup leaves the files alone. The next document or Space change writes the
+   current index. Pre-Markdown storage formats are unsupported.
 
 Spaces are defined in the same `metadata.json`, which lives in the main data
 folder. Documents without a Space ID belong to General. A named Space can use
@@ -217,6 +219,23 @@ opened, and never in the background: if it fails, is rate limited, or the
 browser has no network, the page says so and nothing else changes.
 
 ## Library
+
+The library's Extensions dialog remembers opt-in features in localStorage.
+New Document shows a type picker when a document extension is enabled.
+Boards use the ordinary document ID, filename, Space, and backup paths, with a
+board flag in the index. Board saves keep the source Markdown verbatim and
+derive a sanitized HTML projection for library previews and search. The board
+page renders columns and cards in the browser. Visual edits and moves update
+the Markdown source, and both views share a debounced, serialized save path.
+During a drag, the floating card and drop gap are temporary DOM. Pointer release
+over a column commits a single move through the normal save path. Keep
+board source out of the rich editor's HTML-to-Markdown save path.
+
+Draw adds a Drawing option to the same picker. Its SVG view box is a square
+from 0 to 1000 on each axis. Complete strokes are arrays of integer coordinate
+pairs saved in a versioned fence in the document's Markdown body. The index
+marks drawings so the normal document URL serves the pencil canvas. Draw only
+controls creation in the picker. Existing drawings can always open and save.
 
 The home page shows documents as rows or as grid cards. A grid card leads with a
 miniature of the document's beginning. The miniature is not an image and is not

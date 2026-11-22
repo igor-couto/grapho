@@ -136,7 +136,7 @@ fn attributes(mut opening: &str) -> impl Iterator<Item = (&str, &str)> {
     })
 }
 
-fn escape_markdown(text: &str) -> String {
+pub(crate) fn escape_markdown(text: &str) -> String {
     let mut output = String::new();
     for c in text.chars() {
         if matches!(c, '\\' | '*' | '_' | '~' | '[' | ']' | '<' | '>' | '\x60') {

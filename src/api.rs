@@ -25,8 +25,9 @@ use crate::drive::{self, Drive, OAuthStore, Pending};
 use crate::secrets::{Secret, Secrets};
 use crate::settings::{self, BackupLocation, BackupTarget, Source};
 use crate::store::{
-    summary_for, DeletedDocument, Document, DocumentMatch, DocumentSummary, RelocateError,
-    SharedStore, Space, SpaceError, SpaceSummary, StoreError,
+    drawing_strokes, summary_for, DeletedDocument, Document, DocumentKind, DocumentMatch,
+    DocumentSummary, PencilStrokes, RelocateError, SharedStore, Space, SpaceError, SpaceSummary,
+    StoreError,
 };
 
 const BODY_LIMIT_BYTES: usize = 24 * 1024 * 1024;
@@ -110,6 +111,10 @@ pub fn router(store: SharedStore, auth: Option<Arc<Auth>>, options: ServerOption
     // deliberately short.
     let protected = Router::new()
         .route("/", get(home_page))
+        .route("/board/new", get(new_board_page))
+        .route("/board/new/{id}", get(board_draft_page))
+        .route("/draw/new", get(new_drawing_page))
+        .route("/draw/new/{id}", get(drawing_draft_page))
         .route("/doc/new", get(new_document_page))
         .route("/doc/new/{id}", get(draft_page))
         .route("/doc/{id}", get(editor_page))
@@ -140,6 +145,11 @@ pub fn router(store: SharedStore, auth: Option<Arc<Auth>>, options: ServerOption
                 .delete(delete_document),
         )
         .route("/api/documents/{id}/draft", put(save_draft))
+        .route("/api/documents/{id}/board", get(get_board).put(save_board))
+        .route(
+            "/api/documents/{id}/drawing",
+            get(get_drawing).put(save_drawing),
+        )
         .route("/api/documents/{id}/title", get(get_document_title))
         // A copy is a new document, so it is created with POST under its source.
         .route("/api/documents/{id}/duplicate", post(duplicate_document))
@@ -218,6 +228,42 @@ async fn new_document_page(Query(selection): Query<LibrarySelection>) -> Respons
     selection.document_location(format!("/doc/new/{}", Uuid::new_v4()))
 }
 
+async fn new_board_page(Query(selection): Query<LibrarySelection>) -> Response {
+    selection.document_location(format!("/board/new/{}", Uuid::new_v4()))
+}
+
+async fn board_draft_page(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+    Query(selection): Query<LibrarySelection>,
+) -> Response {
+    let Some(id) = parse_document_id(&raw_id) else {
+        return page_not_found();
+    };
+    if state.store.contains_active(id).await {
+        return selection.document_location(format!("/doc/{id}"));
+    }
+    board_html()
+}
+
+async fn new_drawing_page(Query(selection): Query<LibrarySelection>) -> Response {
+    selection.document_location(format!("/draw/new/{}", Uuid::new_v4()))
+}
+
+async fn drawing_draft_page(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+    Query(selection): Query<LibrarySelection>,
+) -> Response {
+    let Some(id) = parse_document_id(&raw_id) else {
+        return page_not_found();
+    };
+    if state.store.contains_active(id).await {
+        return selection.document_location(format!("/doc/{id}"));
+    }
+    drawing_html()
+}
+
 async fn draft_page(
     State(state): State<AppState>,
     Path(raw_id): Path<String>,
@@ -238,10 +284,20 @@ async fn editor_page(State(state): State<AppState>, Path(raw_id): Path<String>) 
     let Some(id) = parse_document_id(&raw_id) else {
         return page_not_found();
     };
-    if !state.store.contains_active(id).await {
-        return page_not_found();
+    match state.store.active_document_kind(id).await {
+        Some(DocumentKind::Board) => board_html(),
+        Some(DocumentKind::Drawing) => drawing_html(),
+        Some(DocumentKind::Text) => editor_html(),
+        None => page_not_found(),
     }
-    editor_html()
+}
+
+fn board_html() -> Response {
+    with_page_cache(Html(assets::BOARD_HTML).into_response())
+}
+
+fn drawing_html() -> Response {
+    with_page_cache(Html(assets::DRAWING_HTML).into_response())
 }
 
 fn editor_html() -> Response {
@@ -455,6 +511,107 @@ async fn get_document(
     state.store.require_document_space(id).await?;
     let document = state.store.get(id).await.ok_or_else(ApiError::not_found)?;
     Ok(Json(DocumentView::from(document)))
+}
+
+#[derive(Serialize)]
+struct BoardDocument {
+    title: String,
+    markdown: String,
+}
+
+impl BoardDocument {
+    fn from_document(document: Document) -> Result<Json<Self>, ApiError> {
+        let markdown = document.board_markdown.ok_or_else(ApiError::not_found)?;
+        Ok(Json(Self {
+            title: document.title,
+            markdown,
+        }))
+    }
+}
+
+async fn get_board(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+) -> Result<Json<BoardDocument>, ApiError> {
+    let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
+    state.store.require_document_space(id).await?;
+    let document = state.store.get(id).await.ok_or_else(ApiError::not_found)?;
+    BoardDocument::from_document(document)
+}
+
+#[derive(Deserialize)]
+struct ExtensionDraftSelection {
+    space: Option<Uuid>,
+    #[serde(default)]
+    draft: bool,
+}
+
+#[derive(Deserialize)]
+struct SaveBoardRequest {
+    markdown: String,
+}
+
+async fn save_board(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+    Query(selection): Query<ExtensionDraftSelection>,
+    Json(request): Json<SaveBoardRequest>,
+) -> Result<Json<BoardDocument>, ApiError> {
+    let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
+    let document = state
+        .store
+        .save_board(
+            id,
+            request.markdown,
+            selection.draft.then_some(selection.space),
+        )
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    state.backups.mirror_document(id);
+    BoardDocument::from_document(document)
+}
+
+#[derive(Deserialize, Serialize)]
+struct DrawingDocument {
+    title: String,
+    strokes: PencilStrokes,
+}
+
+async fn get_drawing(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+) -> Result<Json<DrawingDocument>, ApiError> {
+    let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
+    state.store.require_document_space(id).await?;
+    let document = state.store.get(id).await.ok_or_else(ApiError::not_found)?;
+    let source = document.drawing_markdown.ok_or_else(ApiError::not_found)?;
+    let strokes = drawing_strokes(&source)
+        .ok_or_else(|| ApiError::server_error("Grapho couldn't read this drawing."))?;
+    Ok(Json(DrawingDocument {
+        title: document.title,
+        strokes,
+    }))
+}
+
+async fn save_drawing(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+    Query(selection): Query<ExtensionDraftSelection>,
+    Json(request): Json<DrawingDocument>,
+) -> Result<Json<String>, ApiError> {
+    let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
+    let title = state
+        .store
+        .save_drawing(
+            id,
+            &request.title,
+            &request.strokes,
+            selection.draft.then_some(selection.space),
+        )
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    state.backups.mirror_document(id);
+    Ok(Json(title))
 }
 
 async fn get_document_title(
@@ -1669,6 +1826,15 @@ impl From<StoreError> for ApiError {
         if matches!(error, StoreError::EmptyDraft) {
             return Self::bad_request("Add a title or some content before saving.");
         }
+        if matches!(error, StoreError::WrongDocumentFormat) {
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: "This document uses a different format.".to_owned(),
+            };
+        }
+        if matches!(error, StoreError::InvalidDrawing) {
+            return Self::bad_request("The drawing contains invalid pencil strokes.");
+        }
         if matches!(error, StoreError::UnknownSpace) {
             return Self::bad_request("That Space doesn't exist.");
         }
@@ -1948,6 +2114,198 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn boards_keep_their_markdown_through_saves_and_reopening() {
+        use serde_json::json;
+        use tokio::fs;
+
+        let (app, directory) = test_app(None).await;
+        let draft = app.clone().oneshot(get("/board/new")).await.unwrap();
+        let draft_path = draft.headers()[header::LOCATION].to_str().unwrap();
+        let id: Uuid = draft_path
+            .strip_prefix("/board/new/")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let document_path = format!("/doc/{id}");
+        let api_path = format!("/api/documents/{id}");
+        let board_path = format!("{api_path}/board");
+        let create_path = format!("{board_path}?draft=true");
+        let source = "# **Release board**\r\n\r\nPrepare the release.\r\n\r\n## To do\r\n    - Review:\r\n    ```\r\n        Find the release checklist.\r\n    ```\r\n\r\n## Done\r\n";
+        let file = directory.join("Release board.md");
+        let request = |request| async { app.clone().oneshot(request).await.unwrap() };
+
+        assert_eq!(request(get(draft_path)).await.status(), StatusCode::OK);
+        assert!(!file.exists());
+        assert_eq!(
+            request(put_json(&board_path, json!({ "markdown": source })))
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        for _ in 0..2 {
+            let saved = request(put_json(&create_path, json!({ "markdown": source }))).await;
+            assert_eq!(saved.status(), StatusCode::OK);
+            assert_eq!(
+                json_body(saved).await,
+                json!({ "title": "Release board", "markdown": source })
+            );
+        }
+        assert_eq!(fs::read_to_string(&file).await.unwrap(), source);
+        let document = request(get(&document_path)).await;
+        let html = axum::body::to_bytes(document.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&html).contains("id=\"boardSource\""));
+        assert_eq!(
+            request(get(draft_path)).await.headers()[header::LOCATION],
+            document_path
+        );
+        assert_eq!(
+            request(put_json(
+                &api_path,
+                json!({ "content": "<p>Other editor</p>" })
+            ))
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+
+        let reopened = Store::load(directory.clone()).await.unwrap();
+        assert_eq!(
+            reopened.get(id).await.unwrap().board_markdown.as_deref(),
+            Some(source)
+        );
+        assert_eq!(reopened.search("release checklist", None).await.len(), 1);
+        let listing = json_body(request(get("/api/documents")).await).await;
+        assert_eq!(listing["documents"][0]["board"], true);
+        let results =
+            json_body(request(get("/api/documents/search?q=release%20checklist")).await).await;
+        assert_eq!(results["matches"][0]["board"], true);
+        let renamed = request(put_json(&api_path, json!({ "title": "Next release" }))).await;
+        assert_eq!(renamed.status(), StatusCode::OK);
+        let current = json_body(request(get(&board_path)).await).await;
+        let renamed_source = source.replacen("# **Release board**", "# Next release", 1);
+        assert_eq!(current["markdown"], renamed_source);
+        assert_eq!(
+            fs::read_to_string(directory.join("Next release.md"))
+                .await
+                .unwrap(),
+            renamed_source
+        );
+        let copy =
+            json_body(request(post_json(&format!("{api_path}/duplicate"), json!({}))).await).await;
+        assert_eq!(copy["board"], true);
+        let copy_id = copy["id"].as_str().unwrap();
+        let copy = json_body(request(get(&format!("/api/documents/{copy_id}/board"))).await).await;
+        assert_eq!(
+            copy["markdown"],
+            renamed_source.replacen("# Next release", "# Next release (copy)", 1)
+        );
+        fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn drawings_round_trip_as_library_documents() {
+        use serde_json::json;
+        use tokio::fs;
+
+        let (app, directory) = test_app(None).await;
+        let request = |request| async { app.clone().oneshot(request).await.unwrap() };
+        let draft = request(get("/draw/new?space=general")).await;
+        let draft_path = draft.headers()[header::LOCATION].to_str().unwrap();
+        let id: Uuid = draft_path
+            .strip_prefix("/draw/new/")
+            .unwrap()
+            .strip_suffix("?space=general")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let api_path = format!("/api/documents/{id}");
+        let drawing_path = format!("{api_path}/drawing");
+        let create_path = format!("{drawing_path}?draft=true");
+        let drawing =
+            json!({ "title": "Pencil sketch", "strokes": [[[0, 22], [1000, 50]], [[28, 42]]] });
+
+        assert_eq!(request(get(draft_path)).await.status(), StatusCode::OK);
+        for invalid in [
+            json!({ "title": "Untitled drawing", "strokes": [] }),
+            json!({ "title": "Pencil sketch", "strokes": [[[1001, 0]]] }),
+            json!({ "title": "Pencil sketch", "strokes": [[]] }),
+        ] {
+            assert_eq!(
+                request(put_json(&create_path, invalid)).await.status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(
+            request(get(&drawing_path)).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                json_body(request(put_json(&create_path, drawing.clone())).await).await,
+                drawing["title"]
+            );
+        }
+        let response = request(get(&format!("/doc/{id}"))).await;
+        let html = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&html).contains("id=\"drawingCanvas\""));
+        assert_eq!(json_body(request(get(&drawing_path)).await).await, drawing);
+        assert_eq!(
+            request(put_json(
+                &api_path,
+                json!({ "content": "<p>Other editor</p>" })
+            ))
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+
+        let renamed = request(put_json(&api_path, json!({ "title": "In the library" }))).await;
+        assert_eq!(renamed.status(), StatusCode::OK);
+        let listing =
+            json_body(request(get("/api/documents/search?q=in%20the%20library")).await).await;
+        assert_eq!(listing["matches"][0]["drawing"], true);
+        assert_eq!(listing["matches"][0]["word_count"], 0);
+        let copy =
+            json_body(request(post_json(&format!("{api_path}/duplicate"), json!({}))).await).await;
+        assert_eq!(copy["drawing"], true);
+        let copy_id = copy["id"].as_str().unwrap();
+        let copy =
+            json_body(request(get(&format!("/api/documents/{copy_id}/drawing"))).await).await;
+        assert_eq!(copy["title"], "In the library (copy)");
+        assert_eq!(copy["strokes"], drawing["strokes"]);
+        assert_eq!(
+            request(delete_request(&api_path)).await.status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            request(get(&drawing_path)).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(post_json(&format!("{api_path}/restore"), json!({})))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+
+        let reopened = Store::load(directory.clone()).await.unwrap();
+        let restored = reopened.get(id).await.unwrap();
+        assert_eq!(restored.title, "In the library");
+        let source = restored.drawing_markdown.unwrap();
+        assert_eq!(
+            source,
+            "```grapho-drawing-v1\n[[[0,22],[1000,50]],[[28,42]]]\n```\n"
+        );
+        let mirror = reopened.backup_snapshot(None).await.unwrap();
+        assert_eq!(mirror.files[&format!("{id}.md")], source.as_bytes());
+        fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn private_routes_ask_for_a_password() {
         let (app, directory) = test_app(Some("a password long enough")).await;
 
@@ -1956,6 +2314,8 @@ mod tests {
             "/api/documents/search?q=notes",
             "/api/documents/deleted",
             "/api/documents/3f0b3b0a-0c5a-4b8f-9a55-0d1f3b8a0000/title",
+            "/api/documents/3f0b3b0a-0c5a-4b8f-9a55-0d1f3b8a0000/board",
+            "/api/documents/3f0b3b0a-0c5a-4b8f-9a55-0d1f3b8a0000/drawing",
         ] {
             let response = app.clone().oneshot(get(path)).await.unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);

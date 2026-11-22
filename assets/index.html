@@ -12,7 +12,7 @@
   <script src="/assets/theme.js"></script>
   <link rel="stylesheet" href="/assets/app.css">
   <script src="/assets/quick-open.js" defer></script>
-  <script src="/assets/home.js" defer></script>
+  <script src="/assets/home.js" type="module"></script>
 </head>
 <body class="home-page">
   <a class="skip-link" href="#library">Skip to your library</a>
@@ -44,6 +44,10 @@
           </div>
           <div class="menu-rule" role="separator"></div>
           <p class="popover-label">Management</p>
+          <button class="menu-item" type="button" role="menuitem" id="extensionsButton" aria-haspopup="dialog" aria-controls="extensionsDialog">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M10 5H5v5a2 2 0 1 1 0 4v5h5a2 2 0 1 1 4 0h5v-5a2 2 0 1 0 0-4V5h-5a2 2 0 1 0-4 0Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+            Extensions
+          </button>
           <button class="menu-item" type="button" role="menuitem" id="recentlyDeletedButton" aria-haspopup="dialog" aria-controls="recentlyDeletedDialog">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 7h14M9 7V4.8h6V7M7 7l.8 12.2h8.4L17 7M10 11v4.5M14 11v4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Recently deleted
@@ -187,10 +191,17 @@
     <article class="document-card">
       <a class="document-card-link">
         <span class="document-glyph" aria-hidden="true">
-          <svg viewBox="0 0 32 32" fill="none">
+          <svg class="document-glyph-icon" viewBox="0 0 32 32" fill="none">
             <path d="M8 4.5h11.2L25 10.3v17.2H8V4.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
             <path d="M19 4.5v6h6" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
             <path d="M12.2 16h8.6M12.2 20h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <svg class="board-glyph-icon" viewBox="0 0 24 24" fill="none">
+            <rect x="3.5" y="4.5" width="17" height="15" rx="2" stroke="currentColor" stroke-width="1.6"/>
+            <path d="M9 4.5v15m6-15v15M6 9h.5M11.5 9h1M11.5 13h1M17.5 9h.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+          <svg class="drawing-glyph-icon" viewBox="0 0 24 24" fill="none">
+            <path d="m4 20 4.5-1 11-11a2.5 2.5 0 0 0-3.5-3.5l-11 11L4 20Zm10-13.5 3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </span>
         <div class="document-thumb" aria-hidden="true">
@@ -242,6 +253,29 @@
     </article>
   </template>
 
+  <dialog class="modal modal-small" id="newDocumentDialog" aria-labelledby="newDocumentTitle">
+    <div class="modal-panel">
+      <h2 id="newDocumentTitle">New document</h2>
+      <div class="document-type-options" id="documentTypeOptions">
+        <a class="button button-quiet document-type-option" href="/doc/new" autofocus>
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 3.5h9l5 5v12H5zM14 3.5v5h5M8.5 12h7m-7 4h7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Document
+        </a>
+        <a class="button button-quiet document-type-option" href="/board/new" data-document-extension="boards" hidden>
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M9 4.5v15m6-15v15M6 9h.5M11.5 9h1M11.5 13h1M17.5 9h.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          Board
+        </a>
+        <a class="button button-quiet document-type-option" href="/draw/new" data-document-extension="draw" hidden>
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m4 20 4.5-1 11-11a2.5 2.5 0 0 0-3.5-3.5l-11 11L4 20Zm10-13.5 3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Drawing
+        </a>
+      </div>
+      <form class="modal-actions" method="dialog">
+        <button class="button button-quiet" type="submit">Cancel</button>
+      </form>
+    </div>
+  </dialog>
+
   <dialog class="modal" id="actionDialog" aria-labelledby="actionTitle">
     <form class="modal-panel" id="actionForm">
       <div class="modal-icon" id="actionIcon" aria-hidden="true"></div>
@@ -259,6 +293,29 @@
       <div class="modal-actions">
         <button class="button button-quiet" type="button" id="actionCancel">Cancel</button>
         <button class="button button-primary" type="button" id="actionConfirm">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="modal" id="extensionsDialog" aria-labelledby="extensionsTitle">
+    <form class="modal-panel" method="dialog">
+      <h2 id="extensionsTitle">Extensions</h2>
+      <label class="extension-option">
+        <input type="checkbox" data-extension="boards" aria-describedby="boardsDescription" autofocus>
+        <span>
+          <strong>Boards</strong>
+          <span class="extension-description" id="boardsDescription">Organize Markdown into columns and cards.</span>
+        </span>
+      </label>
+      <label class="extension-option">
+        <input type="checkbox" data-extension="draw" aria-describedby="drawDescription">
+        <span>
+          <strong>Draw</strong>
+          <span class="extension-description" id="drawDescription">Sketch freehand with a pencil.</span>
+        </span>
+      </label>
+      <div class="modal-actions">
+        <button class="button button-quiet" type="submit">Done</button>
       </div>
     </form>
   </dialog>

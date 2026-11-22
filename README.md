@@ -89,6 +89,23 @@ Markdown files** to add its UTF-8 `.md` files. Grapho uses the filenames as
 titles and edits the original files in place. Import reads the selected folder
 only. Images linked from other files need to be added through the editor.
 
+Enable **Boards** under **Extensions** in the library menu. **New Document**
+then offers **Document** or **Board**. Click the board title to rename it.
+Add columns and cards, click a card to edit it, or drag cards to reorder or
+move them. On a touch screen, drag using the grip on the card.
+Choose **Edit Markdown** to edit the source. The first `#` heading supplies
+the board's title.
+Text before the first column describes the board, each `##` heading starts a
+column, and `- Title: Description` adds a card. Put a longer Markdown
+description inside backtick fences below its card. Board and Markdown changes
+save automatically to the same file. The extension preference
+is remembered per browser. Existing boards open in Markdown when Boards is off.
+
+Enable **Draw** under **Extensions**, then choose **Drawing** in **New Document**.
+Draw on the dotted canvas with a mouse, pen, or finger. The title and strokes
+save automatically. Grapho keeps the strokes in a fenced block in the drawing's
+Markdown file and uses the library index to open it as a drawing.
+
 Every shortcut is listed on the **Shortcuts** page (the menu on any page). The
 most useful: `Ctrl+O` opens documents by title, `Ctrl+S` saves now,
 `Ctrl+K` adds a link, `Ctrl+B` / `Ctrl+I` / `Ctrl+U` format text,
@@ -199,8 +216,10 @@ The shared `metadata.json` keeps filenames, stable document IDs, Spaces, dates,
 paper widths, and image layout. Images sit beside the Markdown and use relative
 links. A few rich-text features, such as centered paragraphs, use HTML inside
 the Markdown. Stop Grapho before editing Markdown by hand, and rename
-documents in Grapho so the index stays in sync. Older library formats require
-a fresh data folder.
+documents in Grapho so the index stays in sync. Version 1 Markdown libraries
+open in place. The next document or Space change writes the current index,
+and existing UUID filenames switch to title-based names when their documents
+change. Libraries from before Markdown storage require a fresh data folder.
 
 Deleted documents stay in the data directory. Use **Recently deleted** in the
 library menu to restore them with their original links. Grapho keeps them until

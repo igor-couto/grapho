@@ -22,8 +22,13 @@ use filenames::{filename_key, valid_filename, FilenameSet};
 pub use spaces::{Space, SpaceError, SpaceSummary};
 
 const SCHEMA_VERSION: u32 = 1;
+const UUID_MARKDOWN_INDEX_VERSION: u32 = 1;
 const INDEX_VERSION: u32 = 2;
 const DEFAULT_TITLE: &str = "Untitled document";
+const DEFAULT_BOARD_TITLE: &str = "Untitled board";
+const DEFAULT_DRAWING_TITLE: &str = "Untitled drawing";
+const DRAWING_FENCE: &str = "```grapho-drawing-v1";
+const DRAWING_SIZE: u16 = 1000;
 pub(crate) const INDEX_FILE: &str = "metadata.json";
 const SPELLING_WORDS_FILE: &str = "spelling-words.json";
 const MAX_TITLE_CHARS: usize = 200;
@@ -52,6 +57,10 @@ pub struct Document {
     pub title: String,
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_markdown: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drawing_markdown: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paper_width: Option<u32>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -62,6 +71,10 @@ pub struct Document {
 #[derive(Clone, Serialize, Deserialize)]
 struct DocumentMetadata {
     title: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    board: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    drawing: bool,
     #[serde(default)]
     filename: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -80,6 +93,8 @@ impl DocumentMetadata {
     fn from_document(document: &Document, filename: String, images: ImageAttributes) -> Self {
         Self {
             title: document.title.clone(),
+            board: document.board_markdown.is_some(),
+            drawing: document.drawing_markdown.is_some(),
             filename,
             space_id: document.space_id,
             created_at: document.created_at,
@@ -101,8 +116,34 @@ impl DocumentMetadata {
             paper_width: self.paper_width.map(bounded_paper_width),
             deleted_at: self.deleted_at,
             content,
+            board_markdown: None,
+            drawing_markdown: None,
         }
     }
+}
+
+pub(crate) enum DocumentKind {
+    Text,
+    Board,
+    Drawing,
+}
+
+pub(crate) type PencilStrokes = Vec<Vec<[u16; 2]>>;
+
+fn valid_strokes(strokes: &PencilStrokes) -> bool {
+    strokes.iter().all(|stroke| {
+        !stroke.is_empty()
+            && stroke
+                .iter()
+                .all(|&[x, y]| x <= DRAWING_SIZE && y <= DRAWING_SIZE)
+    })
+}
+
+pub(crate) fn drawing_strokes(markdown: &str) -> Option<PencilStrokes> {
+    let markdown = markdown.trim();
+    let strokes =
+        serde_json::from_str(markdown.strip_prefix(DRAWING_FENCE)?.strip_suffix("```")?).ok()?;
+    valid_strokes(&strokes).then_some(strokes)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -151,6 +192,8 @@ impl Document {
             space_id: None,
             title: DEFAULT_TITLE.to_owned(),
             content: String::new(),
+            board_markdown: None,
+            drawing_markdown: None,
             paper_width: None,
             created_at: now,
             updated_at: now,
@@ -165,6 +208,10 @@ pub struct DocumentSummary {
     pub id: Uuid,
     pub space_id: Option<Uuid>,
     pub title: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub board: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub drawing: bool,
     pub excerpt: String,
     pub preview: String,
     pub word_count: usize,
@@ -200,6 +247,8 @@ struct SearchExcerpt {
 #[derive(Debug)]
 pub enum StoreError {
     EmptyDraft,
+    WrongDocumentFormat,
+    InvalidDrawing,
     UnknownSpace,
     UnavailableSpace,
     Io(io::Error),
@@ -210,6 +259,8 @@ impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyDraft => write!(f, "empty untitled draft"),
+            Self::WrongDocumentFormat => write!(f, "document has another format"),
+            Self::InvalidDrawing => write!(f, "invalid pencil strokes"),
             Self::UnknownSpace => write!(f, "space does not exist"),
             Self::UnavailableSpace => write!(f, "the Space's storage folder is unavailable"),
             Self::Io(error) => write!(f, "{error}"),
@@ -225,6 +276,8 @@ impl std::error::Error for StoreError {
         match self {
             Self::Io(error) => Some(error),
             Self::EmptyDraft
+            | Self::WrongDocumentFormat
+            | Self::InvalidDrawing
             | Self::UnknownSpace
             | Self::UnavailableSpace
             | Self::Corrupt { .. } => None,
@@ -518,13 +571,26 @@ impl Store {
     }
 
     pub(crate) async fn contains_active(&self, id: Uuid) -> bool {
+        self.active_document_kind(id).await.is_some()
+    }
+
+    pub(crate) async fn active_document_kind(&self, id: Uuid) -> Option<DocumentKind> {
         self.state
             .read()
             .await
             .index
             .documents
             .get(&id)
-            .is_some_and(|document| document.deleted_at.is_none())
+            .filter(|document| document.deleted_at.is_none())
+            .map(|document| {
+                if document.drawing {
+                    DocumentKind::Drawing
+                } else if document.board {
+                    DocumentKind::Board
+                } else {
+                    DocumentKind::Text
+                }
+            })
     }
 
     /// Read the files and index while they describe the same committed state.
@@ -632,17 +698,20 @@ impl Store {
                 .collect();
             copy_title(&source.title, &taken)
         };
-        let document = Document {
+        let mut document = Document {
             version: SCHEMA_VERSION,
             id: Uuid::new_v4(),
             space_id: source.space_id,
             title,
             content: source.content,
+            board_markdown: source.board_markdown,
+            drawing_markdown: source.drawing_markdown,
             paper_width: source.paper_width,
             created_at: now,
             updated_at: now,
             deleted_at: None,
         };
+        synchronize_board_heading(&mut document);
 
         state.persist(document.clone()).await?;
         Ok(Some(document))
@@ -686,6 +755,101 @@ impl Store {
             .await
     }
 
+    pub async fn save_board(
+        &self,
+        id: Uuid,
+        source: String,
+        draft_space: Option<Option<Uuid>>,
+    ) -> Result<Option<Document>, StoreError> {
+        let mut state = self.state.write().await;
+        state.require_document_space(id)?;
+        let mut document = match state.documents.get(&id) {
+            Some(document) if document.deleted_at.is_some() => return Ok(None),
+            Some(document) => {
+                let Some(previous) = &document.board_markdown else {
+                    return Err(StoreError::WrongDocumentFormat);
+                };
+                if previous == &source {
+                    return Ok(Some(document.clone()));
+                }
+                let mut document = document.clone();
+                document.updated_at = now_millis().max(document.updated_at.saturating_add(1));
+                document
+            }
+            None => {
+                let Some(space_id) = draft_space else {
+                    return Ok(None);
+                };
+                state.require_space(space_id)?;
+                if source.trim().is_empty() {
+                    return Err(StoreError::EmptyDraft);
+                }
+                let mut document = Document::blank(id);
+                document.space_id = space_id;
+                document
+            }
+        };
+        document.title = board_heading(&source)
+            .map(|(_, _, heading)| html_to_text(&board_html(&format!("# {heading}"))))
+            .filter(|title| !title.is_empty())
+            .map_or_else(
+                || DEFAULT_BOARD_TITLE.to_owned(),
+                |title| normalize_title(&title),
+            );
+        document.content = board_html(&source);
+        document.board_markdown = Some(source);
+        state.persist(document.clone()).await?;
+        Ok(Some(document))
+    }
+
+    pub(crate) async fn save_drawing(
+        &self,
+        id: Uuid,
+        title: &str,
+        strokes: &PencilStrokes,
+        draft_space: Option<Option<Uuid>>,
+    ) -> Result<Option<String>, StoreError> {
+        if !valid_strokes(strokes) {
+            return Err(StoreError::InvalidDrawing);
+        }
+        let title = normalize_title_or(title, DEFAULT_DRAWING_TITLE);
+        let json = serde_json::to_string(strokes).map_err(io::Error::other)?;
+        let source = format!("{DRAWING_FENCE}\n{json}\n```\n");
+
+        let mut state = self.state.write().await;
+        state.require_document_space(id)?;
+        let mut document = match state.documents.get(&id) {
+            Some(document) if document.deleted_at.is_some() => return Ok(None),
+            Some(document) => {
+                let Some(previous) = &document.drawing_markdown else {
+                    return Err(StoreError::WrongDocumentFormat);
+                };
+                if previous == &source && document.title == title {
+                    return Ok(Some(title));
+                }
+                let mut document = document.clone();
+                document.updated_at = now_millis().max(document.updated_at.saturating_add(1));
+                document
+            }
+            None => {
+                let Some(space_id) = draft_space else {
+                    return Ok(None);
+                };
+                state.require_space(space_id)?;
+                if title == DEFAULT_DRAWING_TITLE && strokes.is_empty() {
+                    return Err(StoreError::EmptyDraft);
+                }
+                let mut document = Document::blank(id);
+                document.space_id = space_id;
+                document
+            }
+        };
+        document.title.clone_from(&title);
+        document.drawing_markdown = Some(source);
+        state.persist(document).await?;
+        Ok(Some(title))
+    }
+
     async fn save(
         &self,
         id: Uuid,
@@ -706,6 +870,12 @@ impl Store {
             }
             _ => return Ok(None),
         };
+
+        if (document.board_markdown.is_some() || document.drawing_markdown.is_some())
+            && content.is_some()
+        {
+            return Err(StoreError::WrongDocumentFormat);
+        }
 
         let next_title = title
             .map(|value| normalize_title(&value))
@@ -741,9 +911,13 @@ impl Store {
         }
 
         document.version = SCHEMA_VERSION;
+        let renamed = document.title != next_title;
         document.title = next_title;
         document.content = next_content;
         document.paper_width = next_paper_width;
+        if renamed {
+            synchronize_board_heading(&mut document);
+        }
 
         state.persist(document.clone()).await?;
         Ok(Some(document))
@@ -926,6 +1100,38 @@ fn in_space(document: &Document, space: Option<Option<Uuid>>) -> bool {
     space.is_none_or(|id| document.space_id == id)
 }
 
+fn board_html(source: &str) -> String {
+    sanitize_document_content(markdown::decode(source, &BTreeMap::new(), &BTreeMap::new()))
+}
+
+fn board_heading(source: &str) -> Option<(usize, usize, &str)> {
+    let mut start = source.len() - source.trim_start_matches('\u{feff}').len();
+    for line in source[start..].split_inclusive(['\r', '\n']) {
+        let text = line.trim_end_matches(['\r', '\n']);
+        if text.trim().is_empty() {
+            start += line.len();
+            continue;
+        }
+        let heading = text.strip_prefix('#')?.strip_prefix([' ', '\t'])?;
+        return Some((start, start + text.len(), heading.trim()));
+    }
+    None
+}
+
+fn synchronize_board_heading(document: &mut Document) {
+    if let Some(source) = &mut document.board_markdown {
+        let heading = format!("# {}", markdown::escape_markdown(&document.title));
+        match board_heading(source) {
+            Some((start, end, _)) => source.replace_range(start..end, &heading),
+            None => {
+                let start = source.len() - source.trim_start_matches('\u{feff}').len();
+                source.insert_str(start, &format!("{heading}\n\n"));
+            }
+        }
+        document.content = board_html(source);
+    }
+}
+
 impl State {
     fn active_document(&self, id: Uuid) -> Option<&Document> {
         self.documents
@@ -954,12 +1160,24 @@ impl State {
         let path = folder.join(&filename);
         let mut created = Vec::new();
         let mut old_body = None;
-        let body_changed = self
-            .documents
-            .get(&id)
-            .is_none_or(|old| old.content != document.content);
+        let body_changed = self.documents.get(&id).is_none_or(|old| {
+            old.board_markdown != document.board_markdown
+                || old.drawing_markdown != document.drawing_markdown
+                || old.content != document.content
+        });
         let image_attributes = if body_changed {
-            let body = markdown::encode(id, &document.content);
+            let body = match document
+                .board_markdown
+                .as_ref()
+                .or(document.drawing_markdown.as_ref())
+            {
+                Some(source) => markdown::Body {
+                    markdown: source.clone(),
+                    images: BTreeMap::new(),
+                    image_attributes: ImageAttributes::new(),
+                },
+                None => markdown::encode(id, &document.content),
+            };
             if !new_path {
                 old_body = Some(fs::read(&path).await?);
             }
@@ -1047,6 +1265,16 @@ async fn load_document(
             path,
             message: format!("could not read the document's Markdown file: {error}"),
         })?;
+    if metadata.drawing {
+        let mut document = metadata.document(id, String::new());
+        document.drawing_markdown = Some(source);
+        return Ok(document);
+    }
+    if metadata.board {
+        let mut document = metadata.document(id, board_html(&source));
+        document.board_markdown = Some(source);
+        return Ok(document);
+    }
     let mut images = BTreeMap::new();
     for name in metadata.images.keys().filter(|name| source.contains(*name)) {
         match fs::read(folder.join(name)).await {
@@ -1074,6 +1302,9 @@ async fn read_index(directory: &Path) -> Result<LibraryIndex, StoreError> {
             path: path.clone(),
             message: error.to_string(),
         })?;
+    if index.version == UUID_MARKDOWN_INDEX_VERSION {
+        return read_uuid_markdown_index(directory, index.documents).await;
+    }
     if index.version != INDEX_VERSION {
         return Err(StoreError::Corrupt {
             path,
@@ -1094,6 +1325,50 @@ async fn read_index(directory: &Path) -> Result<LibraryIndex, StoreError> {
                 path,
                 message: format!("invalid or duplicate filename for document {id}"),
             });
+        }
+    }
+    Ok(index)
+}
+
+// Version 1 discovered bodies and attachments by UUID. Keep that behavior
+// when opening those libraries and write the new index on the next mutation.
+async fn read_uuid_markdown_index(
+    directory: &Path,
+    mut previous: BTreeMap<Uuid, DocumentMetadata>,
+) -> Result<LibraryIndex, StoreError> {
+    let mut index = LibraryIndex::default();
+    let mut attachments: HashMap<Uuid, Vec<String>> = HashMap::new();
+    let mut entries = fs::read_dir(directory).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        if !entry.file_type().await?.is_file() {
+            continue;
+        }
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if let Some(id) = mirror_document_id(Path::new(&name)) {
+            let mut metadata = previous.remove(&id).unwrap_or_else(|| {
+                DocumentMetadata::from_document(
+                    &Document::blank(id),
+                    String::new(),
+                    ImageAttributes::new(),
+                )
+            });
+            metadata.filename = name;
+            metadata.space_id = None;
+            metadata.board = false;
+            metadata.drawing = false;
+            index.documents.insert(id, metadata);
+        } else if let Some(id) = markdown::attachment_owner(&name) {
+            attachments.entry(id).or_default().push(name);
+        }
+    }
+
+    for (id, metadata) in &mut index.documents {
+        let mut placements = std::mem::take(&mut metadata.images);
+        for name in attachments.remove(id).into_iter().flatten() {
+            let placement = placements.remove(&name).unwrap_or_default();
+            metadata.images.insert(name, placement);
         }
     }
     Ok(index)
@@ -1273,6 +1548,10 @@ fn now_millis() -> u64 {
 }
 
 pub fn normalize_title(raw: &str) -> String {
+    normalize_title_or(raw, DEFAULT_TITLE)
+}
+
+fn normalize_title_or(raw: &str, default: &str) -> String {
     let cleaned: String = raw
         .chars()
         .map(|character| {
@@ -1288,7 +1567,7 @@ pub fn normalize_title(raw: &str) -> String {
     let title = title.trim().to_owned();
 
     if title.is_empty() {
-        DEFAULT_TITLE.to_owned()
+        default.to_owned()
     } else {
         title
     }
@@ -1675,6 +1954,8 @@ fn summarize(document: &Document, text: &str) -> DocumentSummary {
         id: document.id,
         space_id: document.space_id,
         title: document.title.clone(),
+        board: document.board_markdown.is_some(),
+        drawing: document.drawing_markdown.is_some(),
         excerpt: make_excerpt(text),
         preview,
         word_count: text.split_whitespace().count(),
@@ -2754,6 +3035,101 @@ mod tests {
         assert_eq!(usage.bytes, size + index_size);
 
         let _ = fs::remove_dir_all(directory).await;
+    }
+
+    #[tokio::test]
+    async fn loads_version_one_markdown_without_rewriting_until_a_document_changes() {
+        use serde_json::json;
+
+        let directory = temp_directory("uuid-markdown");
+        fs::create_dir(&directory).await.unwrap();
+        let active_id = Uuid::new_v4();
+        let missing_id = Uuid::new_v4();
+        let deleted_id = Uuid::new_v4();
+        let unindexed_id = Uuid::new_v4();
+        let legacy_body = directory.join(mirror_filename(active_id));
+        let image = format!("{active_id}-{}.png", "0".repeat(64));
+        let body = format!("Original notes.\n\n![Sketch]({image})\n");
+        fs::write(&legacy_body, &body).await.unwrap();
+        fs::write(directory.join(&image), [0]).await.unwrap();
+        fs::write(
+            directory.join(mirror_filename(deleted_id)),
+            "Deleted notes.",
+        )
+        .await
+        .unwrap();
+        fs::write(
+            directory.join(mirror_filename(unindexed_id)),
+            "Unindexed notes.",
+        )
+        .await
+        .unwrap();
+
+        let metadata = json!({
+            "version": 1,
+            "documents": {
+                (active_id.to_string()): {
+                    "title": "Original notes",
+                    "created_at": 10,
+                    "updated_at": 20,
+                    "paper_width": 1250,
+                    "images": { (image.clone()): [{ "width": "80", "height": "40" }] }
+                },
+                (missing_id.to_string()): { "title": "Missing", "created_at": 10, "updated_at": 20 },
+                (deleted_id.to_string()): {
+                    "title": "Deleted notes", "created_at": 10, "updated_at": 20, "deleted_at": 30
+                }
+            }
+        })
+        .to_string();
+        fs::write(directory.join(INDEX_FILE), &metadata)
+            .await
+            .unwrap();
+
+        let store = Store::load(directory.clone()).await.unwrap();
+        let document = store.get(active_id).await.unwrap();
+        assert_eq!(document.title, "Original notes");
+        assert_eq!(document.created_at, 10);
+        assert_eq!(document.updated_at, 20);
+        assert_eq!(document.paper_width, Some(1250));
+        assert!(document.content.contains("width=\"80\" height=\"40\""));
+        assert!(document
+            .content
+            .contains("src=\"data:image/png;base64,AA==\""));
+        assert_eq!(store.list().await.len(), 2);
+        assert_eq!(store.list_deleted().await[0].id, deleted_id);
+        assert!(store.get(missing_id).await.is_none());
+        assert!(store.get(unindexed_id).await.is_some());
+        assert_eq!(
+            fs::read_to_string(directory.join(INDEX_FILE))
+                .await
+                .unwrap(),
+            metadata
+        );
+        assert_eq!(fs::read_to_string(&legacy_body).await.unwrap(), body);
+
+        store
+            .update(active_id, Some("Renamed notes".into()), None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(directory.join("Renamed notes.md"))
+                .await
+                .unwrap(),
+            body
+        );
+        assert!(!legacy_body.exists());
+        let current: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join(INDEX_FILE)).await.unwrap()).unwrap();
+        assert_eq!(current["version"], INDEX_VERSION);
+        let reloaded = Store::load(directory.clone()).await.unwrap();
+        assert_eq!(
+            reloaded.get(active_id).await.unwrap().content,
+            document.content
+        );
+        assert!(reloaded.get(unindexed_id).await.is_some());
+        assert_eq!(reloaded.list_deleted().await.len(), 1);
+        fs::remove_dir_all(directory).await.unwrap();
     }
 
     #[tokio::test]

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Board - Grapho</title>
+  <meta name="theme-color" content="#232126">
+  <link rel="icon" type="image/x-icon" href="/assets/favicon.ico">
+  <script src="/assets/theme.js"></script>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/quick-open.js" defer></script>
+  <script src="/assets/board.js" type="module"></script>
+</head>
+<body class="board-page">
+  <header class="editor-header version-header">
+    <div class="editor-header-start">
+      <a class="back-link" href="/" id="boardLibraryLink" aria-label="Back to library">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="m14.5 5-7 7 7 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>Library</span>
+      </a>
+    </div>
+    <div class="editor-header-end board-actions" id="boardActions" hidden>
+      <button class="button button-quiet" type="button" id="boardAddColumn" aria-haspopup="dialog">Add column</button>
+      <button class="button button-quiet" type="button" id="boardMode" aria-controls="boardView boardEditor">Edit Markdown</button>
+    </div>
+  </header>
+
+  <main class="board-main">
+    <h1 class="board-title">
+      <button class="board-title-button" type="button" id="boardTitle" title="Edit board title" disabled>Board</button>
+      <input class="board-title-input" type="text" id="boardTitleInput" aria-label="Board title" maxlength="200" hidden>
+    </h1>
+    <div class="board-error" id="boardError" hidden>
+      <p id="boardErrorMessage" role="alert"></p>
+      <button class="button button-quiet" type="button" id="boardRetry">Try again</button>
+    </div>
+    <div class="board-view" id="boardView" hidden>
+      <div class="board-description board-markdown" id="boardDescription" hidden></div>
+      <p class="board-tip" id="boardEmpty" hidden>Add a column to start organizing cards.</p>
+      <div class="board-columns" id="boardColumns" role="region" aria-label="Board columns" tabindex="0"></div>
+    </div>
+    <div class="board-editor" id="boardEditor" hidden>
+      <label for="boardSource">Board Markdown</label>
+      <p class="board-tip" id="boardSyntax">Start with a <code>#</code> title. Use <code>##</code> for columns and <code>- Title: Description</code> for cards. Put a longer description in backtick fences on the lines below its card.</p>
+      <p class="board-tip" id="boardEnableHint" hidden>Enable Boards in the library's Extensions menu to view columns and cards.</p>
+      <textarea id="boardSource" aria-describedby="boardSyntax" spellcheck="false"></textarea>
+    </div>
+  </main>
+
+  <dialog class="modal board-item-dialog" id="boardItemDialog" aria-labelledby="boardItemHeading">
+    <form class="modal-panel" id="boardItemForm">
+      <h2 id="boardItemHeading">Edit card</h2>
+      <label class="field">
+        <span>Title</span>
+        <input id="boardItemTitle" type="text" maxlength="200" required autofocus>
+      </label>
+      <div id="boardCardFields" hidden>
+        <label class="field">
+          <span>Description (Markdown)</span>
+          <textarea id="boardCardDescription" rows="5"></textarea>
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button class="button button-quiet" type="button" id="boardItemCancel">Cancel</button>
+        <button class="button button-primary" type="submit">Done</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

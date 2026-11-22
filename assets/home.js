@@ -1,3 +1,5 @@
+import { extensionEnabled, onExtensionsChange, setExtensionEnabled } from "./extensions.js";
+
 (function () {
   "use strict";
 
@@ -14,6 +16,7 @@
     view: "list",
     sort: "modified",
     loaded: false,
+    canChooseDocumentType: false,
     duplicating: new Set(),
     busy: false,
     pending: null,
@@ -65,6 +68,11 @@
     els.documents = document.getElementById("documents");
     els.librarySpace = document.getElementById("librarySpace");
     els.newDocument = document.getElementById("newDocument");
+    els.newDocumentDialog = document.getElementById("newDocumentDialog");
+    els.documentTypeOptions = document.getElementById("documentTypeOptions");
+    els.extensionDocumentTypes = els.documentTypeOptions.querySelectorAll("[data-document-extension]");
+    els.extensionsButton = document.getElementById("extensionsButton");
+    els.extensionsDialog = document.getElementById("extensionsDialog");
     els.searchDocuments = document.getElementById("searchDocuments");
     els.libraryMessage = document.getElementById("libraryMessage");
     els.libraryMessageText = document.getElementById("libraryMessageText");
@@ -117,6 +125,8 @@
     applyView();
     syncSortMenu();
     bindStaticEvents();
+    syncExtensions();
+    onExtensionsChange(syncExtensions);
     loadDocuments();
   }
 
@@ -138,6 +148,21 @@
   }
 
   function bindStaticEvents() {
+    els.newDocument.addEventListener("click", function (event) {
+      if (!state.canChooseDocumentType) return;
+      event.preventDefault();
+      els.newDocumentDialog.showModal();
+    });
+    els.documentTypeOptions.addEventListener("click", function (event) {
+      if (event.target.closest("a")) els.newDocumentDialog.close();
+    });
+    els.newDocumentDialog.addEventListener("click", function (event) {
+      if (event.target === els.newDocumentDialog) els.newDocumentDialog.close();
+    });
+    els.newDocumentDialog.addEventListener("close", function () {
+      els.newDocument.focus();
+    });
+
     els.searchDocuments.addEventListener("input", updateSearch);
     els.librarySpace.addEventListener("change", function () {
       syncSearchUrl();
@@ -199,6 +224,23 @@
     });
 
     els.signOut.addEventListener("click", signOut);
+
+    els.extensionsButton.addEventListener("click", function () {
+      closeLibraryMenu();
+      els.extensionsDialog.showModal();
+    });
+    els.extensionsDialog.addEventListener("change", function (event) {
+      var option = event.target;
+      if (!option.matches("[data-extension]")) return;
+      setExtensionEnabled(option.dataset.extension, option.checked);
+      syncExtensions();
+    });
+    els.extensionsDialog.addEventListener("close", function () {
+      els.libraryMenuButton.focus();
+    });
+    els.extensionsDialog.addEventListener("click", function (event) {
+      if (event.target === els.extensionsDialog) els.extensionsDialog.close();
+    });
 
     els.recentlyDeletedButton.addEventListener("click", function () {
       closeLibraryMenu();
@@ -359,7 +401,30 @@
     var unavailable = state.unavailableSpaces.has(state.space);
     els.searchDocuments.disabled = unavailable;
     els.newDocument.hidden = unavailable;
-    els.newDocument.href = state.space ? "/doc/new?space=" + encodeURIComponent(state.space) : "/doc/new";
+    var spaceQuery = state.space ? "?space=" + encodeURIComponent(state.space) : "";
+    els.newDocument.search = spaceQuery;
+    els.documentTypeOptions.querySelectorAll("a").forEach(function (option) {
+      option.search = spaceQuery;
+    });
+  }
+
+  function syncExtensions() {
+    els.extensionsDialog.querySelectorAll("[data-extension]").forEach(function (option) {
+      option.checked = extensionEnabled(option.dataset.extension);
+    });
+    state.canChooseDocumentType = false;
+    els.extensionDocumentTypes.forEach(function (option) {
+      option.hidden = !extensionEnabled(option.dataset.documentExtension);
+      if (!option.hidden) state.canChooseDocumentType = true;
+    });
+    if (state.canChooseDocumentType) {
+      els.newDocument.setAttribute("aria-haspopup", "dialog");
+      els.newDocument.setAttribute("aria-controls", els.newDocumentDialog.id);
+    } else {
+      els.newDocument.removeAttribute("aria-haspopup");
+      els.newDocument.removeAttribute("aria-controls");
+      if (els.newDocumentDialog.open) els.newDocumentDialog.close();
+    }
   }
 
   // The page ships a few placeholder rows so the very first paint is never an
@@ -708,6 +773,8 @@
 
   function syncCard(card, document) {
     card.document = document;
+    card.element.classList.toggle("is-board", Boolean(document.board));
+    card.element.classList.toggle("is-drawing", Boolean(document.drawing));
     card.link.href = "/doc/" + encodeURIComponent(document.id);
     var params = new URLSearchParams();
     if (state.space) params.set("space", state.space);
@@ -718,7 +785,10 @@
     card.link.search = params.toString();
     var spaceName = state.spaces.get(document.space_id) || "General";
     var showSpace = !state.space && state.spaces.size > 0;
-    card.link.setAttribute("aria-label", "Open " + document.title + (showSpace ? " in " + spaceName : ""));
+    var openLabel = "Open ";
+    if (document.board) openLabel += "board ";
+    if (document.drawing) openLabel += "drawing ";
+    card.link.setAttribute("aria-label", openLabel + document.title + (showSpace ? " in " + spaceName : ""));
     card.title.title = document.title_match ? document.title : "";
     if (document.title_match) {
       showMatch(card.title, document.title_match);

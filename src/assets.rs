@@ -4,6 +4,8 @@ pub struct Asset {
 }
 
 pub const INDEX_HTML: &str = include_str!("../assets/index.html");
+pub const BOARD_HTML: &str = include_str!("../assets/board.html");
+pub const DRAWING_HTML: &str = include_str!("../assets/draw.html");
 pub const EDITOR_HTML: &str = include_str!("../assets/editor.html");
 pub const LOGIN_HTML: &str = include_str!("../assets/login.html");
 pub const NOT_FOUND_HTML: &str = include_str!("../assets/not-found.html");
@@ -34,6 +36,11 @@ pub fn find(path: &str) -> Option<Asset> {
             content_type: "text/javascript; charset=utf-8",
         },
         "menu.js" => script(include_bytes!("../assets/menu.js")),
+        "extensions.js" => script(include_bytes!("../assets/extensions.js")),
+        "board.js" => script(include_bytes!("../assets/board.js")),
+        "board-drag.js" => script(include_bytes!("../assets/board-drag.js")),
+        "board-markdown.js" => script(include_bytes!("../assets/board-markdown.js")),
+        "draw.js" => script(include_bytes!("../assets/draw.js")),
         "quick-open.js" => script(include_bytes!("../assets/quick-open.js")),
         "storage.js" => script(include_bytes!("../assets/storage.js")),
         "version.js" => script(include_bytes!("../assets/version.js")),

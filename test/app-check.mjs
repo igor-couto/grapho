@@ -4733,6 +4733,8 @@ async function main() {
 
     await checkSpellcheck(cdp, base, pressKey, tapToolbar);
     await checkSpaces(cdp, base, dataDir);
+    await checkBoards(cdp, base, dataDir);
+    await checkDrawings(cdp, base, dataDir, pressKey);
   } finally {
     if (cdp) {
       cdp.close();
@@ -4759,6 +4761,296 @@ async function main() {
   if (failures.length) {
     process.exitCode = 1;
   }
+}
+
+async function checkBoards(cdp, base, dataDir) {
+  const libraryUrl = base + "/?space=general";
+  async function point(selector, top = false) {
+    return evaluate(cdp, `(() => {
+      const bounds = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+      return { x: bounds.left + bounds.width / 2, y: bounds.top + (${top} ? 4 : bounds.height / 2) };
+    })()`);
+  }
+
+  async function dragCard(start, end) {
+    await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", buttons: 1, clickCount: 1, ...start });
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", buttons: 1, ...end });
+  }
+
+  async function dropCard(end) {
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...end });
+  }
+
+  async function waitForBoardSave(expected) {
+    await waitForExpression(cdp, `(async () => {
+      if (!location.pathname.startsWith("/doc/")) return false;
+      const response = await fetch("/api/documents/" + location.pathname.split("/").at(-1) + "/board", { cache: "no-store" });
+      return response.ok && (await response.json()).markdown.includes(${JSON.stringify(expected)});
+    })()`, PAGE_TIMEOUT_MS);
+  }
+
+  await cdp.send("Page.navigate", { url: libraryUrl });
+  await waitForPage(cdp, libraryUrl, PAGE_TIMEOUT_MS);
+  check("New Document starts with a direct link", await evaluate(cdp, `!document.getElementById("newDocument").hasAttribute("aria-haspopup")`));
+  await evaluate(cdp, `(() => {
+    document.getElementById("libraryMenuButton").click();
+    document.getElementById("extensionsButton").click();
+    document.querySelector('[data-extension="boards"]').click();
+    document.querySelector('#extensionsDialog button[type="submit"]').click();
+  })()`);
+  await cdp.send("Page.reload");
+  await waitForExpression(cdp, `document.getElementById("newDocument")?.getAttribute("aria-haspopup") === "dialog" && document.getElementById("librarySpace").value === "general"`, PAGE_TIMEOUT_MS);
+  await evaluate(cdp, `document.getElementById("newDocument").click()`);
+  check("New Document opens the type picker", await evaluate(cdp, `document.getElementById("newDocumentDialog").open`));
+  equal("the picker offers Document and Board in the selected Space", await evaluate(cdp, `Array.from(
+    document.querySelectorAll("#documentTypeOptions a:not([hidden])"),
+    (link) => link.textContent.trim() + " " + link.pathname + link.search,
+  ).join(", ")`), "Document /doc/new?space=general, Board /board/new?space=general");
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  check("the type picker is centered at 390px", await evaluate(cdp, `(() => {
+    const rect = document.getElementById("newDocumentDialog").getBoundingClientRect();
+    return rect.width > 0 && Math.abs(rect.left + rect.width / 2 - innerWidth / 2) <= 1
+      && Math.abs(rect.top + rect.height / 2 - innerHeight / 2) <= 1;
+  })()`));
+  await cdp.send("Emulation.clearDeviceMetricsOverride");
+
+  await evaluate(cdp, `document.querySelector('#documentTypeOptions a[href^="/doc/new"]').click()`);
+  await waitForPage(cdp, base + "/doc/new/", PAGE_TIMEOUT_MS);
+  await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+  check("Document opens the regular editor", await evaluate(cdp, `Boolean(document.getElementById("docInput"))`));
+
+  await cdp.send("Page.navigate", { url: libraryUrl });
+  await waitForPage(cdp, libraryUrl, PAGE_TIMEOUT_MS);
+  await waitForExpression(cdp, `document.getElementById("newDocument")?.getAttribute("aria-haspopup") === "dialog" && document.getElementById("librarySpace").value === "general"`, PAGE_TIMEOUT_MS);
+  await evaluate(cdp, `(() => {
+    document.getElementById("newDocument").click();
+    document.querySelector('#documentTypeOptions a[data-document-extension="boards"]').click();
+  })()`);
+  await waitForPage(cdp, base + "/board/new/", PAGE_TIMEOUT_MS);
+  await waitForExpression(cdp, `document.getElementById("boardView")?.hidden === false`, PAGE_TIMEOUT_MS);
+  check("Board opens on rendered starter columns and cards", await evaluate(cdp, `document.querySelectorAll(".board-column").length === 3
+    && document.querySelectorAll(".board-card-list > li").length === 1
+    && document.getElementById("boardEditor").hidden`));
+  check("Add card sits directly below each column title", await evaluate(cdp, `[...document.querySelectorAll(".board-column")].every(
+    (column) => column.querySelector("h2").nextElementSibling.matches(".board-add-card"),
+  )`));
+  await evaluate(cdp, `document.querySelector(".board-add-card").click()`);
+  check("the wider card form has no placement fields", await evaluate(cdp, `(() => {
+    const form = document.getElementById("boardItemForm");
+    return form.getBoundingClientRect().width >= 580 && !form.querySelector("select");
+  })()`));
+  await evaluate(cdp, `document.getElementById("boardItemCancel").click()`);
+  check("the columns are centered and fill the available page height", await evaluate(cdp, `(() => {
+    const columns = [...document.querySelectorAll(".board-column")];
+    const first = columns[0].getBoundingClientRect();
+    const last = columns.at(-1).getBoundingClientRect();
+    return Math.abs((first.left + last.right) / 2 - innerWidth / 2) <= 1
+      && first.bottom === last.bottom && first.bottom < innerHeight && first.bottom > innerHeight - 60;
+  })()`));
+
+  let markdown = "# Launch plan\n\nBoard description.\n\n## To do\n    - Review: Read the draft.\n    - Publish:\n    ```\n        Check **links**.\n        - Submit\n    ```\n\n## In progress\n\n## Done\n\n## Later\n";
+  await evaluate(cdp, `(() => {
+    document.getElementById("boardMode").click();
+    const source = document.getElementById("boardSource");
+    source.value = ${JSON.stringify(markdown)};
+    source.dispatchEvent(new Event("input", { bubbles: true }));
+    document.getElementById("boardMode").click();
+  })()`);
+  equal("all board columns render on desktop", await evaluate(cdp, `document.querySelectorAll(".board-column").length`), 4);
+  check("fenced card details render Markdown", await evaluate(cdp, `document.querySelector(".board-card-list li b")?.textContent === "links"`));
+  await waitForBoardSave(markdown);
+  equal("Markdown changes autosave", await readFile(path.join(dataDir, "Launch plan.md"), "utf8"), markdown);
+  await evaluate(cdp, `(() => {
+    document.getElementById("boardTitle").click();
+    const input = document.getElementById("boardTitleInput");
+    input.value = "Launch board";
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", cancelable: true }));
+  })()`);
+  markdown = markdown.replace("# Launch plan", "# Launch board");
+  await waitForBoardSave(markdown);
+  const boardFile = path.join(dataDir, "Launch board.md");
+  equal("renaming the board autosaves its title and filename", await readFile(boardFile, "utf8"), markdown);
+
+  const firstCard = '[data-column="0"] .board-card[data-card="0"]';
+  const secondCard = '[data-column="0"] .board-card[data-card="1"]';
+  const nextColumn = '[data-column="1"]';
+  const destination = await point(nextColumn);
+  await dragCard(await point(firstCard), destination);
+  await waitForExpression(cdp, `document.querySelector('[data-column="1"] .board-drop-gap') && document.querySelector(".board-drag-preview")`, PAGE_TIMEOUT_MS);
+  check("the lifted card keeps its size and the destination opens a matching gap", await evaluate(cdp, `(() => {
+    const gap = document.querySelector(".board-drop-gap");
+    const preview = document.querySelector(".board-drag-preview");
+    return gap.offsetHeight === preview.offsetHeight && document.querySelector(".board-column .board-card[hidden]");
+  })()`));
+  check("previewing a drag leaves Markdown alone", await evaluate(cdp, `document.getElementById("boardSource").value === ${JSON.stringify(markdown)}`));
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  await dropCard(destination);
+  check("Escape restores the original card and removes the preview", await evaluate(cdp, `!document.querySelector(".board-drop-gap, .board-drag-preview")
+    && !document.querySelector(${JSON.stringify(firstCard)}).hidden
+    && document.getElementById("boardSource").value === ${JSON.stringify(markdown)}`));
+  await waitForExpression(cdp, `document.querySelector(${JSON.stringify(firstCard)}).getAnimations().length === 0`, PAGE_TIMEOUT_MS);
+
+  const reorderEnd = await point(firstCard, true);
+  await dragCard(await point(secondCard), reorderEnd);
+  await waitForExpression(cdp, `document.querySelector(".board-drop-gap")?.nextElementSibling?.dataset.card === "0"`, PAGE_TIMEOUT_MS);
+  await dropCard(reorderEnd);
+  equal("dragging within a column changes the card order", await evaluate(cdp, `document.querySelector(${JSON.stringify(firstCard)}).querySelector("h3").textContent`), "Publish");
+
+  await dragCard(await point(secondCard), destination);
+  await waitForExpression(cdp, `document.querySelector('[data-column="1"] .board-drop-gap')`, PAGE_TIMEOUT_MS);
+  await dropCard(destination);
+  equal("dragging puts the card in its destination column", await evaluate(cdp, `document.querySelector('[data-column="1"] .board-card h3').textContent`), "Review");
+  check("dropping a card leaves its edit dialog closed", await evaluate(cdp, `!document.getElementById("boardItemDialog").open`));
+  await waitForBoardSave("## In progress\n    - Review: Read the draft.");
+
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await cdp.send("Page.reload");
+  await waitForExpression(cdp, `document.querySelectorAll(".board-column").length === 4`, PAGE_TIMEOUT_MS);
+  check("the board scrolls horizontally inside a 390px viewport", await evaluate(cdp, `(() => {
+    const columns = document.getElementById("boardColumns");
+    return columns.scrollWidth > columns.clientWidth && document.documentElement.scrollWidth <= innerWidth + 1;
+  })()`));
+  await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+  const grip = `${nextColumn} .board-card-grip`;
+  await evaluate(cdp, `document.querySelector(${JSON.stringify(grip)}).scrollIntoView({block: "nearest", inline: "center", behavior: "instant"})`);
+  const touchGrip = await point(grip);
+  check("cards have a visible drag grip on touch screens", await evaluate(cdp, `document.querySelector(${JSON.stringify(grip)}).offsetWidth >= 32`));
+  const touchEnd = { x: touchGrip.x, y: touchGrip.y + 20 };
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [touchGrip] });
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [touchEnd] });
+  await waitForExpression(cdp, `document.querySelector(".board-drag-preview")`, PAGE_TIMEOUT_MS);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchCancel", touchPoints: [] });
+  check("a cancelled touch drag keeps the card in place", await evaluate(cdp, `!document.querySelector(".board-drag-preview") && document.querySelector('[data-column="1"] .board-card h3').textContent === "Review"`));
+  await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+  await evaluate(cdp, `(() => {
+    document.querySelector('[data-column="1"] .board-card h3 button').click();
+    document.getElementById("boardItemTitle").value = "Review again";
+    document.getElementById("boardItemForm").requestSubmit();
+  })()`);
+  equal("editing a card keeps it in its column on mobile", await evaluate(cdp, `document.querySelector('[data-column="1"] .board-card h3').textContent`), "Review again");
+  await waitForBoardSave("## In progress\n    - Review again: Read the draft.");
+  markdown = await readFile(boardFile, "utf8");
+  check("visual card edits update the Markdown file", markdown.includes("## In progress\n    - Review again: Read the draft."));
+  await cdp.send("Emulation.clearDeviceMetricsOverride");
+
+  const boardUrl = await evaluate(cdp, "location.href");
+  await evaluate(cdp, `document.getElementById("boardLibraryLink").click()`);
+  await waitForExpression(cdp, `document.getElementById("newDocument")?.getAttribute("aria-haspopup") === "dialog"`, PAGE_TIMEOUT_MS);
+  const boardRow = '[data-document-id="' + new URL(boardUrl).pathname.split("/").at(-1) + '"]';
+  await waitForExpression(cdp, `document.querySelector(${JSON.stringify(boardRow)})`, PAGE_TIMEOUT_MS);
+  check("a board shows the column icon in the library list", await evaluate(cdp, `(() => {
+    if (document.getElementById("documents").classList.contains("is-grid")) {
+      document.getElementById("viewToggle").click();
+    }
+    const row = document.querySelector(${JSON.stringify(boardRow)});
+    return row.querySelector(".board-glyph-icon").getBoundingClientRect().width > 0
+      && row.querySelector(".document-glyph-icon").getBoundingClientRect().width === 0;
+  })()`));
+  await evaluate(cdp, `(() => {
+    document.getElementById("libraryMenuButton").click();
+    document.getElementById("extensionsButton").click();
+    document.querySelector('[data-extension="boards"]').click();
+  })()`);
+  check("disabling Boards restores direct document creation", await evaluate(cdp, `!document.getElementById("newDocument").hasAttribute("aria-haspopup")`));
+  await cdp.send("Page.navigate", { url: boardUrl });
+  await waitForExpression(cdp, `document.getElementById("boardEditor")?.hidden === false`, PAGE_TIMEOUT_MS);
+  equal("disabling Boards leaves the saved source accessible", await evaluate(cdp, `document.getElementById("boardSource").value`), markdown);
+}
+
+async function checkDrawings(cdp, base, dataDir, pressKey) {
+  const libraryUrl = base + "/?space=general";
+  const pathCount = `document.querySelectorAll("#drawingInk path").length`;
+  const saved = `document.getElementById("drawingStatus")?.textContent === "Saved"`;
+  const eventStart = cdp.events.length;
+  function point(x, y) {
+    return evaluate(cdp, `(() => {
+      const rect = document.getElementById("drawingCanvas").getBoundingClientRect();
+      return { x: rect.left + rect.width * ${x}, y: rect.top + rect.height * ${y} };
+    })()`);
+  }
+
+  await cdp.send("Page.navigate", { url: libraryUrl });
+  await waitForExpression(cdp, `document.getElementById("librarySpace")?.value === "general"`, PAGE_TIMEOUT_MS);
+  await evaluate(cdp, `(() => {
+    document.getElementById("libraryMenuButton").click();
+    document.getElementById("extensionsButton").click();
+    document.querySelector('[data-extension="draw"]').click();
+    document.querySelector('#extensionsDialog button[type="submit"]').click();
+    document.getElementById("newDocument").click();
+  })()`);
+  check("Draw adds a Drawing option in the selected Space", await evaluate(cdp, `(() => {
+    const option = document.querySelector('[data-document-extension="draw"]');
+    return document.getElementById("newDocumentDialog").open && !option.hidden
+      && option.textContent.trim() === "Drawing" && option.search === "?space=general";
+  })()`));
+  await evaluate(cdp, `document.querySelector('[data-document-extension="draw"]').click()`);
+  await waitForExpression(cdp, `document.getElementById("drawingTitle")?.disabled === false`, PAGE_TIMEOUT_MS);
+  const id = await evaluate(cdp, `location.pathname.split("/").at(-1)`);
+  const drawingUrl = base + "/doc/" + id + "?space=general";
+  const drawingApi = base + "/api/documents/" + id + "/drawing";
+  equal("the untouched drawing stays a draft", (await fetch(drawingApi)).status, 404);
+  const start = await point(0.2, 0.2);
+  const end = await point(0.6, 0.4);
+  await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", buttons: 1, clickCount: 1, ...start });
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", buttons: 1, ...end });
+  check("the mouse stroke appears before it is committed", await evaluate(cdp, `document.querySelector("#drawingInk path")?.getAttribute("d").includes("L")`));
+  equal("an in-progress stroke is still a draft", (await fetch(drawingApi)).status, 404);
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...end });
+  await waitForExpression(cdp, saved, PAGE_TIMEOUT_MS);
+  const original = await fetch(drawingApi).then((response) => response.json());
+  check("the pencil stroke autosaves and the draft becomes a drawing", original.strokes.length === 1
+    && original.strokes[0].length >= 2 && (await evaluate(cdp, "location.href")) === drawingUrl);
+
+  await pressKey("z", "KeyZ", 90, 2);
+  equal("Ctrl+Z undoes the full stroke", await evaluate(cdp, pathCount), 0);
+  await waitForExpression(cdp, saved, PAGE_TIMEOUT_MS);
+  equal("undo saves the empty drawing", (await fetch(drawingApi).then((response) => response.json())).strokes.length, 0);
+  await pressKey("Z", "KeyZ", 90, 10);
+  equal("Ctrl+Shift+Z restores the stroke", await evaluate(cdp, pathCount), 1);
+  const savedPath = await evaluate(cdp, `document.querySelector("#drawingInk path").getAttribute("d")`);
+  await evaluate(cdp, `(() => {
+    const title = document.getElementById("drawingTitle");
+    title.value = "Release sketch";
+    title.dispatchEvent(new Event("input"));
+  })()`);
+  await waitForExpression(cdp, saved, PAGE_TIMEOUT_MS);
+  const disk = await readFile(path.join(dataDir, "Release sketch.md"), "utf8");
+  equal("the drawing title and geometry are saved to disk", disk.split("\n")[1], JSON.stringify(original.strokes));
+
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+  await cdp.send("Page.reload");
+  await waitForExpression(cdp, `${saved} && innerWidth === 390`, PAGE_TIMEOUT_MS);
+  equal("the same stroke reopens at 390px", await evaluate(cdp, `document.querySelector("#drawingInk path")?.getAttribute("d")`), savedPath);
+  check("the drawing fits without horizontal scrolling", await evaluate(cdp, `document.documentElement.scrollWidth === innerWidth`));
+  const touchStart = await point(0.25, 0.55);
+  const touchEnd = await point(0.5, 0.7);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [touchStart] });
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [touchEnd] });
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchCancel", touchPoints: [] });
+  equal("a cancelled touch drops only its unfinished stroke", await evaluate(cdp, pathCount), 1);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [touchStart] });
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [touchEnd] });
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await evaluate(cdp, `document.getElementById("drawingLibraryLink").click()`);
+  await waitForPage(cdp, libraryUrl, PAGE_TIMEOUT_MS);
+  equal("returning to the library saves a touch stroke", (await fetch(drawingApi).then((response) => response.json())).strokes.length, 2);
+  const row = `[data-document-id="${id}"]`;
+  await waitForExpression(cdp, `document.querySelector('${row}')`, PAGE_TIMEOUT_MS);
+  check("the drawing has a pencil icon in the library", await evaluate(cdp, `document.querySelector('${row} .drawing-glyph-icon').getBoundingClientRect().width > 0`));
+  await evaluate(cdp, `(() => {
+    document.getElementById("libraryMenuButton").click();
+    document.getElementById("extensionsButton").click();
+    document.querySelector('[data-extension="draw"]').click();
+  })()`);
+  check("turning off Draw hides the creation option", await evaluate(cdp, `!document.getElementById("newDocument").hasAttribute("aria-haspopup")`));
+  await cdp.send("Page.navigate", { url: drawingUrl });
+  await waitForExpression(cdp, `${saved} && ${pathCount} === 2`, PAGE_TIMEOUT_MS);
+  check("browser reports no Draw script errors or policy violations", !cdp.events.slice(eventStart).some(({ method, params }) =>
+    method === "Runtime.exceptionThrown" || (method === "Log.entryAdded" && params.entry.source === "security")));
+  await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+  await cdp.send("Emulation.clearDeviceMetricsOverride");
 }
 
 async function checkSpaces(cdp, base, dataDir) {
