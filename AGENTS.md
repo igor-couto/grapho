@@ -6,7 +6,7 @@ are an AI coding agent.
 ## Scope
 
 Grapho is a single-user document editor: one Rust binary, plain browser assets,
-and JSON files on disk. It should stay easy to run and easy to understand.
+and Markdown documents on disk. It should stay easy to run and easy to understand.
 
 Do not add accounts, sharing, collaboration, a database, or a frontend framework
 unless the user asks for them. The current features are the product, not a
@@ -83,7 +83,8 @@ roles, no per-document permissions. Keep it that way.
 src/main.rs       configuration, CLI, startup, graceful shutdown
 src/api.rs        routes, static assets, security headers, same-origin check
 src/auth.rs       password gate: Argon2id, sessions, throttling, cookies
-src/store.rs      document model, JSON persistence, HTML sanitization
+src/store.rs      document model, library persistence, HTML sanitization
+src/markdown.rs   Markdown bodies and relative image attachments on disk
 src/settings.rs   data folder rules and the remembered folder choice
 src/backup.rs     backup connectors: a background mirror of every save
 src/sftp.rs       the system sftp client, driven in batch mode for SSH backups
@@ -116,17 +117,19 @@ Data flow is deliberately simple:
 1. The browser loads static HTML/CSS/JS. When a password is configured, every
    page and API call also needs a session cookie.
 2. The UI uses the JSON API for document operations.
-3. The Rust store keeps documents in an in-memory map and writes each change to
-   the data folder as `<uuid>.json`.
-4. Documents use a simple versioned JSON format. Add `#[serde(default)]` when
-   extending it, and preserve existing files.
+3. The Rust store keeps documents in an in-memory map. A `<uuid>.md` file holds
+   the body, `metadata.json` holds titles, dates, deletion state and layout, and
+   relative links point to image files beside the Markdown.
+4. The store reads and sanitizes Markdown on startup. Keep the index versioned
+   and use `#[serde(default)]` when adding optional fields. Earlier per-document
+   JSON files are ignored.
 
 The default data directory is per-user, not the working directory:
 `$XDG_DATA_HOME/grapho` or `~/.local/share/grapho` on Linux,
 `~/Library/Application Support/Grapho` on macOS, and `%LOCALAPPDATA%\Grapho` on
 Windows. Package managers start the binary from arbitrary directories
 (`brew services` from `/`, a Chocolatey shim from `System32`), so a relative
-default would scatter documents. A `./data` folder that already holds `.json`
+default would scatter documents. A `./data` folder that already holds `<uuid>.md`
 files wins, which keeps checkouts and copied folders portable, and
 `GRAPHO_DATA_DIR` overrides everything. The container image sets that variable
 to `/data` explicitly.
@@ -157,8 +160,8 @@ save, an SSH server reached over SFTP, or a Google Drive folder. A OneDrive or
 Dropbox folder works through its desktop sync client, and a mounted network share
 works like any other folder. Adding one seeds the whole library through the
 worker, then each create, update, delete, or restore queues a job. `backup.rs`
-reads the latest state per changed id, writes active documents and removes
-copies of deleted ones. It collapses a burst of saves into one write per
+reads a committed snapshot, writes the changed bodies and attachments, removes
+deleted copies, then updates the active library index. It collapses a burst of saves into one write per
 document and records the last failure per connector for the page to show.
 Failed batches keep their document IDs in `backup-retries.json` beside the
 settings. The next document change retries each affected connector from the
@@ -168,12 +171,13 @@ queued copies a few seconds. Removing a connector stops mirroring and leaves
 the files already there alone.
 
 SSH connectors go through `sftp.rs`: Grapho runs the system OpenSSH `sftp` client
-in batch mode, one invocation per connector per batch. Nothing links an SSH
+in batch mode. Nothing links an SSH
 library, and no password or key material is stored; the client uses the user's key
 file, agent, and known_hosts, with `BatchMode=yes` and
-`StrictHostKeyChecking=accept-new`. The process runs with the data folder as its
-working directory, so the script only names `<uuid>.json` files and never has to
-quote a local path. Adding an SSH connector lists the remote folder first (which
+`StrictHostKeyChecking=accept-new`. The process runs in a staging folder, so
+batch commands only need bare local file names. Each batch lists the remote
+files before copying so it can remove old attachments. Adding an SSH connector
+lists the remote folder first (which
 proves the host, the account, and the path, and refuses another library's
 documents), then seeds; the connector is remembered only if both work.
 
@@ -204,7 +208,7 @@ browser has no network, the page says so and nothing else changes.
 
 The home page shows documents as rows or as grid cards. A grid card leads with a
 miniature of the document's beginning. The miniature is not an image and is not
-stored: `store.rs`'s `preview_html` derives it from the stored HTML when the
+stored: `store.rs`'s `preview_html` derives it from the in-memory HTML when the
 library is listed, so editing never renders or saves a thumbnail, and every old
 document has one before it is ever opened. It keeps the block tags and inline
 marks, drops attributes, links, and images (an image becomes a neutral block, so
@@ -231,7 +235,7 @@ query and brings the originating result into view.
 
 Each card's ⋯ menu opens the document, renames it, duplicates it, or deletes it.
 A duplicate is made by the server, not by replaying the document through the
-browser: `POST /api/documents/{id}/duplicate` copies the stored HTML and paper
+browser: `POST /api/documents/{id}/duplicate` copies the body and paper
 width into a new file with its own id and timestamps, then answers with the same
 summary the listing carries, so `home.js` adds a card with no listing reload.
 The copy's title is its source's name plus ` (copy)`, numbered when a title is
@@ -287,8 +291,7 @@ uses the same id, and a successful save switches the draft to its document URL.
 The editor does not use `contenteditable`. `assets/doc/input.js` owns the block
 model and the selection, `layout.js` turns blocks into positioned lines with
 pretext, and `view.js` paints those lines plus the caret and selection.
-`model.js` converts the block model to and from the stored HTML, which is
-unchanged.
+`model.js` converts the block model to and from the HTML used by the API.
 
 The paper is blank until the editor has fetched, measured, and laid out the
 document, and a large document, a slow connection, or a slow machine can make
@@ -357,7 +360,7 @@ hidden while the ghost stands in.
   already had, so it returns to the middle without being resized. `Block` stays
   for a block image at its natural width, and a free image keeps the position it
   was dropped at until one of the three is chosen.
-- A divider is a block whose stored HTML is `<hr>`. `layout.js` gives it an
+- A divider is a block represented by `<hr>` in HTML and `---` on disk. `layout.js` gives it an
   18 px band with space above and below and `dividerLineY` says where the rule
   goes, so `view.js` and `pdf.js` paint the same line. It has no text: like a
   picture, a click selects it, Backspace or Delete removes it, typing over it
@@ -398,8 +401,8 @@ hidden while the ghost stands in.
   in the paragraph beneath it). The rules run on typed input only and only at the
   very start of a line: a marker elsewhere, a code block, pasted text, and
   Markdown source keep the literal characters.
-- Paper width belongs to the document, not the HTML: `paper_width` (pixels) in
-  the document JSON, applied before the first layout. Dragging either border
+- The library metadata index stores each document's `paper_width` in pixels.
+  The editor applies it before the first layout. Dragging either border
   resizes both edges around the centre; the workspace bounds the drag and leaves
   a small gap at the edge of the screen. Widths near the 900 px default snap back
   to it with a short magnetic hold and an accent grip line; the snap drops the
@@ -475,8 +478,9 @@ hidden while the ghost stands in.
   unmarked run, painted by the source style in `layout.js` and
   `.doc-line.is-source`), with image blocks unchanged between the lines.
   Entering converts rich blocks to source. Leaving, saving, and exporting parse
-  edited source with `assets/doc/markdown.js`, so the JSON on disk is the same
-  sanitized HTML as always. The dialect is line-per-block: one line is one
+  edited source with `assets/doc/markdown.js`. The editor sends sanitized HTML
+  through the JSON API, and the server writes portable Markdown to disk.
+  The editing dialect is line-per-block: one line is one
   paragraph, a blank line is an empty paragraph (so intentional line breaks
   survive leaving and re-entering the mode), `#`..`###`, `>`, list markers,
   `---` (a divider) and fences are understood, and inline marks, links,
@@ -495,12 +499,15 @@ hidden while the ghost stands in.
   their own undo steps while in source mode and become a single rich-text undo
   step on exit when the parsed document changed.
 - The link dialog (`Ctrl+K`) opens at a caret or with text selected. At a bare
-  caret it inserts the chosen document's title or the typed web address as
+  caret it inserts the chosen document title, heading, or typed web address as
   the link label. Selected text and existing link labels keep their wording.
   The list shows recent documents, filters by title as the writer types,
   and links the chosen page as a root-relative
-  `/doc/<id>`. Choosing a row links that page; the arrow keys pick a row and
-  Enter (or the dialog's primary button) commits it. The listing is read once
+  `/doc/<id>`. Clicking a document row or pressing Enter links the page. Its
+  right arrow (or Right on the selected result) loads that document on demand
+  and lists its headings in order, using the same anchors as the editor.
+  Choosing a heading adds its fragment to the link. Left or Escape returns to
+  the document results and restores the search position. The listing is read once
   when the dialog opens, like `Ctrl+O`, and filtered locally, so typing sends no
   request; the current document is left out. A root-relative target keeps
   working on any host or port the library is served from, the store's sanitizer
@@ -515,10 +522,12 @@ hidden while the ghost stands in.
 - Heading anchors are derived, never stored: `model.js`'s `headingAnchors` slugs
   each heading's text (accents folded, lowercase, punctuation and whitespace runs
   to one hyphen, capped at 80 characters), gives repeats "-2", "-3" suffixes in
-  document order, and calls a heading with no letters "section". The document
-  menu offers "Copy link to heading" only while the caret is in a heading and
-  copies the absolute `/doc/<id>#<anchor>` URL; on a plain-http origin, where the
-  Clipboard API is unavailable, the old selection-and-copy path is the fallback.
+  document order, and calls a heading with no letters "section". Right-clicking
+  a heading or using the keyboard's context menu from a heading offers
+  "Copy link to heading". If the word has spelling suggestions, the copy action
+  appears alongside them. It copies the absolute `/doc/<id>#<anchor>` URL.
+  On a plain-http origin, where the Clipboard API is unavailable, the old
+  selection-and-copy path is the fallback.
   Opening such a link scrolls the heading below the sticky header and puts the
   caret in it, and a `hashchange` repeats the jump smoothly. The link dialog
   accepts and stores root-relative targets with a fragment. Anchors are absent
@@ -563,26 +572,23 @@ hidden while the ghost stands in.
 
 These should not be casually changed:
 
-- Stored HTML is sanitized on save and again on load. The allowlist in
-  `store.rs` is the trust boundary.
-- Images are embedded in that HTML as base64 data URLs. The sanitizer accepts only
-  PNG, JPEG, WebP, GIF, and AVIF data URLs on `img src`, never remote URLs:
-  opening a document must not touch the network.
-- Markdown mode is a view over the stored HTML, never a storage format. Saving
-  and exporting go through `documentBlocks()`, which parses the source back
+- The store sanitizes both incoming API HTML and HTML rendered from disk.
+  The allowlist in `store.rs` is the trust boundary.
+- The API carries images as bitmap data URLs. The store writes their bytes
+  to local attachments and uses relative paths in Markdown. Opening a document
+  resolves only its own attachments.
+- Markdown mode is an editing view. Saving and exporting go through
+  `documentBlocks()`, which parses the source back
   before the payload is built; source lines never contain images, and the
   source parser only accepts the documented HTML escape shapes (no `img`, no
   remote URLs), so a document still cannot make the browser fetch anything. The
   mode is per-visit and is never written into a document.
-- Formatting is stored as semantic tags (`<b>`, `<i>`, `<u>`, headings, lists),
-  never inline styles. Paragraph alignment and indent are the one block-level
-  exception: bounded `data-align` and `data-indent` attributes on the block tag,
-  validated by the sanitizer. Images carry their own bounded `data-radius` and
-  `data-width`, validated there too. The Content-Security-Policy forbids inline
-  styles.
-- The stored HTML is the interchange format between the editor and older
-  documents. `parseDocument`/`serializeDocument` must round-trip it; test with
-  documents written by earlier versions.
+- Formatting uses semantic tags in the API and Markdown on disk. Bounded
+  `data-align` and `data-indent` use safe HTML in Markdown. The index carries
+  the bounded image attributes. The sanitizer validates both, and CSP forbids
+  inline styles.
+- `parseDocument` and `serializeDocument` round-trip the API HTML.
+  `src/markdown.rs` round-trips that content through the data folder.
 - Clipboard HTML is untrusted input. Copy writes semantic HTML; paste reduces it
   in `assets/doc/clipboard.js` to the tags and bounded attributes the editor can
   write, plus the inline styles other editors use for bold, italic, underline,
@@ -659,7 +665,7 @@ These should not be casually changed:
   use and refused when they change (`StrictHostKeyChecking=accept-new`).
 - The sftp script is built only from validated fields. Remote paths reject quotes
   and newlines, host and user are restricted to plain name characters, and local
-  files are bare `<uuid>.json` names read from the data folder, never quoted
+  files are bare names read from a staging folder, never quoted
   paths with spaces.
 - An SSH connector is remembered only after the remote listing and the seed both
   succeed; a failed add leaves no connector and no inherited key material behind.

@@ -4666,7 +4666,7 @@ async function main() {
     await waitForExpression(cdp, `location.pathname === "/"`, PAGE_TIMEOUT_MS);
     check(
       "leaving a whitespace-only untitled draft writes no file",
-      !(await possibleBinary(path.join(dataDir, emptyDraftId + ".json"))),
+      !(await possibleBinary(path.join(dataDir, emptyDraftId + ".md"))),
     );
 
     const titledDraftId = await openNewDraft();
@@ -4684,9 +4684,9 @@ async function main() {
         PAGE_TIMEOUT_MS,
       ),
     );
-    const titleOnly = JSON.parse(await readFile(path.join(dataDir, titledDraftId + ".json"), "utf8"));
-    equal("a title-only draft keeps its title on disk", titleOnly.title, "Title only");
-    equal("a title-only draft keeps an empty body on disk", titleOnly.content, "");
+    const index = JSON.parse(await readFile(path.join(dataDir, "metadata.json"), "utf8"));
+    equal("a title-only draft keeps its title in the index", index.documents[titledDraftId].title, "Title only");
+    equal("a title-only draft keeps an empty Markdown file", await readFile(path.join(dataDir, titledDraftId + ".md"), "utf8"), "");
 
     await cdp.send("Emulation.setDeviceMetricsOverride", {
       width: 390,

@@ -9,7 +9,7 @@
 //! document instead of one per save.
 
 use std::collections::{HashMap, HashSet};
-use std::io;
+
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -22,7 +22,7 @@ use crate::drive::{Credentials, Drive};
 use crate::secrets::Secrets;
 use crate::settings::{BackupLocation, BackupTarget};
 use crate::sftp::{self, Target as SftpTarget};
-use crate::store::{self, SharedStore};
+use crate::store::{self, BackupSnapshot, SharedStore};
 
 /// Why a backup connector was refused. The HTTP layer turns these into messages
 /// a person can act on.
@@ -135,12 +135,6 @@ fn separate_folders(data: &Path, backup: &Path) -> Result<(), BackupError> {
     } else {
         Ok(())
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Change {
-    Write(Uuid),
-    Remove(Uuid),
 }
 
 enum Job {
@@ -317,10 +311,6 @@ impl BackupMirror {
         }
 
         self.connectors.write().await.push(location.clone());
-        self.health
-            .lock()
-            .expect("backup health lock")
-            .insert(location.id, None);
 
         let (reply, answer) = oneshot::channel();
         if self.jobs.send(Job::Seed(location.clone(), reply)).is_err() {
@@ -374,31 +364,23 @@ impl BackupMirror {
     async fn apply(&self, ids: &HashSet<Uuid>, retries: &mut HashMap<Uuid, HashSet<Uuid>>) -> bool {
         let mut updated = false;
         for connector in self.connectors().await {
-            // Remote batches can fail partway through. Repeat the whole affected
-            // batch for this connector, deriving writes and removals afresh.
+            // Adding reserves the destination before seeding checks it. A
+            // queued save must wait until the seed has accepted the folder.
+            if !self
+                .health
+                .lock()
+                .expect("backup health lock")
+                .contains_key(&connector.id)
+            {
+                continue;
+            }
+            // A failed batch is retried from the current committed state.
             let mut batch = ids.clone();
             if let Some(missed) = retries.get(&connector.id) {
                 batch.extend(missed);
             }
-            let mut changes = Vec::with_capacity(batch.len());
-            for &id in &batch {
-                // An id from a different data folder has no state to mirror.
-                if let Some(deleted) = self.store.is_deleted(id).await {
-                    changes.push(if deleted {
-                        Change::Remove(id)
-                    } else {
-                        Change::Write(id)
-                    });
-                }
-            }
-            let error = match &connector.target {
-                BackupTarget::Folder { path } => {
-                    self.apply_folder(connector.id, path, &changes).await
-                }
-                BackupTarget::Ssh { .. } => self.apply_ssh(&connector, &changes).await,
-                BackupTarget::GoogleDrive { .. } => self.apply_google(&connector, &changes).await,
-            };
-            if error.is_some() {
+            let result = self.sync(&connector, Some(&batch)).await;
+            if result.is_err() {
                 if retries.get(&connector.id) != Some(&batch) {
                     retries.insert(connector.id, batch);
                     updated = true;
@@ -406,168 +388,75 @@ impl BackupMirror {
             } else {
                 updated |= retries.remove(&connector.id).is_some();
             }
+            let error = result.err().map(|error| {
+                eprintln!("backup failed: {error}");
+                error.to_string()
+            });
             self.set_health(connector.id, error);
         }
         updated
     }
 
-    async fn apply_folder(
+    async fn sync(
         &self,
-        connector_id: Uuid,
-        folder: &Path,
-        changes: &[Change],
-    ) -> Option<String> {
-        // Finish in-flight writes before removal allows this folder to be
-        // chosen as the new primary. A previously queued batch may arrive late.
-        let connectors = self.connectors.read().await;
-        if !connectors
-            .iter()
-            .any(|connector| connector.id == connector_id)
-        {
-            return None;
+        location: &BackupLocation,
+        ids: Option<&HashSet<Uuid>>,
+    ) -> Result<(), BackupError> {
+        let seed = ids.is_none();
+        let data = self.store.directory().await;
+        let snapshot = self
+            .store
+            .backup_snapshot(ids)
+            .await
+            .map_err(|error| BackupError::io(&data, error))?;
+        if !seed && snapshot.changed.is_empty() {
+            return Ok(());
         }
-        // A saved connector can predate the overlap check, or a symlink can
-        // change destination between runs. Never write into an active library.
-        if let Err(error) = self.check_folder_target(folder).await {
-            return Some(error.to_string());
-        }
-        let mut last_error = None;
-
-        for change in changes {
-            match change {
-                Change::Write(id) => {
-                    let Some(document) = self.store.get(*id).await else {
-                        continue;
-                    };
-                    if let Err(error) = store::persist_document(folder, &document).await {
-                        eprintln!("backup to {} failed: {error}", folder.display());
-                        last_error = Some(error.to_string());
-                    }
+        match &location.target {
+            BackupTarget::Folder { path } => {
+                // Finish in-flight writes before removing a connector and
+                // allowing its target to become the primary data folder.
+                let connectors = self.connectors.read().await;
+                if !connectors
+                    .iter()
+                    .any(|connector| connector.id == location.id)
+                {
+                    return Ok(());
                 }
-                Change::Remove(id) => {
-                    let path = folder.join(format!("{id}.json"));
-                    match tokio::fs::remove_file(&path).await {
-                        Ok(()) => {}
-                        // A missing file is already removed. A missing drive
-                        // can still hold the file when it is reconnected.
-                        Err(error)
-                            if error.kind() == io::ErrorKind::NotFound
-                                && tokio::fs::metadata(folder)
-                                    .await
-                                    .is_ok_and(|entry| entry.is_dir()) => {}
-                        Err(error) => {
-                            eprintln!(
-                                "could not remove {} from {}: {error}",
-                                path.display(),
-                                folder.display()
-                            );
-                            last_error =
-                                Some(format!("could not remove a deleted document: {error}"));
-                        }
-                    }
-                }
+                separate_folders(
+                    &folder_key(&self.store.directory().await).await?,
+                    &folder_key(path).await?,
+                )?;
+                sync_folder(path, &snapshot, seed).await
             }
-        }
-
-        last_error
-    }
-
-    async fn check_folder_target(&self, folder: &Path) -> Result<(), BackupError> {
-        let data = folder_key(&self.store.directory().await).await?;
-        separate_folders(&data, &folder_key(folder).await?)
-    }
-
-    async fn apply_ssh(&self, connector: &BackupLocation, changes: &[Change]) -> Option<String> {
-        let target = SftpTarget::from_settings(&connector.target)?;
-        let data_dir = self.store.directory().await;
-
-        if changes.is_empty() {
-            return None;
-        }
-        let mut script = sftp::mkdir(&target.dir);
-        let mut removals = HashSet::new();
-        for change in changes {
-            match change {
-                Change::Write(id) => {
-                    let name = format!("{id}.json");
-                    script.push_str(&sftp::upload(&name, &sftp::remote_path(&target.dir, *id)));
-                }
-                Change::Remove(id) => {
-                    removals.insert(*id);
-                    script.push_str(&sftp::remove(&sftp::remote_path(&target.dir, *id)));
-                }
+            BackupTarget::Ssh { .. } => {
+                let target = SftpTarget::from_settings(&location.target).expect("SSH connector");
+                sync_ssh(&target, snapshot, seed).await
             }
-        }
-
-        // sftp's idempotent -rm also ignores permission errors. A successful
-        // final listing proves the requested files are gone.
-        if !removals.is_empty() {
-            script.push_str(&sftp::list(&target.dir));
-        }
-        match sftp::run(&target, &data_dir, &script).await {
-            Ok(listing)
-                if !removals.is_empty()
-                    && sftp::parse_listing(&listing)
-                        .iter()
-                        .any(|id| removals.contains(id)) =>
-            {
-                Some("The SSH server still holds a deleted document.".to_owned())
-            }
-            Ok(_) => None,
-            Err(message) => {
-                eprintln!("backup to {} failed: {message}", target.label());
-                Some(message)
+            BackupTarget::GoogleDrive {
+                client_id,
+                folder_id,
+                ..
+            } => {
+                let credentials = self
+                    .google_credentials(location.id, client_id)
+                    .map_err(|message| BackupError::Google { message })?;
+                let drive = self.drive.clone();
+                let id = location.id;
+                let folder_id = folder_id.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    sync_google(&drive, id, &credentials, &folder_id, &snapshot, seed)
+                })
+                .await;
+                result.map_err(|error| BackupError::Google {
+                    message: format!("the Google Drive task stopped: {error}"),
+                })?
             }
         }
     }
 
-    async fn apply_google(&self, connector: &BackupLocation, changes: &[Change]) -> Option<String> {
-        let BackupTarget::GoogleDrive {
-            client_id,
-            folder_id,
-            ..
-        } = &connector.target
-        else {
-            return None;
-        };
-
-        let credentials = match self.google_credentials(connector.id, client_id) {
-            Ok(credentials) => credentials,
-            Err(message) => return Some(message),
-        };
-
-        let data_dir = self.store.directory().await;
-        let drive = self.drive.clone();
-        let connector_id = connector.id;
-        let folder_id = folder_id.clone();
-        let changes: Vec<(Uuid, bool)> = changes
-            .iter()
-            .map(|change| match change {
-                Change::Write(id) => (*id, true),
-                Change::Remove(id) => (*id, false),
-            })
-            .collect();
-
-        let result = tokio::task::spawn_blocking(move || {
-            sync_google(
-                &drive,
-                connector_id,
-                &credentials,
-                &folder_id,
-                &data_dir,
-                &changes,
-            )
-        })
-        .await;
-
-        match result {
-            Ok(Ok(())) => None,
-            Ok(Err(message)) => {
-                eprintln!("backup to Google Drive failed: {message}");
-                Some(message)
-            }
-            Err(error) => Some(format!("the Google Drive task stopped: {error}")),
-        }
+    async fn seed(&self, location: &BackupLocation) -> Result<(), BackupError> {
+        self.sync(location, None).await
     }
 
     fn google_credentials(
@@ -575,181 +464,19 @@ impl BackupMirror {
         connector_id: Uuid,
         client_id: &str,
     ) -> Result<Credentials, String> {
-        let secret = self.secrets.get(connector_id).ok_or_else(|| {
+        let missing = || {
             "The Google Drive sign-in is missing. Remove this backup and connect it again."
                 .to_owned()
-        })?;
-
+        };
+        let secret = self.secrets.get(connector_id).ok_or_else(missing)?;
         if secret.refresh_token.is_empty() {
-            return Err(
-                "The Google Drive sign-in is missing. Remove this backup and connect it again."
-                    .to_owned(),
-            );
+            return Err(missing());
         }
-
         Ok(Credentials {
             client_id: client_id.to_owned(),
             client_secret: secret.client_secret,
             refresh_token: secret.refresh_token,
         })
-    }
-
-    async fn seed(&self, location: &BackupLocation) -> Result<(), BackupError> {
-        match &location.target {
-            BackupTarget::Folder { path } => self.seed_folder(path).await,
-            BackupTarget::Ssh { .. } => self.seed_ssh(location).await,
-            BackupTarget::GoogleDrive { .. } => self.seed_google(location).await,
-        }
-    }
-
-    async fn seed_folder(&self, folder: &Path) -> Result<(), BackupError> {
-        tokio::fs::create_dir_all(folder)
-            .await
-            .map_err(|error| BackupError::io(folder, error))?;
-        self.check_folder_target(folder).await?;
-
-        let known: HashSet<Uuid> = self
-            .store
-            .list()
-            .await
-            .into_iter()
-            .map(|summary| summary.id)
-            .collect();
-        let existing = store::document_files(folder).await;
-        let strangers = existing
-            .iter()
-            .filter(|(id, _)| !known.contains(id))
-            .count();
-        if strangers > 0 {
-            return Err(BackupError::Occupied {
-                documents: strangers,
-            });
-        }
-
-        let existing_ids: HashSet<Uuid> = existing.iter().map(|(id, _)| *id).collect();
-        let mut created = Vec::new();
-        for summary in self.store.list().await {
-            let Some(document) = self.store.get(summary.id).await else {
-                continue;
-            };
-            if let Err(error) = store::persist_document(folder, &document).await {
-                remove_files(folder, &created).await;
-                return Err(BackupError::io(folder, error));
-            }
-            if !existing_ids.contains(&document.id) {
-                created.push(document.id);
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn seed_ssh(&self, location: &BackupLocation) -> Result<(), BackupError> {
-        let target =
-            SftpTarget::from_settings(&location.target).ok_or_else(|| BackupError::Ssh {
-                message: "that connector is not an SSH server".to_owned(),
-            })?;
-        let data_dir = self.store.directory().await;
-
-        // One connection proves the host, the account, and the folder, and
-        // catches a server that already holds another library.
-        // A missing folder is allowed for the initial seed. The upload batch
-        // will create it, and reports any error that prevents writing there.
-        let listing = sftp::run(&target, &data_dir, &format!("-{}", sftp::list(&target.dir)))
-            .await
-            .map_err(|message| BackupError::Ssh { message })?;
-
-        let known: HashSet<Uuid> = self
-            .store
-            .list()
-            .await
-            .into_iter()
-            .map(|summary| summary.id)
-            .collect();
-        let strangers = sftp::parse_listing(&listing)
-            .into_iter()
-            .filter(|id| !known.contains(id))
-            .count();
-        if strangers > 0 {
-            return Err(BackupError::Occupied {
-                documents: strangers,
-            });
-        }
-
-        let mut script = sftp::mkdir(&target.dir);
-        for summary in self.store.list().await {
-            let name = format!("{}.json", summary.id);
-            if tokio::fs::metadata(data_dir.join(&name)).await.is_err() {
-                continue;
-            }
-            script.push_str(&sftp::upload(
-                &name,
-                &sftp::remote_path(&target.dir, summary.id),
-            ));
-        }
-
-        sftp::run(&target, &data_dir, &script)
-            .await
-            .map(|_| ())
-            .map_err(|message| BackupError::Ssh { message })
-    }
-
-    async fn seed_google(&self, location: &BackupLocation) -> Result<(), BackupError> {
-        let BackupTarget::GoogleDrive {
-            client_id,
-            folder_id,
-            ..
-        } = &location.target
-        else {
-            return Err(BackupError::Google {
-                message: "that connector is not Google Drive".to_owned(),
-            });
-        };
-
-        let credentials = self
-            .google_credentials(location.id, client_id)
-            .map_err(|message| BackupError::Google { message })?;
-
-        let known: HashSet<Uuid> = self
-            .store
-            .list()
-            .await
-            .into_iter()
-            .map(|summary| summary.id)
-            .collect();
-        let order: Vec<Uuid> = self
-            .store
-            .list()
-            .await
-            .into_iter()
-            .map(|summary| summary.id)
-            .collect();
-        let data_dir = self.store.directory().await;
-        let drive = self.drive.clone();
-        let connector_id = location.id;
-        let folder_id = folder_id.clone();
-
-        let result = tokio::task::spawn_blocking(move || {
-            seed_google_folder(
-                &drive,
-                connector_id,
-                &credentials,
-                &folder_id,
-                &data_dir,
-                &known,
-                &order,
-            )
-        })
-        .await;
-
-        match result {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(SeedFailure::Occupied(documents))) => Err(BackupError::Occupied { documents }),
-            Ok(Err(SeedFailure::Message(message))) => Err(BackupError::Google { message }),
-            Err(error) => Err(BackupError::Google {
-                message: format!("the Google Drive task stopped: {error}"),
-            }),
-        }
     }
 
     fn set_health(&self, id: Uuid, error: Option<String>) {
@@ -759,101 +486,177 @@ impl BackupMirror {
     }
 }
 
-/// Why seeding a Drive folder failed. Occupied is kept separate so the page can
-/// say "that folder already holds another library" instead of an API complaint.
-enum SeedFailure {
-    Occupied(usize),
-    Message(String),
+/// Seeding can refresh copies from this library, but never merge libraries.
+fn check_foreign_files<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    known: &HashSet<Uuid>,
+) -> Result<(), BackupError> {
+    let documents = names
+        .into_iter()
+        .filter_map(|name| {
+            let path = Path::new(name);
+            (path.file_name()?.to_str()? == name)
+                .then(|| store::document_file_id(path))
+                .flatten()
+        })
+        .filter(|id| !known.contains(id))
+        .count();
+    if documents > 0 {
+        return Err(BackupError::Occupied { documents });
+    }
+    Ok(())
 }
 
-/// One batch of Drive copies. Runs on a blocking thread; the worker is the only
-/// caller, so one list of the folder is enough for every change in the batch.
+async fn sync_folder(
+    folder: &Path,
+    snapshot: &BackupSnapshot,
+    seed: bool,
+) -> Result<(), BackupError> {
+    if seed {
+        tokio::fs::create_dir_all(folder)
+            .await
+            .map_err(|error| BackupError::io(folder, error))?;
+    }
+    let mut entries = tokio::fs::read_dir(folder)
+        .await
+        .map_err(|error| BackupError::io(folder, error))?;
+    let mut names = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| BackupError::io(folder, error))?
+    {
+        if entry
+            .file_type()
+            .await
+            .map_err(|error| BackupError::io(folder, error))?
+            .is_file()
+        {
+            if let Ok(name) = entry.file_name().into_string() {
+                names.push(name);
+            }
+        }
+    }
+    if seed {
+        check_foreign_files(names.iter().map(String::as_str), &snapshot.known)?;
+    }
+
+    for (name, bytes) in &snapshot.files {
+        store::write_data_file(&folder.join(name), bytes)
+            .await
+            .map_err(|error| BackupError::io(folder, error))?;
+    }
+    for name in names.iter().filter(|name| snapshot.obsolete(name)) {
+        tokio::fs::remove_file(folder.join(name))
+            .await
+            .map_err(|error| BackupError::io(folder, error))?;
+    }
+    store::write_data_file(&folder.join(store::INDEX_FILE), &snapshot.index)
+        .await
+        .map_err(|error| BackupError::io(folder, error))
+}
+
+async fn sync_ssh(
+    target: &SftpTarget,
+    snapshot: BackupSnapshot,
+    seed: bool,
+) -> Result<(), BackupError> {
+    let folder = std::env::temp_dir().join(format!("grapho-sftp-{}", Uuid::new_v4()));
+    let ssh_error = |message| BackupError::Ssh { message };
+    tokio::fs::create_dir(&folder)
+        .await
+        .map_err(|error| BackupError::io(&folder, error))?;
+    let result = async {
+        let list = sftp::list(&target.dir);
+        let initial_list = if seed {
+            format!("-{list}")
+        } else {
+            list.clone()
+        };
+        let listing = sftp::run(target, &folder, &initial_list)
+            .await
+            .map_err(|message| {
+                eprintln!("backup to {} failed: {message}", target.label());
+                ssh_error(message)
+            })?;
+        let names = sftp::parse_listing(&listing);
+        if seed {
+            check_foreign_files(names.iter().map(String::as_str), &snapshot.known)?;
+        }
+        let mut script = sftp::mkdir(&target.dir);
+        for (name, bytes) in &snapshot.files {
+            tokio::fs::write(folder.join(name), bytes)
+                .await
+                .map_err(|error| BackupError::io(&folder, error))?;
+            script.push_str(&sftp::upload(name, &sftp::remote_path(&target.dir, name)));
+        }
+        for name in names.iter().filter(|name| snapshot.obsolete(name)) {
+            script.push_str(&sftp::remove(&sftp::remote_path(&target.dir, name)));
+        }
+        tokio::fs::write(folder.join(store::INDEX_FILE), &snapshot.index)
+            .await
+            .map_err(|error| BackupError::io(&folder, error))?;
+        script.push_str(&sftp::upload(
+            store::INDEX_FILE,
+            &sftp::remote_path(&target.dir, store::INDEX_FILE),
+        ));
+        sftp::run(target, &folder, &script)
+            .await
+            .map_err(ssh_error)?;
+        Ok(())
+    }
+    .await;
+    let _ = tokio::fs::remove_dir_all(folder).await;
+    result
+}
+
+/// The worker is the only caller, so each batch needs a single Drive listing.
 fn sync_google(
     drive: &Drive,
     connector_id: Uuid,
     credentials: &Credentials,
     folder_id: &str,
-    data_dir: &Path,
-    changes: &[(Uuid, bool)],
-) -> Result<(), String> {
-    let token = drive.access_token(connector_id, credentials)?;
-    let remote = drive.list_folder(&token, folder_id)?;
-    let mut by_name: HashMap<String, String> = remote
-        .into_iter()
-        .map(|file| (file.name, file.id))
-        .collect();
-
-    for (document, write) in changes {
-        let name = format!("{document}.json");
-
-        if *write {
-            let bytes = std::fs::read(data_dir.join(&name))
-                .map_err(|error| format!("could not read {name} for the backup: {error}"))?;
-            let file_id = drive.upload(
-                &token,
-                by_name.get(&name).map(String::as_str),
-                &name,
-                folder_id,
-                &bytes,
-            )?;
-            by_name.insert(name, file_id);
-        } else if let Some(file_id) = by_name.remove(&name) {
-            drive.delete(&token, &file_id)?;
-        }
-    }
-
-    Ok(())
-}
-
-/// The first copy of a Drive connector: refuse another library's documents,
-/// then upload every document in the library, updating files that are already
-/// there under the same name.
-fn seed_google_folder(
-    drive: &Drive,
-    connector_id: Uuid,
-    credentials: &Credentials,
-    folder_id: &str,
-    data_dir: &Path,
-    known: &HashSet<Uuid>,
-    order: &[Uuid],
-) -> Result<(), SeedFailure> {
+    snapshot: &BackupSnapshot,
+    seed: bool,
+) -> Result<(), BackupError> {
+    let google_error = |message| BackupError::Google { message };
     let token = drive
         .access_token(connector_id, credentials)
-        .map_err(SeedFailure::Message)?;
-    let remote = drive
-        .list_folder(&token, folder_id)
-        .map_err(SeedFailure::Message)?;
-
-    let strangers = remote
-        .iter()
-        .filter_map(|file| store::document_file_id(Path::new(&file.name)))
-        .filter(|document| !known.contains(document))
-        .count();
-    if strangers > 0 {
-        return Err(SeedFailure::Occupied(strangers));
+        .map_err(google_error)?;
+    let remote = drive.list_folder(&token, folder_id).map_err(google_error)?;
+    if seed {
+        check_foreign_files(
+            remote.iter().map(|file| file.name.as_str()),
+            &snapshot.known,
+        )?;
     }
-
-    let mut by_name: HashMap<String, String> = remote
-        .into_iter()
-        .map(|file| (file.name, file.id))
+    let by_name: HashMap<_, _> = remote
+        .iter()
+        .map(|file| (file.name.as_str(), file.id.as_str()))
         .collect();
-
-    for document in order {
-        let name = format!("{document}.json");
-        let bytes = std::fs::read(data_dir.join(&name))
-            .map_err(|error| SeedFailure::Message(format!("could not read {name}: {error}")))?;
-        let file_id = drive
+    for (name, bytes) in &snapshot.files {
+        drive
             .upload(
                 &token,
-                by_name.get(&name).map(String::as_str),
-                &name,
+                by_name.get(name.as_str()).copied(),
+                name,
                 folder_id,
-                &bytes,
+                bytes,
             )
-            .map_err(SeedFailure::Message)?;
-        by_name.insert(name, file_id);
+            .map_err(google_error)?;
     }
-
+    for file in remote.iter().filter(|file| snapshot.obsolete(&file.name)) {
+        drive.delete(&token, &file.id).map_err(google_error)?;
+    }
+    drive
+        .upload(
+            &token,
+            by_name.get(store::INDEX_FILE).copied(),
+            store::INDEX_FILE,
+            folder_id,
+            &snapshot.index,
+        )
+        .map_err(google_error)?;
     Ok(())
 }
 
@@ -1000,12 +803,6 @@ fn same_google(target: &BackupTarget, client_id: &str, folder_id: &str) -> bool 
     )
 }
 
-async fn remove_files(folder: &Path, ids: &[Uuid]) {
-    for id in ids {
-        let _ = tokio::fs::remove_file(folder.join(format!("{id}.json"))).await;
-    }
-}
-
 async fn run(
     mirror: std::sync::Arc<BackupMirror>,
     mut jobs: mpsc::UnboundedReceiver<Job>,
@@ -1032,6 +829,13 @@ async fn run(
                 }
                 Job::Seed(location, reply) => {
                     let result = mirror.seed(&location).await;
+                    if result.is_ok() {
+                        mirror
+                            .health
+                            .lock()
+                            .expect("backup health lock")
+                            .insert(location.id, None);
+                    }
                     let _ = reply.send(result);
                 }
                 Job::Barrier(reply) => barriers.push(reply),
@@ -1113,7 +917,12 @@ mod tests {
         let store = mirror.store.clone();
         let document = store.create().await.expect("document is created");
         store
-            .update(document.id, Some("First".to_owned()), None, None)
+            .update(
+                document.id,
+                Some("First".to_owned()),
+                Some("<p>Body</p>".to_owned()),
+                None,
+            )
             .await
             .expect("update succeeds");
 
@@ -1122,10 +931,14 @@ mod tests {
             .await
             .expect("the folder is added");
 
-        let copied = tokio::fs::read_to_string(backup.join(format!("{}.json", document.id)))
+        let copied = tokio::fs::read_to_string(backup.join(format!("{}.md", document.id)))
             .await
             .expect("the document was copied");
-        assert!(copied.contains("\"First\""));
+        assert_eq!(copied, "Body\n");
+        let index = tokio::fs::read_to_string(backup.join(store::INDEX_FILE))
+            .await
+            .unwrap();
+        assert!(index.contains("\"First\""));
 
         store
             .update(document.id, Some("Second".to_owned()), None, None)
@@ -1134,7 +947,7 @@ mod tests {
         mirror.mirror_document(document.id);
         flush(&mirror).await;
 
-        let mirrored = tokio::fs::read_to_string(backup.join(format!("{}.json", document.id)))
+        let mirrored = tokio::fs::read_to_string(backup.join(store::INDEX_FILE))
             .await
             .expect("the document was mirrored");
         assert!(mirrored.contains("\"Second\""));
@@ -1148,19 +961,52 @@ mod tests {
         let (mirror, directory) = test_mirror("delete").await;
         let store = mirror.store.clone();
         let document = store.create().await.expect("document is created");
+        let content = "<img alt=\"Picture\" src=\"data:image/png;base64,AA==\">";
+        store
+            .update(document.id, None, Some(content.into()), None)
+            .await
+            .unwrap();
         let backup = folder("delete-target");
         add_folder(&mirror, backup.clone())
             .await
             .expect("the folder is added");
 
-        let copied = backup.join(format!("{}.json", document.id));
+        let copied = backup.join(format!("{}.md", document.id));
         assert!(copied.exists());
+        let body = tokio::fs::read_to_string(&copied).await.unwrap();
+        let image_name = body
+            .trim()
+            .strip_prefix("![Picture](")
+            .unwrap()
+            .strip_suffix(')')
+            .unwrap();
+        let image = backup.join(image_name);
+        assert!(image.is_file());
 
         store.delete(document.id).await.expect("delete succeeds");
         mirror.mirror_document(document.id);
         flush(&mirror).await;
 
         assert!(!copied.exists(), "the copy goes away with the document");
+        assert!(!image.exists());
+        assert!(Store::load(backup.clone())
+            .await
+            .unwrap()
+            .list()
+            .await
+            .is_empty());
+
+        store.restore(document.id).await.unwrap();
+        mirror.mirror_document(document.id);
+        flush(&mirror).await;
+        assert!(image.is_file());
+        let restored = Store::load(backup.clone())
+            .await
+            .unwrap()
+            .get(document.id)
+            .await
+            .unwrap();
+        assert_eq!(restored.content, content);
 
         let _ = tokio::fs::remove_dir_all(directory).await;
         let _ = tokio::fs::remove_dir_all(backup).await;
@@ -1193,7 +1039,7 @@ mod tests {
         mirror.mirror_document(document.id);
         flush(&mirror).await;
 
-        let copied = tokio::fs::read_to_string(good.join(format!("{}.json", document.id)))
+        let copied = tokio::fs::read_to_string(good.join(store::INDEX_FILE))
             .await
             .expect("the good folder still receives the document");
         assert!(copied.contains("After unplug"));
@@ -1213,7 +1059,7 @@ mod tests {
         let (mirror, directory) = test_mirror("stranger").await;
         let target = folder("stranger-target");
         tokio::fs::create_dir_all(&target).await.unwrap();
-        tokio::fs::write(target.join(format!("{}.json", Uuid::new_v4())), b"{}")
+        tokio::fs::write(target.join(format!("{}.md", Uuid::new_v4())), b"{}")
             .await
             .unwrap();
 
@@ -1249,7 +1095,7 @@ mod tests {
         let other = mirror.store.create().await.unwrap();
         mirror.mirror_document(other.id);
         flush(&mirror).await;
-        assert!(target.join(format!("{}.json", other.id)).is_file());
+        assert!(target.join(format!("{}.md", other.id)).is_file());
         let error = mirror.health().await[&connector.id].clone();
         let copy = Store::load(target.clone())
             .await
@@ -1290,7 +1136,7 @@ mod tests {
         );
         let document = mirror.store.create().await.unwrap();
         let connector = add_folder(&mirror, target.clone()).await.unwrap();
-        let copied = target.join(format!("{}.json", document.id));
+        let copied = target.join(format!("{}.md", document.id));
         assert!(copied.exists());
         assert!(!retry_file.exists());
 
@@ -1312,7 +1158,7 @@ mod tests {
         restarted.mirror_document(other.id);
         flush(&restarted).await;
         assert!(!copied.exists());
-        assert!(target.join(format!("{}.json", other.id)).exists());
+        assert!(target.join(format!("{}.md", other.id)).exists());
         assert!(restarted.health().await[&connector.id].is_none());
         let saved = std::fs::read(retry_file).unwrap();
         let pending: HashMap<Uuid, HashSet<Uuid>> = serde_json::from_slice(&saved).unwrap();
@@ -1400,7 +1246,7 @@ mod tests {
         add_folder(&mirror, backup.clone())
             .await
             .expect("the folder is added");
-        let copied = backup.join(format!("{}.json", document.id));
+        let copied = backup.join(store::INDEX_FILE);
 
         for title in ["One", "Two", "Three"] {
             store

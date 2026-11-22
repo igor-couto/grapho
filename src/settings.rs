@@ -1,7 +1,7 @@
 //! Where Grapho keeps its files.
 //!
-//! Two locations matter: the data directory that holds one JSON file per
-//! document, and a small settings file that remembers the folder chosen in the
+//! Two locations matter: the data directory that holds documents and their
+//! metadata index, and a settings file that remembers the folder chosen in the
 //! browser and the backup connectors that mirror it. The settings file lives
 //! outside the data directory so that moving the documents cannot lose the
 //! record of where they went.
@@ -15,7 +15,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-use crate::store::replace_file;
+use crate::store::{document_file_id, replace_file};
 
 /// Which rule picked the data directory, so the storage page can explain it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -148,10 +148,8 @@ pub fn directory_holds_documents(directory: &Path) -> bool {
     };
 
     entries.flatten().any(|entry| {
-        entry
-            .path()
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        entry.file_type().is_ok_and(|kind| kind.is_file())
+            && document_file_id(&entry.path()).is_some()
     })
 }
 
@@ -421,20 +419,22 @@ mod tests {
     }
 
     #[test]
-    fn only_a_folder_with_json_documents_is_a_portable_store() {
+    fn only_a_folder_with_markdown_documents_is_a_portable_store() {
         let root = env::temp_dir().join(format!("grapho-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
 
         assert!(!directory_holds_documents(&root));
 
         std::fs::write(root.join("README.md"), b"not a document").unwrap();
-        assert!(!directory_holds_documents(&root));
-
+        std::fs::write(root.join("metadata.json"), b"{}").unwrap();
         std::fs::write(
             root.join("6f9c1f2e-0000-4000-8000-000000000000.json"),
             b"{}",
         )
         .unwrap();
+        assert!(!directory_holds_documents(&root));
+
+        std::fs::write(root.join("6f9c1f2e-0000-4000-8000-000000000000.md"), b"{}").unwrap();
         assert!(directory_holds_documents(&root));
 
         std::fs::remove_dir_all(&root).unwrap();

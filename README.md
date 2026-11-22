@@ -1,8 +1,8 @@
 # Grapho
 
 Grapho is a small writing app that runs in the browser. It is one Rust binary with
-no database, account system, or frontend build step. Documents are plain JSON
-files on disk.
+no database, account system, or frontend build step. Documents are Markdown
+files on disk, with one metadata index for the library.
 
 The home screen searches document titles and full text, highlights matching
 passages, and shows previews in grid view. The editor has the formatting I use
@@ -12,8 +12,8 @@ corners, saves as you type, and can export to HTML, Markdown, PDF, or plain
 text. The menu switches between a dark theme (the default) and a light one. Focus
 mode, from the editor's menu, hides the toolbar and takes the page fullscreen so
 only the writing and the menu button remain. Markdown mode, next to it, turns the
-page into editable Markdown source; leaving it renders the document again, and
-the file on disk stays the same JSON. Copying keeps the formatting, and a paste
+page into editable Markdown source. Leaving it renders the document again.
+Copying keeps the formatting, and a paste
 from another program keeps the headings, lists, and emphasis it can represent.
 
 ## Installing
@@ -74,7 +74,7 @@ Open http://127.0.0.1:25265. The compiled binary is `target/release/grapho`
 Documents go to a per-user directory: `$XDG_DATA_HOME/grapho` (usually
 `~/.local/share/grapho`) on Linux, `~/Library/Application Support/Grapho` on
 macOS, and `%LOCALAPPDATA%\Grapho` on Windows. A `data/` folder in the working
-directory that already holds `.json` files is used instead, so an existing
+directory that already holds Grapho Markdown documents is used instead, so an existing
 checkout keeps its documents where they are. Set `GRAPHO_DATA_DIR=data` in a
 fresh checkout if you want them next to the source.
 
@@ -96,7 +96,7 @@ and the normal rendered view, and `/` focuses the search box on the home screen.
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `GRAPHO_ADDR` | `127.0.0.1:25265` | Address and port to listen on. |
-| `GRAPHO_DATA_DIR` | per-user directory | Directory for document JSON files. Overrides the folder saved on the Storage page. |
+| `GRAPHO_DATA_DIR` | per-user directory | Directory for Markdown documents and their metadata. Overrides the folder saved on the Storage page. |
 | `GRAPHO_PASSWORD_HASH` | unset | Argon2id hash from `grapho hash-password`. Turns on the login screen. |
 | `GRAPHO_PASSWORD_HASH_FILE` | unset | File containing that hash. Wins over `GRAPHO_PASSWORD_HASH`. |
 
@@ -188,12 +188,12 @@ bind-mounted host directory must be writable by that user.
 
 ## Data
 
-Documents are stored in `GRAPHO_DATA_DIR/<document-id>.json`, which defaults to
-the per-user directory above. Each file contains the title, sanitized HTML,
-timestamps, and the paper width once you have resized it. Images are embedded as
-base64 data URLs, so a document stays one self-contained file; photos are shrunk
-in the browser first. A save replaces the file through a temporary file, so a
-crash is unlikely to leave a half-written document.
+Each document has a `<document-id>.md` file containing its body. The shared
+`metadata.json` keeps titles, dates, paper widths, and image layout. Images sit
+beside the Markdown and use relative links. A few rich-text features, such as
+centered paragraphs, use HTML inside the Markdown. Stop Grapho before editing
+these files by hand, then restart it to pick up your changes. Earlier JSON
+document files are ignored.
 
 Deleted documents stay in the data directory. Use **Recently deleted** in the
 library menu to restore them with their original links. Grapho keeps them until
@@ -214,8 +214,9 @@ already holds another library's documents is refused rather than merged; choose
 the previous folder again and Grapho updates its copies instead.
 
 Backup locations are listed on the same page and configured in the same file.
-Add one and Grapho copies your active library. Saves replace the mirrored copies,
-deletions remove them, and restores copy the documents again. Use a local
+Add one and Grapho copies your active documents, their images, and their metadata
+index. Saves update the mirrored copies, deletions remove them, and restores
+copy the documents again. Use a local
 folder, a mounted network share, or a Google
 Drive, OneDrive, or Dropbox folder that its desktop app keeps in sync. Copies run
 in the background, so a slow share never delays a save (a copy still queued when
@@ -312,4 +313,4 @@ Bundled fonts are under the SIL Open Font License; their license texts are in
 
 ### Author
 
-* **Igor Couto** - [igor.fcouto@gmail.com](mailto:igor.fcouto@gmail.com)
+* **Igor Couto**

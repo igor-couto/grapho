@@ -7,8 +7,8 @@
 //! when it is missing (the container image, for one, has no shell tools).
 //!
 //! One invocation carries a whole batch: `sftp -b -` reads commands from stdin,
-//! so ten queued documents cost one connection, not ten. Local paths are bare
-//! file names because the process runs with the data folder as its working
+//! so ten queued documents can be uploaded over one connection. Local paths
+//! are bare file names because the process runs with a staging folder as its working
 //! directory, which keeps spaces and Windows separators out of the command
 //! parser.
 
@@ -17,13 +17,11 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::settings::BackupTarget;
+use crate::store;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::time::timeout;
-use uuid::Uuid;
-
-use crate::settings::BackupTarget;
-use crate::store;
 
 /// How long one sftp invocation may take before the copy is abandoned. The
 /// client itself gives up on a connection attempt after ten seconds.
@@ -86,11 +84,11 @@ pub fn normalized_remote_dir(dir: &str) -> String {
     }
 }
 
-pub fn remote_path(dir: &str, id: Uuid) -> String {
+pub fn remote_path(dir: &str, name: &str) -> String {
     if dir == "/" {
-        format!("/{id}.json")
+        format!("/{name}")
     } else {
-        format!("{dir}/{id}.json")
+        format!("{dir}/{name}")
     }
 }
 
@@ -109,7 +107,7 @@ pub fn upload(local_name: &str, remote: &str) -> String {
 }
 
 pub fn remove(remote: &str) -> String {
-    format!("-rm {}\n", quote(remote))
+    format!("rm {}\n", quote(remote))
 }
 
 pub fn list(dir: &str) -> String {
@@ -118,18 +116,20 @@ pub fn list(dir: &str) -> String {
 
 /// Document names in an `ls -1` listing. The batch echo lines and anything else
 /// the client prints are ignored.
-pub fn parse_listing(output: &str) -> Vec<Uuid> {
+pub fn parse_listing(output: &str) -> Vec<String> {
     output
         .lines()
         .map(str::trim)
         // OpenSSH lists absolute paths or bare names. Ignore command output
-        // such as "Removing /backups/<id>.json" that ends in a document name.
+        // such as "Removing /backups/<id>.md" that ends in a document name.
         .filter(|line| line.starts_with('/') || !line.contains('/'))
-        .filter_map(|line| store::document_file_id(Path::new(line)))
+        .filter_map(|line| line.rsplit('/').next())
+        .filter(|name| store::managed_file_id(name).is_some())
+        .map(str::to_owned)
         .collect()
 }
 
-/// Run one batch, from `working_directory` (the data folder), and return what
+/// Run one batch, from `working_directory`, and return what
 /// the client printed. File names in the script are relative to it.
 pub async fn run(
     target: &Target,
@@ -241,14 +241,14 @@ mod tests {
         assert_eq!(mkdir("/backups/grapho"), "-mkdir \"/backups/grapho\"\n");
         assert_eq!(
             upload(
-                "6f9c1f2e-0000-4000-8000-000000000000.json",
+                "6f9c1f2e-0000-4000-8000-000000000000.md",
                 "/backups/a b/x.json"
             ),
-            "put \"6f9c1f2e-0000-4000-8000-000000000000.json\" \"/backups/a b/x.json\"\n"
+            "put \"6f9c1f2e-0000-4000-8000-000000000000.md\" \"/backups/a b/x.json\"\n"
         );
         assert_eq!(
             remove("/backups/grapho/x.json"),
-            "-rm \"/backups/grapho/x.json\"\n"
+            "rm \"/backups/grapho/x.json\"\n"
         );
         assert_eq!(list("/backups"), "ls -1 \"/backups\"\n");
     }
@@ -259,23 +259,23 @@ mod tests {
         assert_eq!(normalized_remote_dir("/"), "/");
         assert_eq!(normalized_remote_dir("///"), "/");
 
-        let id = Uuid::parse_str("6f9c1f2e-0000-4000-8000-000000000000").unwrap();
+        let name = "6f9c1f2e-0000-4000-8000-000000000000.md";
         assert_eq!(
-            remote_path("/backups/grapho", id),
-            "/backups/grapho/6f9c1f2e-0000-4000-8000-000000000000.json"
+            remote_path("/backups/grapho", name),
+            "/backups/grapho/6f9c1f2e-0000-4000-8000-000000000000.md"
         );
         assert_eq!(
-            remote_path("/", id),
-            "/6f9c1f2e-0000-4000-8000-000000000000.json"
+            remote_path("/", name),
+            "/6f9c1f2e-0000-4000-8000-000000000000.md"
         );
     }
 
     #[test]
     fn listings_yield_only_document_names() {
         let output = concat!(
-            "Removing /backups/grapho/2f9c1f2e-0000-4000-8000-000000000000.json\n",
+            "Removing /backups/grapho/2f9c1f2e-0000-4000-8000-000000000000.md\n",
             "sftp> -ls -1 \"/backups/grapho\"\n",
-            "/backups/grapho/6f9c1f2e-0000-4000-8000-000000000000.json\n",
+            "/backups/grapho/6f9c1f2e-0000-4000-8000-000000000000.md\n",
             "/backups/grapho/notes.txt\n",
             "/backups/grapho/.hidden.json\n",
             "\n"
@@ -283,7 +283,7 @@ mod tests {
 
         let ids = parse_listing(output);
         assert_eq!(ids.len(), 1);
-        assert_eq!(ids[0].to_string(), "6f9c1f2e-0000-4000-8000-000000000000");
+        assert_eq!(ids[0], "6f9c1f2e-0000-4000-8000-000000000000.md");
     }
 
     #[test]

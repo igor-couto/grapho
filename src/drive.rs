@@ -266,8 +266,8 @@ impl Drive {
         Ok(files)
     }
 
-    /// Upload one document, creating it or replacing the content of `file_id`.
-    /// The upload is resumable so a document with images is not held to the
+    /// Upload one file, creating it or replacing the content of `file_id`.
+    /// The upload is resumable so an image is not held to the
     /// small-file limit; the whole body still goes in one request.
     pub fn upload(
         &self,
@@ -277,6 +277,13 @@ impl Drive {
         folder_id: &str,
         bytes: &[u8],
     ) -> Result<String, String> {
+        let content_type = match name.rsplit_once('.').map(|(_, extension)| extension) {
+            Some("json") => "application/json",
+            Some("md") => "text/markdown; charset=UTF-8",
+            _ => {
+                crate::markdown::attachment_content_type(name).unwrap_or("application/octet-stream")
+            }
+        };
         let metadata = match file_id {
             Some(_) => "{}".to_owned(),
             None => serde_json::json!({ "name": name, "parents": [folder_id] }).to_string(),
@@ -297,7 +304,7 @@ impl Drive {
             request
                 .set("authorization", &bearer(token))
                 .set("content-type", "application/json; charset=UTF-8")
-                .set("x-upload-content-type", "application/json")
+                .set("x-upload-content-type", content_type)
                 .set("x-upload-content-length", &bytes.len().to_string()),
             Some(metadata.as_bytes()),
         )?;
@@ -307,9 +314,7 @@ impl Drive {
             .ok_or_else(|| "Google did not open an upload session.".to_owned())?;
 
         let reply = self.call(
-            self.agent
-                .put(&location)
-                .set("content-type", "application/json"),
+            self.agent.put(&location).set("content-type", content_type),
             Some(bytes),
         )?;
 

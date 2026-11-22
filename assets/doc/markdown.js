@@ -1,10 +1,11 @@
 // Markdown mode's conversion layer: rich blocks <-> editable Markdown source.
 //
-// Markdown mode is a view over the usual stored HTML. While the mode is on,
+// Markdown mode is a view over the editor's rich blocks. While the mode is on,
 // the editor shows one source line per block: ordinary paragraph blocks with
 // `source: true` (one run, no marks, text is the Markdown line) and the image
 // blocks unchanged. Leaving the mode, saving, and exporting parse those lines
-// back into rich blocks, so the stored HTML format never changes.
+// back into rich blocks. The server writes its own portable Markdown from
+// the same HTML the editor sends in both modes.
 //
 // This module is pure: it converts block arrays and strings only. It knows
 // nothing about the editor, the DOM, saving, or the server.

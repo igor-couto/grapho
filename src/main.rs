@@ -4,6 +4,7 @@ mod auth;
 mod backup;
 mod disk;
 mod drive;
+mod markdown;
 mod secrets;
 mod settings;
 mod sftp;

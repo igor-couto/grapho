@@ -356,11 +356,12 @@ dependencies = [
 
 [[package]]
 name = "grapho"
-version = "0.1.7"
+version = "0.1.9"
 dependencies = [
  "ammonia",
  "argon2",
  "axum",
+ "base64",
  "getrandom 0.4.3",
  "html-escape",
  "libc",

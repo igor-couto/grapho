@@ -1725,7 +1725,7 @@ mod tests {
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        let file = directory.join(format!("{id}.json"));
+        let file = directory.join(format!("{id}.md"));
         let endpoint = format!("/api/documents/{id}/draft");
         let mut request = put_json(&endpoint, serde_json::json!({}));
         with_cookie(&mut request, &cookie);
@@ -2378,9 +2378,9 @@ mod tests {
             "the page reports the choice it just saved"
         );
         assert_eq!(body["documents"], 1);
-        assert!(target.join(format!("{id}.json")).exists());
+        assert!(target.join(format!("{id}.md")).exists());
         assert!(
-            directory.join(format!("{id}.json")).exists(),
+            directory.join(format!("{id}.md")).exists(),
             "the old folder keeps its copy"
         );
 
@@ -2434,7 +2434,7 @@ mod tests {
 
         let occupied = std::env::temp_dir().join(format!("grapho-api-full-{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&occupied).await.unwrap();
-        tokio::fs::write(occupied.join(format!("{}.json", Uuid::new_v4())), b"{}")
+        tokio::fs::write(occupied.join(format!("{}.md", Uuid::new_v4())), b"{}")
             .await
             .unwrap();
 
@@ -2538,7 +2538,7 @@ mod tests {
         assert!(backups[0]["error"].is_null(), "the first copy worked");
         assert_eq!(body["backups_editable"], true);
         assert!(
-            target.join(format!("{id}.json")).exists(),
+            target.join(format!("{id}.md")).exists(),
             "the existing library was copied in"
         );
 
@@ -2652,7 +2652,7 @@ mod tests {
             .is_empty());
 
         assert!(
-            target.join(format!("{id}.json")).exists(),
+            target.join(format!("{id}.md")).exists(),
             "removing a backup never deletes the copies"
         );
         let saved = tokio::fs::read_to_string(directory.join("test-settings.json"))
@@ -2701,17 +2701,19 @@ mod tests {
             .await
             .unwrap();
 
-        let copied = target.join(format!("{id}.json"));
+        let copied = target.join(format!("{id}.md"));
+        let index = target.join(crate::store::INDEX_FILE);
         let response = app
             .clone()
             .oneshot(put_json(
                 &format!("/api/documents/{id}"),
-                serde_json::json!({ "title": "Mirrored" }),
+                serde_json::json!({ "title": "Mirrored", "content": "<p>Writing</p>" }),
             ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        wait_for_file(&copied, "Mirrored").await;
+        wait_for_file(&copied, "Writing").await;
+        wait_for_file(&index, "Mirrored").await;
 
         let response = app
             .clone()
@@ -2747,7 +2749,8 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(json_body(response).await["id"], id);
-        wait_for_file(&copied, "Mirrored").await;
+        wait_for_file(&copied, "Writing").await;
+        wait_for_file(&index, "Mirrored").await;
         let body = json_body(app.oneshot(get("/api/documents/deleted")).await.unwrap()).await;
         assert_eq!(body["documents"], serde_json::json!([]));
 
@@ -2829,7 +2832,7 @@ mod tests {
         );
 
         // The copy is a file on disk like any other document.
-        assert!(directory.join(format!("{copy_id}.json")).exists());
+        assert!(directory.join(format!("{copy_id}.md")).exists());
 
         // An unknown document has nothing to copy.
         let response = app
@@ -3098,8 +3101,8 @@ mod google_tests {
 
         assert_eq!(
             mock_state.uploads.load(Ordering::SeqCst),
-            1,
-            "the library was seeded over the Drive API"
+            2,
+            "the Markdown document and index were seeded over the Drive API"
         );
 
         let _ = tokio::fs::remove_dir_all(directory).await;
