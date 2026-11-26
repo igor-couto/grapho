@@ -271,8 +271,95 @@ fn block_markdown(item: Element<'_>) -> Option<String> {
             list_markdown(item, 0, &mut lines)?;
             Some(lines.join("\n"))
         }
+        "table" => table_markdown(item),
         _ => None,
     }
+}
+
+/// One row of a canonical table: a bare `<tr>` holding bare cells of the
+/// expected tag. Any other shape is left for the raw HTML fallback.
+fn table_row<'a>(inner: &'a str, cell: &str) -> Option<Vec<&'a str>> {
+    let mut cells = Vec::new();
+    let mut rest = inner;
+    while !rest.is_empty() {
+        let item = element(rest)?;
+        if item.name != cell || item.opening.len() != item.name.len() + 2 {
+            return None;
+        }
+        cells.push(item.inner);
+        rest = &rest[item.raw.len()..];
+    }
+    (!cells.is_empty()).then_some(cells)
+}
+
+/// A canonical table as a GFM pipe table, or None when the pipe form cannot
+/// carry it and the block has to stay raw HTML.
+fn table_markdown(item: Element<'_>) -> Option<String> {
+    let head = element(item.inner)?;
+    let header_row = element(head.inner)?;
+    if head.name != "thead"
+        || head.opening != "<thead>"
+        || header_row.name != "tr"
+        || header_row.opening != "<tr>"
+        || header_row.raw.len() != head.inner.len()
+    {
+        return None;
+    }
+    let header = table_row(header_row.inner, "th")?;
+
+    let mut rows = Vec::<Vec<&str>>::new();
+    let mut rest = &item.inner[head.raw.len()..];
+    if !rest.is_empty() {
+        let body = element(rest)?;
+        if body.name != "tbody" || body.opening != "<tbody>" || body.raw.len() != rest.len() {
+            return None;
+        }
+        rest = body.inner;
+        while !rest.is_empty() {
+            let row = element(rest)?;
+            if row.name != "tr" || row.opening != "<tr>" {
+                return None;
+            }
+            let cells = table_row(row.inner, "td")?;
+            if cells.len() != header.len() {
+                return None;
+            }
+            rows.push(cells);
+            rest = &rest[row.raw.len()..];
+        }
+    }
+
+    let mut lines = vec![table_markdown_line(&header)?];
+    lines.push(format!("| {} |", vec!["---"; header.len()].join(" | ")));
+    for row in rows {
+        lines.push(table_markdown_line(&row)?);
+    }
+    Some(lines.join("\n"))
+}
+
+fn table_markdown_line(cells: &[&str]) -> Option<String> {
+    let cells = cells
+        .iter()
+        .map(|cell| table_cell_markdown(cell))
+        .collect::<Option<Vec<_>>>()?;
+    Some(format!("| {} |", cells.join(" | ")))
+}
+
+/// One cell as the inside of a GFM pipe cell. Pipes are escaped so the row
+/// splitter sees them as text. A cell whose Markdown table parsing would trim
+/// cannot round-trip, so it is refused instead.
+fn table_cell_markdown(html: &str) -> Option<String> {
+    let mut markdown = inline_markdown(html, 0)?;
+    if markdown.contains('\n')
+        || markdown.starts_with(|c: char| c.is_ascii_whitespace())
+        || markdown.ends_with(|c: char| c.is_ascii_whitespace())
+    {
+        return None;
+    }
+    if markdown.contains('|') {
+        markdown = markdown.replace('|', "\\|");
+    }
+    Some(markdown)
 }
 
 fn list_markdown(list: Element<'_>, depth: usize, lines: &mut Vec<String>) -> Option<()> {
@@ -636,7 +723,18 @@ fn inline_html(mut text: &str, depth: usize, out: &mut String) {
 fn is_raw_block(name: &str) -> bool {
     matches!(
         name,
-        "p" | "div" | "h1" | "h2" | "h3" | "h4" | "blockquote" | "ul" | "ol" | "pre" | "hr" | "img"
+        "p" | "div"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "blockquote"
+            | "ul"
+            | "ol"
+            | "pre"
+            | "hr"
+            | "img"
+            | "table"
     )
 }
 
@@ -644,6 +742,64 @@ fn raw_block(text: &str) -> Option<Element<'_>> {
     let block = element(text)?;
     let after = &text[block.raw.len()..];
     (is_raw_block(block.name) && (after.is_empty() || after.starts_with('\n'))).then_some(block)
+}
+
+/// A GFM table line split into its raw cells. A backslash escapes the next
+/// character, so `\|` is cell text rather than a cell boundary. The empty cells
+/// outside a leading or trailing pipe are dropped.
+fn table_cells(line: &str) -> Vec<&str> {
+    let mut cells = Vec::new();
+    let mut start = 0;
+    let mut escaped = false;
+    for (index, character) in line.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '|' {
+            cells.push(&line[start..index]);
+            start = index + 1;
+        }
+    }
+    cells.push(&line[start..]);
+    if cells.len() > 1 && table_cell_text(cells[0]).is_empty() {
+        cells.remove(0);
+    }
+    if cells.len() > 1 && table_cell_text(cells[cells.len() - 1]).is_empty() {
+        cells.pop();
+    }
+    cells
+}
+
+fn table_cell_text(cell: &str) -> &str {
+    cell.trim_matches([' ', '\t'])
+}
+
+fn has_unescaped_pipe(line: &str) -> bool {
+    let mut escaped = false;
+    for character in line.chars() {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '|' {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_table_delimiter(cell: &str) -> bool {
+    let cell = table_cell_text(cell);
+    let cell = cell.strip_prefix(':').unwrap_or(cell);
+    let cell = cell.strip_suffix(':').unwrap_or(cell);
+    !cell.is_empty() && cell.bytes().all(|byte| byte == b'-')
+}
+
+/// A cell's inline Markdown with only the table escape resolved: `\|` becomes
+/// the literal pipe again, and every other backslash stays for `inline_html`.
+fn table_cell_html(cell: &str) -> String {
+    table_cell_text(cell).replace("\\|", "|")
 }
 
 fn render(markdown: &str) -> String {
@@ -684,6 +840,51 @@ fn render(markdown: &str) -> String {
             }
             out.push_str("</pre>");
             continue;
+        }
+        // A GFM pipe table: the line above a delimiter row is its header. The
+        // delimiter's cells decide the column count, and rows run until a blank
+        // line or a line without a pipe.
+        if has_unescaped_pipe(current) {
+            let (delimiter, after_header) = line(next);
+            let header = table_cells(current);
+            let delimiters = table_cells(delimiter);
+            if delimiters.len() == header.len()
+                && delimiters.iter().all(|cell| is_table_delimiter(cell))
+            {
+                let mut rows = Vec::new();
+                let mut rows_rest = after_header;
+                while !rows_rest.is_empty() {
+                    let (row, after) = line(rows_rest);
+                    if row.trim().is_empty() || !has_unescaped_pipe(row) {
+                        break;
+                    }
+                    rows.push(row);
+                    rows_rest = after;
+                }
+
+                out.push_str("<table><thead><tr>");
+                for cell in &header {
+                    out.push_str("<th>");
+                    inline_html(&table_cell_html(cell), 0, &mut out);
+                    out.push_str("</th>");
+                }
+                out.push_str("</tr></thead><tbody>");
+                for row in rows {
+                    let cells = table_cells(row);
+                    out.push_str("<tr>");
+                    for column in 0..header.len() {
+                        out.push_str("<td>");
+                        if let Some(cell) = cells.get(column) {
+                            inline_html(&table_cell_html(cell), 0, &mut out);
+                        }
+                        out.push_str("</td>");
+                    }
+                    out.push_str("</tr>");
+                }
+                out.push_str("</tbody></table>");
+                rest = rows_rest;
+                continue;
+            }
         }
         if let Some((indent, _, _)) = list_item(current) {
             rest = render_list(rest, indent, 0, &mut out);
@@ -772,4 +973,133 @@ pub fn decode(
         ));
         Some(output)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decode_text(markdown: &str) -> String {
+        decode(markdown, &BTreeMap::new(), &ImageAttributes::new())
+    }
+
+    #[test]
+    fn canonical_tables_round_trip_through_markdown() {
+        let html = concat!(
+            "<table><thead><tr><th>Name</th><th>Qty</th></tr></thead>",
+            "<tbody><tr><td>Tea</td><td>2</td></tr>",
+            "<tr><td>Coffee</td><td>1</td></tr></tbody></table>"
+        );
+        let body = encode(Uuid::nil(), html);
+
+        assert_eq!(
+            body.markdown,
+            "| Name | Qty |\n| --- | --- |\n| Tea | 2 |\n| Coffee | 1 |\n"
+        );
+        assert_eq!(decode_text(&body.markdown), html);
+    }
+
+    #[test]
+    fn a_table_with_an_empty_body_round_trips() {
+        let html = "<table><thead><tr><th>a</th></tr></thead><tbody></tbody></table>";
+        let body = encode(Uuid::nil(), html);
+
+        assert_eq!(body.markdown, "| a |\n| --- |\n");
+        assert_eq!(decode_text(&body.markdown), html);
+    }
+
+    #[test]
+    fn table_cells_keep_their_inline_markup() {
+        let html = concat!(
+            "<table><thead><tr><th><b>Bold</b></th><th><code>a|b</code></th></tr></thead>",
+            "<tbody><tr><td><a href=\"https://example.com\">link</a></td><td>plain | pipe</td></tr>",
+            "<tr><td>first<br>second</td><td><u>underlined</u></td></tr></tbody></table>"
+        );
+        let body = encode(Uuid::nil(), html);
+
+        assert_eq!(
+            body.markdown,
+            concat!(
+                "| **Bold** | `a\\|b` |\n",
+                "| --- | --- |\n",
+                "| [link](https://example.com) | plain \\| pipe |\n",
+                "| first<br>second | <u>underlined</u> |\n"
+            )
+        );
+        assert_eq!(decode_text(&body.markdown), html);
+    }
+
+    #[test]
+    fn tables_the_pipe_form_cannot_carry_stay_raw_html() {
+        for html in [
+            // Attributes are not part of the canonical shape.
+            "<table class=\"layout\"><thead><tr><th>a</th></tr></thead><tbody></tbody></table>",
+            // A header row of body cells.
+            "<table><thead><tr><td>a</td></tr></thead><tbody></tbody></table>",
+            // No tbody around the body rows.
+            "<table><thead><tr><th>a</th></tr></thead><tr><td>b</td></tr></table>",
+            // Rows are rectangular in a canonical table.
+            "<table><thead><tr><th>a</th></tr></thead><tbody><tr><td>b</td><td>c</td></tr></tbody></table>",
+            // Cell Markdown would be trimmed by table parsing.
+            "<table><thead><tr><th> spaced</th></tr></thead><tbody></tbody></table>",
+        ] {
+            let body = encode(Uuid::nil(), html);
+
+            assert_eq!(body.markdown, format!("{html}\n"), "raw fallback: {html}");
+            assert_eq!(decode_text(&body.markdown), html);
+        }
+    }
+
+    #[test]
+    fn hand_written_pipe_tables_decode_to_canonical_html() {
+        assert_eq!(
+            decode_text("| Name | Qty |\n| :--- | ---: |\n| Tea | 2 |\n"),
+            concat!(
+                "<table><thead><tr><th>Name</th><th>Qty</th></tr></thead>",
+                "<tbody><tr><td>Tea</td><td>2</td></tr></tbody></table>"
+            )
+        );
+        assert_eq!(
+            decode_text("Name | Qty\n--- | ---\nTea | 2\n"),
+            concat!(
+                "<table><thead><tr><th>Name</th><th>Qty</th></tr></thead>",
+                "<tbody><tr><td>Tea</td><td>2</td></tr></tbody></table>"
+            )
+        );
+    }
+
+    #[test]
+    fn pipe_table_rows_are_padded_and_capped_to_the_header() {
+        assert_eq!(
+            decode_text("| one |\n| --- |\n| short |\n| a | b | c |\n"),
+            concat!(
+                "<table><thead><tr><th>one</th></tr></thead>",
+                "<tbody><tr><td>short</td></tr><tr><td>a</td></tr></tbody></table>"
+            )
+        );
+        assert_eq!(
+            decode_text("| one | two |\n| --- | --- |\n| short |\n\nafter | pipe\n"),
+            concat!(
+                "<table><thead><tr><th>one</th><th>two</th></tr></thead>",
+                "<tbody><tr><td>short</td><td></td></tr></tbody></table>",
+                "<p>after | pipe</p>"
+            )
+        );
+    }
+
+    #[test]
+    fn escaped_pipes_are_text_inside_a_cell() {
+        assert_eq!(
+            decode_text("| a \\| b |\n| --- |\n"),
+            "<table><thead><tr><th>a | b</th></tr></thead><tbody></tbody></table>"
+        );
+    }
+
+    #[test]
+    fn dividers_and_paragraph_pipes_are_not_tables() {
+        assert_eq!(decode_text("---\n"), "<hr>");
+        assert_eq!(decode_text("a | b\n"), "<p>a | b</p>");
+        assert_eq!(decode_text("a | b\nc | d\n"), "<p>a | b c | d</p>");
+        assert_eq!(decode_text("a | b\n---\n"), "<p>a | b</p><hr>");
+    }
 }

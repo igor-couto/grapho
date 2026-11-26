@@ -17,6 +17,7 @@ import {
   mapSourceCaretToRich,
   richToSource,
   sourceToRich,
+  tableToMarkdown,
   wrapInlineText,
 } from "./doc/markdown.js";
 import {
@@ -31,7 +32,7 @@ import {
   toggleList as toggleSourceList,
 } from "./doc/markdown-edit.js";
 import { IMAGE_MAX_DATA_URL, encodeCanvas, transformImage } from "./doc/image.js";
-import { cacheImageSize, ensureFonts, loadMissingImages } from "./doc/layout.js";
+import { cacheImageSize, ensureFonts, loadMissingImages, tableCellEntryAtOffset } from "./doc/layout.js";
 import { buildPdf } from "./doc/pdf.js";
 import { Spellcheck } from "./doc/spellcheck.js";
 
@@ -53,6 +54,14 @@ const state = {
   toastTimer: null,
   paperWidth: null,
   paperDrag: null,
+  // Where the pointer is over the paper. Hovering a table cell shows its
+  // floating options button.
+  pointerInside: false,
+  pointerX: 0,
+  pointerY: 0,
+  // The Space whose custom spelling words this document uses. General, the
+  // Space for documents without one, keeps its own list too.
+  spellingSpace: null,
   exportingPdf: false,
   focusMode: false,
   // Markdown mode is a per-visit view state (like focus mode): it starts off
@@ -137,6 +146,9 @@ async function init() {
   els.styleButton = document.getElementById("styleButton");
   els.styleButtonLabel = document.getElementById("styleButtonLabel");
   els.styleMenu = document.getElementById("styleMenu");
+  els.tableButton = document.getElementById("tableButton");
+  els.tableMenu = document.getElementById("tableMenu");
+  els.tableCellMenu = document.getElementById("tableCellMenu");
   els.alignButton = document.getElementById("alignButton");
   els.alignMenu = document.getElementById("alignMenu");
   els.linkButton = document.getElementById("linkButton");
@@ -203,8 +215,8 @@ async function init() {
     editor,
     menu: els.spellingMenu,
     positionMenu: positionBelow,
-    loadWords: () => request("/api/spelling/words", { cache: "no-store" }),
-    addWord: (word) => request("/api/spelling/words", { method: "POST", body: { word } }),
+    loadWords: () => request(spellingWordsPath(), { cache: "no-store" }),
+    addWord: (word) => request(spellingWordsPath(), { method: "POST", body: { word } }),
     onDictionaryError: (message) => showToast(message, true),
     beforeOpen: () => {
       closeHeadingMenu();
@@ -214,6 +226,8 @@ async function init() {
       closeAlignMenu();
       closeDocumentMenu();
       closeMoreFormatting();
+      closeTableMenu();
+      closeTableCellMenu();
     },
     onError: () => {
       setSpellingEnabled(false);
@@ -251,7 +265,26 @@ async function loadDocument() {
   }
 }
 
+// The custom spelling dictionary belongs to the document's Space. A draft
+// knows its Space from the address it was opened with; a saved document from
+// the Space it belongs to. General, the unnamed Space, is the fallback.
+function applySpellingSpace(document) {
+  if (!state.draft) {
+    state.spellingSpace = document.space_id || null;
+    return;
+  }
+  const space = new URLSearchParams(location.search).get("space");
+  state.spellingSpace = space && space !== "general" ? space : null;
+}
+
+function spellingWordsPath() {
+  return state.spellingSpace
+    ? "/api/spelling/words?space=" + encodeURIComponent(state.spellingSpace)
+    : "/api/spelling/words";
+}
+
 async function applyDocument(document) {
+  applySpellingSpace(document);
   const blocks = parseDocument(document.content || "");
   const sample = blocks.map(blockText).join(" ").slice(0, 200);
   await ensureFonts(sample);
@@ -714,6 +747,27 @@ function bindEvents() {
   els.styleMenu.addEventListener("keydown", handleStyleMenuKeydown);
   els.formatToolbar.addEventListener("scroll", closeStyleMenu, { passive: true });
 
+  els.tableButton.addEventListener("click", toggleTableMenu);
+  els.tableMenu.addEventListener("click", handleTableMenuClick);
+  els.tableMenu.addEventListener("keydown", handleTableMenuKeydown);
+  els.formatToolbar.addEventListener("scroll", closeTableMenu, { passive: true });
+
+  const tableTool = editor.view.ensureTableTool();
+  if (tableTool) {
+    // The button lives over the text; its own pointerdown must not move the
+    // caret like a click on the paper does.
+    tableTool.addEventListener("pointerdown", (event) => event.stopPropagation());
+    tableTool.addEventListener("click", handleTableCellToolClick);
+  }
+  els.tableCellMenu.addEventListener("click", handleTableCellMenuClick);
+  els.tableCellMenu.addEventListener("keydown", handleTableCellMenuKeydown);
+  els.editor.addEventListener("pointermove", handleTablePointerMove);
+  els.editor.addEventListener("pointerleave", handleTablePointerLeave);
+  els.editor.addEventListener("pointerdown", handleTablePointerDown);
+  els.editor.addEventListener("click", handleTableClick);
+  window.addEventListener("scroll", handleTableScroll, { passive: true });
+  window.addEventListener("resize", handleTableScroll);
+
   els.editor.addEventListener("click", (event) => {
     if (event.pointerType === "touch" && event.detail === 1 && editor.isCollapsed() &&
         !event.target.closest(".doc-image, .doc-resize-handle") && spelling.open(editor.view.spellingAtPoint(event))) {
@@ -834,6 +888,7 @@ function bindEvents() {
   window.addEventListener("scroll", closeImageMenu, { passive: true });
   window.addEventListener("scroll", closeAlignMenu, { passive: true });
   window.addEventListener("scroll", closeStyleMenu, { passive: true });
+  window.addEventListener("scroll", closeTableMenu, { passive: true });
   window.addEventListener("scroll", closeLinkPopover, { passive: true });
   window.addEventListener("scroll", () => spelling.close(true), { passive: true });
   window.addEventListener("scroll", () => closeHeadingMenu(true), { passive: true });
@@ -847,6 +902,7 @@ function bindEvents() {
   window.addEventListener("resize", closeImageMenu);
   window.addEventListener("resize", closeAlignMenu);
   window.addEventListener("resize", closeStyleMenu);
+  window.addEventListener("resize", closeTableMenu);
 
   els.editor.addEventListener("dragover", (event) => {
     event.preventDefault();
@@ -1072,6 +1128,7 @@ function handleSelectionChange(info) {
     return;
   }
   closeLinkPopover();
+  updateTableCellAffordance();
 
   const undoButton = els.formatToolbar.querySelector('[data-command="undo"]');
   const redoButton = els.formatToolbar.querySelector('[data-command="redo"]');
@@ -1087,6 +1144,7 @@ function handleSelectionChange(info) {
   }
 
   if (state.markdownMode) {
+    updateTableMenu();
     // The editor reports the plain source block ("p" with no marks); what the
     // toolbar shows is read out of the Markdown syntax at the selection, plus
     // any marks armed for the next typed text.
@@ -1126,6 +1184,7 @@ function handleSelectionChange(info) {
   const type = info.blockType || "p";
   updateStyleState(type);
   updateAlignState(info.alignment || "left");
+  updateTableMenu();
 }
 
 function setListPressed(ordered) {
@@ -1180,6 +1239,8 @@ function bindFormattingOverflow() {
     closeAlignMenu();
     closeImageMenu();
     closeDocumentMenu();
+    closeTableMenu();
+    closeTableCellMenu();
     els.moreFormattingMenu.hidden = false;
     els.moreFormattingButton.setAttribute("aria-expanded", "true");
     // A tap can keep the editor focused, including its on-screen keyboard.
@@ -1246,6 +1307,8 @@ function toggleStyleMenu() {
   closeDocumentMenu();
   closeImageMenu();
   closeMoreFormatting();
+  closeTableMenu();
+  closeTableCellMenu();
   els.styleMenu.hidden = false;
   els.styleButton.setAttribute("aria-expanded", "true");
   positionStyleMenu();
@@ -1320,6 +1383,332 @@ function handleStyleMenuKeydown(event) {
 }
 
 /* --------------------------------------------------------------------------
+   Table menu
+   -------------------------------------------------------------------------- */
+
+// The table button inserts a grid at a plain caret and turns into a small
+// structure menu while the caret is inside one. The menu is rebuilt each time
+// it opens so its row/column items match the caret's table.
+function toggleTableMenu() {
+  if (els.tableButton.disabled) {
+    return;
+  }
+  if (!els.tableMenu.hidden) {
+    closeTableMenu(true);
+    return;
+  }
+
+  closeStyleMenu();
+  closeAlignMenu();
+  closeDocumentMenu();
+  closeImageMenu();
+  closeMoreFormatting();
+  updateTableMenu();
+  els.tableMenu.hidden = false;
+  els.tableButton.setAttribute("aria-expanded", "true");
+  positionBelow(els.tableMenu, tableMenuAnchor());
+
+  const first = els.tableMenu.querySelector(".menu-item:not([hidden])");
+  if (first) {
+    first.focus({ preventScroll: true });
+  }
+}
+
+// The button can live in the compact toolbar or in More formatting; the menu
+// follows whichever control is on screen.
+function tableMenuAnchor() {
+  return els.moreFormattingMenu.contains(els.tableButton) ? els.moreFormattingButton : els.tableButton;
+}
+
+function updateTableMenu() {
+  const info = editor.tableAtCaret();
+  for (const item of els.tableMenu.querySelectorAll("[data-table-context]")) {
+    item.hidden = !info;
+  }
+  const label = info ? "Table options" : "Table";
+  els.tableButton.setAttribute("aria-label", label);
+  els.tableButton.title = info
+    ? label + " (row " + (info.row + 1) + ", column " + (info.column + 1) + ")"
+    : label;
+}
+
+function closeTableMenu(restoreFocus) {
+  if (els.tableMenu.hidden) {
+    return;
+  }
+  els.tableMenu.hidden = true;
+  els.tableButton.setAttribute("aria-expanded", "false");
+  if (restoreFocus) {
+    tableMenuAnchor().focus({ preventScroll: true });
+  }
+}
+
+function handleTableMenuClick(event) {
+  const item = event.target.closest("[data-table-command]");
+  if (!item) {
+    return;
+  }
+  const command = item.dataset.tableCommand;
+  closeTableMenu();
+  if (!state.markdownMode) {
+    switch (command) {
+      case "insert":
+        editor.insertTable(3, 1);
+        break;
+      case "row-above":
+        editor.tableInsertRowAtCaret(true);
+        break;
+      case "row-below":
+        editor.tableInsertRowAtCaret(false);
+        break;
+      case "row-delete":
+        editor.tableDeleteRowAtCaret();
+        break;
+      case "column-left":
+        editor.tableInsertColumnAtCaret(true);
+        break;
+      case "column-right":
+        editor.tableInsertColumnAtCaret(false);
+        break;
+      case "column-delete":
+        editor.tableDeleteColumnAtCaret();
+        break;
+      case "delete":
+        editor.deleteTableAtCaret();
+        break;
+      default:
+        break;
+    }
+  }
+  editor.focusEditor();
+}
+
+function handleTableMenuKeydown(event) {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeTableMenu(true);
+    return;
+  }
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
+    return;
+  }
+  const items = Array.from(els.tableMenu.querySelectorAll(".menu-item:not([hidden])"));
+  if (!items.length) {
+    return;
+  }
+  const index = items.indexOf(document.activeElement);
+  const offset = event.key === "ArrowDown" ? 1 : -1;
+  event.preventDefault();
+  items[((index < 0 ? 0 : index) + offset + items.length) % items.length].focus({ preventScroll: true });
+}
+
+/* --------------------------------------------------------------------------
+   Table cell options
+   -------------------------------------------------------------------------- */
+
+// A table gets one floating affordance, not one per cell: it follows the cell
+// under the pointer (and the tap target on touch) and opens the row/column menu
+// for that cell.
+function handleTablePointerMove(event) {
+  if (!state.loaded) {
+    return;
+  }
+  state.pointerInside = true;
+  state.pointerX = event.clientX;
+  state.pointerY = event.clientY;
+  updateTableCellAffordance();
+}
+
+function handleTablePointerLeave() {
+  state.pointerInside = false;
+  updateTableCellAffordance();
+}
+
+// A click lands after every pointer event, so it is the reliable place to
+// reveal the button for a tap as well as a mouse click.
+function handleTableClick(event) {
+  if (!state.loaded || state.markdownMode || event.target.closest(".doc-table-tool")) {
+    return;
+  }
+  const cell = editor.view.tableCellAtPoint(event.clientX, event.clientY);
+  if (!cell) {
+    updateTableCellAffordance();
+    return;
+  }
+  state.pointerInside = true;
+  state.pointerX = event.clientX;
+  state.pointerY = event.clientY;
+  editor.view.showTableCellTool(cell.entry, cell.cell);
+}
+
+function handleTablePointerDown(event) {
+  // A touch or pen has no hover, so the tap itself has to reveal the button.
+  if (event.pointerType === "mouse" || state.markdownMode || !state.loaded) {
+    return;
+  }
+  state.pointerX = event.clientX;
+  state.pointerY = event.clientY;
+  const cell = editor.view.tableCellAtPoint(event.clientX, event.clientY);
+  if (cell) {
+    editor.view.showTableCellTool(cell.entry, cell.cell);
+  }
+}
+
+function handleTableScroll() {
+  if (!editor) {
+    return;
+  }
+  closeTableCellMenu();
+  editor.view.hideTableCellTool();
+}
+
+function updateTableCellAffordance() {
+  if (!editor || state.markdownMode || !state.loaded) {
+    editor.view.hideTableCellTool();
+    return;
+  }
+  // While the menu is open the button stays where it is, even when the pointer
+  // crosses to the menu.
+  if (!els.tableCellMenu.hidden) {
+    return;
+  }
+  const hovered = state.pointerInside
+    ? editor.view.tableCellAtPoint(state.pointerX, state.pointerY)
+    : null;
+  if (hovered) {
+    editor.view.showTableCellTool(hovered.entry, hovered.cell);
+    return;
+  }
+  // A click or typing in a cell keeps the button there even after the pointer
+  // leaves, so a tap (which has no hover) still reveals it.
+  const caret = tableCaretCell();
+  if (caret) {
+    editor.view.showTableCellTool(caret.entry, caret.cell);
+    return;
+  }
+  editor.view.hideTableCellTool();
+}
+
+// The table cell holding the caret, for keeping the options button in place.
+function tableCaretCell() {
+  if (!editor || !editor.layout) {
+    return null;
+  }
+  const focus = editor.getSelection().focus;
+  const entry = editor.layout.blocks[focus.block];
+  if (!entry || !entry.table) {
+    return null;
+  }
+  const cell = tableCellEntryAtOffset(entry, focus.offset);
+  return cell ? { entry, cell } : null;
+}
+
+function handleTableCellToolClick(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const target = editor.view.tableToolCell;
+  if (!target) {
+    return;
+  }
+
+  closeStyleMenu();
+  closeAlignMenu();
+  closeDocumentMenu();
+  closeImageMenu();
+  closeMoreFormatting();
+  closeTableMenu();
+  closeTableCellMenu();
+  closeLinkPopover();
+  closeHeadingMenu(true);
+  spelling?.close(false);
+
+  // The commands act at the caret, so put it in the button's cell first. The
+  // cell carries its layout entry index and its start offset.
+  const focus = editor.getSelection().focus;
+  const inside =
+    focus.block === target.entry.index &&
+    focus.offset >= target.cell.offsetStart &&
+    focus.offset <= target.cell.offsetEnd;
+  if (!inside) {
+    editor.collapseTo({ block: target.entry.index, offset: target.cell.offsetStart });
+  }
+  openTableCellMenu();
+}
+
+function openTableCellMenu() {
+  const tool = editor.view.tableTool;
+  els.tableCellMenu.hidden = false;
+  tool?.setAttribute("aria-expanded", "true");
+  positionBelow(els.tableCellMenu, tool || els.tableButton);
+  const first = els.tableCellMenu.querySelector(".menu-item");
+  if (first) {
+    first.focus({ preventScroll: true });
+  }
+}
+
+function closeTableCellMenu(restoreFocus) {
+  if (els.tableCellMenu.hidden) {
+    return;
+  }
+  els.tableCellMenu.hidden = true;
+  editor.view.tableTool?.setAttribute("aria-expanded", "false");
+  if (restoreFocus) {
+    editor.focusEditor();
+  }
+}
+
+function handleTableCellMenuClick(event) {
+  const item = event.target.closest("[data-table-cell-command]");
+  if (!item) {
+    return;
+  }
+  const command = item.dataset.tableCellCommand;
+  closeTableCellMenu();
+  if (state.markdownMode) {
+    return;
+  }
+  switch (command) {
+    case "column-right":
+      editor.tableInsertColumnAtCaret(false);
+      break;
+    case "row-below":
+      editor.tableInsertRowAtCaret(false);
+      break;
+    case "column-delete":
+      editor.tableDeleteColumnAtCaret();
+      break;
+    case "row-delete":
+      editor.tableDeleteRowAtCaret();
+      break;
+    default:
+      break;
+  }
+  editor.focusEditor();
+  updateTableCellAffordance();
+}
+
+function handleTableCellMenuKeydown(event) {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeTableCellMenu(true);
+    return;
+  }
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
+    return;
+  }
+  const items = Array.from(els.tableCellMenu.querySelectorAll(".menu-item"));
+  if (!items.length) {
+    return;
+  }
+  const index = items.indexOf(document.activeElement);
+  const offset = event.key === "ArrowDown" ? 1 : -1;
+  event.preventDefault();
+  items[((index < 0 ? 0 : index) + offset + items.length) % items.length].focus({
+    preventScroll: true,
+  });
+}
+
+/* --------------------------------------------------------------------------
    Alignment
    -------------------------------------------------------------------------- */
 
@@ -1352,6 +1741,8 @@ function toggleAlignMenu() {
   closeImageMenu();
   closeStyleMenu();
   closeMoreFormatting();
+  closeTableMenu();
+  closeTableCellMenu();
   els.alignMenu.hidden = false;
   els.alignButton.setAttribute("aria-expanded", "true");
   positionAlignMenu();
@@ -1510,6 +1901,8 @@ function openLinkDialog() {
   closeAlignMenu();
   closeStyleMenu();
   closeMoreFormatting();
+  closeTableMenu();
+  closeTableCellMenu();
 
   const existing = state.markdownMode
     ? sourceLinkAt(editor.getDocument(), editor.getSelection())
@@ -2202,6 +2595,8 @@ function openImageMenu(entry) {
   }
   closeAlignMenu();
   closeStyleMenu();
+  closeTableMenu();
+  closeTableCellMenu();
   state.imageEntry = entry;
   updateImageMenuChecks(entry);
   els.imageMenu.hidden = false;
@@ -2517,6 +2912,12 @@ function handleDocumentPointer(event) {
   if (!els.moreFormattingMenu.contains(event.target) && !els.moreFormattingButton.contains(event.target)) {
     closeMoreFormatting();
   }
+  if (!els.tableMenu.hidden && !els.tableMenu.contains(event.target) && !event.target.closest("#tableButton")) {
+    closeTableMenu();
+  }
+  if (!els.tableCellMenu.hidden && !els.tableCellMenu.contains(event.target) && !event.target.closest(".doc-table-tool")) {
+    closeTableCellMenu();
+  }
 }
 
 function readSpellingPreference() {
@@ -2562,6 +2963,8 @@ function toggleDocumentMenu() {
   closeImageMenu();
   closeStyleMenu();
   closeMoreFormatting();
+  closeTableMenu();
+  closeTableCellMenu();
 }
 
 function closeDocumentMenu(restoreFocus) {
@@ -2798,6 +3201,10 @@ function enterMarkdownMode() {
   closeAlignMenu();
   closeImageMenu();
   closeMoreFormatting();
+  closeTableMenu();
+  closeTableCellMenu();
+  editor.view.hideTableCellTool();
+  els.tableButton.disabled = true;
 
   const richBlocks = editor.getDocument();
   const selection = editor.getSelection();
@@ -2843,10 +3250,18 @@ function exitMarkdownMode() {
       undoFrom = snapshot;
     }
   }
-  const selection = {
-    anchor: mapSourceCaretToRich(conversion, sourceSelection.anchor),
-    focus: mapSourceCaretToRich(conversion, sourceSelection.focus),
-  };
+  // With no source edits, put the exact rich blocks and the exact selection
+  // back; that makes a toggle that changed nothing a true no-op, even if the
+  // source form (a multi-line table, say) maps carets only approximately.
+  let selection;
+  if (state.sourceDirty) {
+    selection = {
+      anchor: mapSourceCaretToRich(conversion, sourceSelection.anchor),
+      focus: mapSourceCaretToRich(conversion, sourceSelection.focus),
+    };
+  } else {
+    selection = { anchor: { ...snapshot.anchor }, focus: { ...snapshot.focus } };
+  }
 
   state.markdownMode = false;
   state.sourceDirty = false;
@@ -2855,6 +3270,7 @@ function exitMarkdownMode() {
   state.markdownConversion = null;
   document.body.classList.remove("is-markdown-mode");
   updateMarkdownMenuItem();
+  els.tableButton.disabled = false;
   editor.setSourceMode(false);
   editor.setDocument(richBlocks, selection, { history, undoFrom });
   editor.focusEditor();
@@ -3006,6 +3422,9 @@ function exportHtml() {
     "font-family:ui-monospace,Consolas,monospace;font-size:.8em;}",
     "code{font-family:ui-monospace,Consolas,monospace;font-size:.84em;}",
     "hr{border:0;height:1px;background:#d3cbbb;margin:2em 0;}",
+    "table{border-collapse:collapse;width:100%;margin:1.6em 0;font-size:.92em;}",
+    "th,td{border:1px solid #d3cbbb;padding:6px 9px;text-align:left;vertical-align:top;}",
+    "th{background:#f1ece1;font-weight:600;}",
     "img{display:block;max-width:100%;height:auto;margin:1.6em auto;}",
     "img.wrap-left{float:left;max-width:42%;margin:.35em 1.35em 0 0;}",
     "img.wrap-right{float:right;max-width:42%;margin:.35em 0 0 1.35em;}",
@@ -3121,6 +3540,13 @@ function exportMarkdown() {
     }
     if (block.type === "divider") {
       parts.push("---");
+      continue;
+    }
+    if (block.type === "table") {
+      // The exported file uses a portable GFM pipe table whenever the cells
+      // can be written as inline Markdown; otherwise the serialized HTML is
+      // the same lossless fallback the editor itself writes to disk.
+      parts.push(tableToMarkdown(block) || serializeDocument([block]));
       continue;
     }
     if (block.type === "code") {
@@ -3364,6 +3790,16 @@ function handleGlobalKeydown(event) {
     if (!els.moreFormattingMenu.hidden) {
       event.preventDefault();
       closeMoreFormatting(els.moreFormattingMenu.contains(document.activeElement));
+      return;
+    }
+    if (!els.tableMenu.hidden) {
+      event.preventDefault();
+      closeTableMenu(els.tableMenu.contains(document.activeElement));
+      return;
+    }
+    if (!els.tableCellMenu.hidden) {
+      event.preventDefault();
+      closeTableCellMenu(true);
       return;
     }
     if (!els.styleMenu.hidden) {

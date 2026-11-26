@@ -58,6 +58,19 @@
 //                                            attributes (depth is explicit
 //                                            because a one-line document has
 //                                            no ancestors)
+//   | a | b | / | --- | --- | / | c | d |
+//                                            a table: a header row, a delimiter
+//                                            row, then one line per body row.
+//                                            The rows are consecutive lines and
+//                                            end at the first line that is not
+//                                            a pipe row, so a table is the one
+//                                            rich block made of several source
+//                                            lines. A cell holds inline
+//                                            Markdown; `\|` is a literal pipe.
+//                                            A table whose cells the pipe form
+//                                            cannot carry falls back to one
+//                                            serialized-HTML line:
+//   <table><thead><tr><th>a</th></tr></thead><tbody><tr><td>b</td></tr></tbody></table>
 // Only these exact shapes (and the inline tags above) are accepted from HTML
 // lines; anything else, including images and absolute remote urls, stays
 // literal text so a stored document can never start touching the network.
@@ -90,10 +103,14 @@ import {
   createBlock,
   createBlockId,
   createDivider,
+  createTable,
   emptyParagraph,
+  isTableBlock,
   normalizeRuns,
   parseDocument,
+  serializeDocument,
   serializeRuns,
+  tableCellRanges,
 } from "./model.js";
 
 const LIST_DEPTH_LIMIT = 6; // model.js LIST_DEPTH_LIMIT (not exported there)
@@ -832,6 +849,16 @@ export function blockToLines(block) {
   return blockLinesFor(block, []).lines;
 }
 
+/**
+ * One table block as a GFM pipe table, or null when a cell's content cannot be
+ * written as inline Markdown exactly (the caller then falls back to the
+ * serialized HTML, exactly as a nested block in the source mode does).
+ */
+export function tableToMarkdown(block) {
+  const table = tableSourceLines(block);
+  return table ? table.lines.join("\n") : null;
+}
+
 function sourceText(block) {
   if (!block || block.type === "image") {
     return "";
@@ -873,6 +900,259 @@ function richBlockFromLine(line, info) {
       }
       return createBlock("p", inlineToRuns(info.body));
   }
+}
+
+/* --------------------------------------------------------------------------
+   Pipe tables
+   -------------------------------------------------------------------------- */
+
+// A table is several source lines: a header row, a delimiter row, then one row
+// per line. It is still one rich block, so the conversion carries its row
+// geometry for the caret maps. A table the pipe form cannot express exactly
+// (leading/trailing spaces inside a cell, a code span holding a hard break)
+// falls back to the one-line serialized-HTML shape in blockLinesFor().
+const TABLE_DELIMITER_CELL = /^:?-+:?$/;
+const TABLE_PIPE = "|";
+
+function isEscapedAt(text, index) {
+  let count = 0;
+  for (let at = index - 1; at >= 0 && text[at] === "\\"; at -= 1) {
+    count += 1;
+  }
+  return count % 2 === 1;
+}
+
+// Split one pipe-table line into trimmed cell bodies with their offsets in the
+// line. A backslash escapes the next character for splitting; the pair stays in
+// the cell text so the inline parser can process it (except `\|`, which the
+// table layer itself consumes).
+function tableLineParts(line) {
+  const text = toText(line);
+  let start = 0;
+  while (start < text.length && (text[start] === " " || text[start] === "\t")) {
+    start += 1;
+  }
+  let end = text.length;
+  while (end > start && (text[end - 1] === " " || text[end - 1] === "\t")) {
+    end -= 1;
+  }
+  if (!text.slice(start, end).includes(TABLE_PIPE)) {
+    return null;
+  }
+  const outerStart = text[start] === TABLE_PIPE;
+  const outerEnd = end > start && text[end - 1] === TABLE_PIPE && !isEscapedAt(text, end - 1);
+  const cells = [];
+  const addCell = (from, to) => {
+    let raw = text.slice(from, to);
+    const leading = raw.length - raw.replace(/^[ \t]+/, "").length;
+    raw = raw.replace(/^[ \t]+/, "").replace(/[ \t]+$/, "");
+    cells.push({ text: raw, start: from + leading, length: raw.length });
+  };
+  let index = start + (outerStart ? 1 : 0);
+  const limit = end - (outerEnd ? 1 : 0);
+  let cellStart = index;
+  while (index < limit) {
+    const character = text[index];
+    if (character === "\\") {
+      index += 2;
+      continue;
+    }
+    if (character === TABLE_PIPE) {
+      addCell(cellStart, index);
+      index += 1;
+      cellStart = index;
+      continue;
+    }
+    index += 1;
+  }
+  if (limit >= cellStart) {
+    addCell(cellStart, limit);
+  }
+  return { outerStart, outerEnd, cells };
+}
+
+function tableDelimiterCells(line) {
+  const parts = tableLineParts(line);
+  if (!parts || !parts.outerStart || !parts.outerEnd || !parts.cells.length) {
+    return null;
+  }
+  for (const cell of parts.cells) {
+    if (!TABLE_DELIMITER_CELL.test(cell.text)) {
+      return null;
+    }
+  }
+  return parts.cells.length;
+}
+
+// A row line the conversion wrote: both outer pipes, so ordinary prose lines
+// that merely contain a pipe never get swallowed into a table.
+function tableRowParts(line) {
+  const parts = tableLineParts(line);
+  if (!parts || !parts.outerStart || !parts.outerEnd || !parts.cells.length) {
+    return null;
+  }
+  return parts;
+}
+
+function unescapeTableCell(text) {
+  return text.replace(/\\\|/g, "|");
+}
+
+function tableCellRuns(text) {
+  return normalizeRuns(inlineToRuns(unescapeTableCell(text)));
+}
+
+function tableCellMarkdown(runs) {
+  const markdown = inlineMarkdownFor(safeRuns(runs));
+  if (markdown === null) {
+    return null;
+  }
+  if (markdown !== "" && (markdown[0] === " " || markdown[0] === "\t" || /\s$/.test(markdown))) {
+    return null;
+  }
+  return markdown;
+}
+
+// One row entry for the caret maps: where each cell's Markdown text starts in
+// the source line, and where the same cell starts in the rich table's flat
+// offset space.
+function tableRowEntry(table, ranges, row, sourceRow, lineLength) {
+  const columnCount = table.rows[0].length;
+  const cells = [];
+  for (let column = 0; column < columnCount; column += 1) {
+    const range = ranges[row * columnCount + column];
+    const sourceCell = sourceRow ? sourceRow.cells[column] : null;
+    cells.push({
+      sourceStart: sourceCell ? sourceCell.start : lineLength,
+      sourceLength: sourceCell ? sourceCell.length : 0,
+      richStart: range ? range.start : 0,
+      richLength: range ? range.end - range.start : 0,
+    });
+  }
+  return { row, lineLength, cells, richDefault: cells.length ? cells[0].richStart : 0 };
+}
+
+function tableLineEntries(table, sourceRows, lineTexts) {
+  const ranges = tableCellRanges(table);
+  const entries = [];
+  entries.push(tableRowEntry(table, ranges, 0, sourceRows[0], lineTexts[0].length));
+  const bodyStart = table.rows.length > 1 ? ranges[table.rows[0].length].start : blockLength(table);
+  entries.push({ delimiter: true, richDefault: bodyStart, lineLength: lineTexts[1].length });
+  for (let row = 1; row < table.rows.length; row += 1) {
+    const sourceRow = sourceRows[row];
+    entries.push(
+      tableRowEntry(
+        table,
+        ranges,
+        row,
+        sourceRow,
+        sourceRow ? lineTexts[sourceRow.lineIndex].length : 0,
+      ),
+    );
+  }
+  return entries;
+}
+
+// The canonical pipe lines for a table block, or null when a cell cannot be
+// written exactly as inline Markdown. The result is verified by parsing it back:
+// if the round trip changes any cell, the caller keeps the HTML escape shape.
+function tableSourceLines(block) {
+  const rows = block.rows;
+  const columnCount = rows[0] ? rows[0].length : 0;
+  if (!columnCount) {
+    return null;
+  }
+  const rendered = rows.map((cells) => cells.map((runs) => tableCellMarkdown(runs)));
+  if (rendered.some((cells) => cells.some((markdown) => markdown === null))) {
+    return null;
+  }
+  const lines = [];
+  for (let row = 0; row < rows.length; row += 1) {
+    const cells = rendered[row].map((markdown) => markdown.replaceAll(TABLE_PIPE, "\\|"));
+    lines.push("| " + cells.join(" | ") + " |");
+    if (row === 0) {
+      lines.push("| " + new Array(columnCount).fill("---").join(" | ") + " |");
+    }
+  }
+  const parsed = parseTableSourceLines(lines);
+  if (!parsed || serializeDocument([parsed.block]) !== serializeDocument([block])) {
+    return null;
+  }
+  return { lines, parsed };
+}
+
+// Parse a block of pipe-table source lines (header, delimiter, then rows) into
+// one table block, or null when the lines are not a table. `sourceRows` keeps
+// each row's line index and cell offsets for the caret maps.
+function parseTableSourceLines(lineTexts) {
+  if (lineTexts.length < 2) {
+    return null;
+  }
+  const header = tableRowParts(lineTexts[0]);
+  if (!header || !header.cells.length) {
+    return null;
+  }
+  if (tableDelimiterCells(lineTexts[1]) !== header.cells.length) {
+    return null;
+  }
+  const rows = [header.cells.map((cell) => tableCellRuns(cell.text))];
+  const sourceRows = [{ lineIndex: 0, cells: header.cells }];
+  for (let line = 2; line < lineTexts.length; line += 1) {
+    const parts = tableRowParts(lineTexts[line]);
+    if (!parts) {
+      return null;
+    }
+    const cells = [];
+    for (let column = 0; column < header.cells.length; column += 1) {
+      cells.push(column < parts.cells.length ? tableCellRuns(parts.cells[column].text) : []);
+    }
+    rows.push(cells);
+    sourceRows.push({ lineIndex: line, cells: parts.cells });
+  }
+  return { block: createTable(rows), sourceRows };
+}
+
+// The table that starts at source block `index`, with its line count and the
+// line-map geometry, or null. Rows continue while they look like rows this
+// dialect wrote; a blank line or ordinary prose ends the grid.
+function tableAtSource(input, index) {
+  if (index + 1 >= input.length) {
+    return null;
+  }
+  const headerBlock = input[index];
+  const delimiterBlock = input[index + 1];
+  if (!headerBlock || headerBlock.type === "image" || !delimiterBlock || delimiterBlock.type === "image") {
+    return null;
+  }
+  const headerText = sourceText(headerBlock);
+  const delimiterText = sourceText(delimiterBlock);
+  if (!tableRowParts(headerText) || tableDelimiterCells(delimiterText) === null) {
+    return null;
+  }
+  const lineTexts = [headerText, delimiterText];
+  let cursor = index + 2;
+  while (cursor < input.length) {
+    const block = input[cursor];
+    if (!block || block.type === "image") {
+      break;
+    }
+    const text = sourceText(block);
+    if (!tableRowParts(text)) {
+      break;
+    }
+    lineTexts.push(text);
+    cursor += 1;
+  }
+  const parsed = parseTableSourceLines(lineTexts);
+  if (!parsed) {
+    return null;
+  }
+  return {
+    block: parsed.block,
+    lineTexts,
+    entries: tableLineEntries(parsed.block, parsed.sourceRows, lineTexts),
+    count: lineTexts.length,
+  };
 }
 
 /* --------------------------------------------------------------------------
@@ -943,6 +1223,48 @@ export function richToSource(blocks) {
     imageTargets.push(null);
     if (block.type !== "list") {
       counters.length = 0;
+    }
+    if (isTableBlock(block)) {
+      const table = tableSourceLines(block);
+      if (table) {
+        // Header, delimiter, and one line per row. The geometry keeps the caret
+        // maps inside the grid exact enough to land in the same cell.
+        const start = sourceBlocks.length;
+        const entries = tableLineEntries(table.parsed.block, table.parsed.sourceRows, table.lines);
+        const richEntry = {
+          sourceIndex: start,
+          table: true,
+          ranges: tableCellRanges(block),
+          rows: [],
+          length: blockLength(block),
+        };
+        for (let lineIndex = 0; lineIndex < table.lines.length; lineIndex += 1) {
+          const text = table.lines[lineIndex];
+          const sourceIndex = start + lineIndex;
+          sourceBlocks.push(sourceLine(text));
+          const entry = lineEntry(richIndex, 0, 0, text.length, richEntry.length);
+          const geometry = entries[lineIndex];
+          if (geometry.delimiter) {
+            entry.table = { delimiter: true, richDefault: geometry.richDefault };
+          } else {
+            entry.table = {
+              row: geometry.row,
+              lineLength: geometry.lineLength,
+              cells: geometry.cells,
+              richDefault: geometry.richDefault,
+            };
+            richEntry.rows[geometry.row] = {
+              sourceIndex,
+              lineLength: geometry.lineLength,
+              cells: geometry.cells,
+              richDefault: geometry.richDefault,
+            };
+          }
+          lineMap.push(entry);
+        }
+        richLines.push(richEntry);
+        continue;
+      }
     }
     const emitted = blockLinesFor(block, counters);
     const richLength = blockLength(block);
@@ -1025,6 +1347,29 @@ export function sourceToRich(sourceBlocks) {
       lineMap.push(null);
       imageTargets.push(blocks.length - 1);
       index += 1;
+      continue;
+    }
+    const table = tableAtSource(input, index);
+    if (table) {
+      const richIndex = blocks.length;
+      blocks.push(table.block);
+      for (let lineIndex = 0; lineIndex < table.lineTexts.length; lineIndex += 1) {
+        const entry = lineEntry(richIndex, 0, 0, table.lineTexts[lineIndex].length, blockLength(table.block));
+        const geometry = table.entries[lineIndex];
+        if (geometry.delimiter) {
+          entry.table = { delimiter: true, richDefault: geometry.richDefault };
+        } else {
+          entry.table = {
+            row: geometry.row,
+            lineLength: geometry.lineLength,
+            cells: geometry.cells,
+            richDefault: geometry.richDefault,
+          };
+        }
+        lineMap.push(entry);
+        imageTargets.push(null);
+      }
+      index += table.count;
       continue;
     }
     const text = sourceText(source);
@@ -1143,6 +1488,13 @@ function blockLinesFor(block, counters) {
     const text = blockText(block);
     const fence = "`".repeat(fenceForCode(text));
     return { lines: [fence, ...text.split("\n"), fence], kind: "code", prefixLength: 0 };
+  }
+
+  if (isTableBlock(block)) {
+    // The editing dialect is one line per block, so the whole grid rides the
+    // HTML escape hatch as its canonical serialization. The file on disk still
+    // gets a portable pipe table from the server.
+    return { lines: [serializeDocument([block])], kind: "html", prefixLength: 0 };
   }
 
   const runs = safeRuns(block.runs);
@@ -1380,9 +1732,103 @@ function isAcceptedInlineHtml(content) {
   return stack.length === 0;
 }
 
+// A canonical table line: exactly the shape model.js emits when it serializes a
+// table block, and only that shape. Each cell must hold the inline HTML
+// serializeRuns() can write, so source editing never accepts markup the store
+// would have to strip later.
+function classifyTableLine(line) {
+  const open = "<table>";
+  const close = "</table>";
+  if (!line.startsWith(open) || !line.endsWith(close)) {
+    return null;
+  }
+  let rest = line.slice(open.length, line.length - close.length);
+
+  const headerOpen = "<thead><tr>";
+  const headerClose = "</tr></thead>";
+  if (!rest.startsWith(headerOpen)) {
+    return null;
+  }
+  rest = rest.slice(headerOpen.length);
+  const headerEnd = rest.indexOf(headerClose);
+  if (headerEnd < 0) {
+    return null;
+  }
+  const headerCells = tableLineCells(rest.slice(0, headerEnd), "th");
+  rest = rest.slice(headerEnd + headerClose.length);
+  if (!headerCells || !headerCells.length) {
+    return null;
+  }
+
+  const rows = [];
+  if (rest) {
+    const bodyOpen = "<tbody>";
+    const bodyClose = "</tbody>";
+    if (!rest.startsWith(bodyOpen) || !rest.endsWith(bodyClose)) {
+      return null;
+    }
+    rest = rest.slice(bodyOpen.length, rest.length - bodyClose.length);
+    while (rest) {
+      const rowOpen = "<tr>";
+      const rowClose = "</tr>";
+      if (!rest.startsWith(rowOpen)) {
+        return null;
+      }
+      rest = rest.slice(rowOpen.length);
+      const at = rest.indexOf(rowClose);
+      if (at < 0) {
+        return null;
+      }
+      const cells = tableLineCells(rest.slice(0, at), "td");
+      if (!cells || cells.length !== headerCells.length) {
+        return null;
+      }
+      rows.push(cells);
+      rest = rest.slice(at + rowClose.length);
+    }
+  }
+
+  for (const cell of headerCells) {
+    if (!isAcceptedInlineHtml(cell)) {
+      return null;
+    }
+  }
+  for (const row of rows) {
+    for (const cell of row) {
+      if (!isAcceptedInlineHtml(cell)) {
+        return null;
+      }
+    }
+  }
+  return { shape: "table" };
+}
+
+function tableLineCells(content, tag) {
+  const open = "<" + tag + ">";
+  const close = "</" + tag + ">";
+  const cells = [];
+  let rest = content;
+  while (rest) {
+    if (!rest.startsWith(open)) {
+      return null;
+    }
+    rest = rest.slice(open.length);
+    const at = rest.indexOf(close);
+    if (at < 0) {
+      return null;
+    }
+    cells.push(rest.slice(0, at));
+    rest = rest.slice(at + close.length);
+  }
+  return cells;
+}
+
 function classifyHtmlLine(line) {
   if (!line || line[0] !== "<") {
     return null;
+  }
+  if (line.startsWith("<table")) {
+    return classifyTableLine(line);
   }
   let match = /^<h([1-3])([^<>]*)>/.exec(line);
   if (match) {
@@ -1555,6 +2001,33 @@ export function mapRichCaretToSource(conversion, caret) {
 
   const richOffset = Math.min(offset, richEntryLength(entry));
 
+  if (entry.table) {
+    const ranges = Array.isArray(entry.ranges) ? entry.ranges : [];
+    let range = ranges.length ? ranges[ranges.length - 1] : null;
+    for (const candidate of ranges) {
+      if (richOffset <= candidate.end) {
+        range = candidate;
+        break;
+      }
+    }
+    if (!range) {
+      return { block: Math.max(0, Math.floor(Number(entry.sourceIndex) || 0)), offset: 0 };
+    }
+    const row = entry.rows ? entry.rows[range.row] : null;
+    if (!row) {
+      return { block: Math.max(0, Math.floor(Number(entry.sourceIndex) || 0)), offset: 0 };
+    }
+    const cell = row.cells[range.column];
+    if (!cell) {
+      return { block: row.sourceIndex, offset: Math.max(0, Math.floor(Number(row.lineLength) || 0)) };
+    }
+    const local = Math.max(0, Math.min(cell.richLength, richOffset - range.start));
+    return {
+      block: row.sourceIndex,
+      offset: Math.min(Math.max(0, Math.floor(Number(row.lineLength) || 0)), cell.sourceStart + local),
+    };
+  }
+
   if (entry.code && Array.isArray(entry.segments) && entry.segments.length) {
     let segment = entry.segments[0];
     for (const candidate of entry.segments) {
@@ -1628,6 +2101,35 @@ export function mapSourceCaretToRich(conversion, caret) {
   }
 
   const entry = lineMap[index];
+  if (entry.table) {
+    if (entry.table.delimiter) {
+      return {
+        block: Math.max(0, Math.floor(Number(entry.richIndex) || 0)),
+        offset: Math.max(0, Math.floor(Number(entry.table.richDefault) || 0)),
+      };
+    }
+    const cells = Array.isArray(entry.table.cells) ? entry.table.cells : [];
+    if (!cells.length) {
+      return {
+        block: Math.max(0, Math.floor(Number(entry.richIndex) || 0)),
+        offset: Math.max(0, Math.floor(Number(entry.table.richDefault) || 0)),
+      };
+    }
+    let chosen = cells[0];
+    for (const cell of cells) {
+      if (cell.sourceStart <= offset) {
+        chosen = cell;
+      } else {
+        break;
+      }
+    }
+    const local = Math.max(0, Math.min(chosen.richLength, offset - chosen.sourceStart));
+    const richTotal = Math.max(0, Math.floor(Number(entry.richLength) || 0));
+    return {
+      block: Math.max(0, Math.floor(Number(entry.richIndex) || 0)),
+      offset: Math.min(richTotal, chosen.richStart + local),
+    };
+  }
   const prefix = Math.max(0, Math.floor(Number(entry.prefixLength) || 0));
   const bodyLength = Math.max(0, Math.floor(Number(entry.length) || 0));
   const richTotal = richEntryLength(entry);

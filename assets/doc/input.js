@@ -13,8 +13,10 @@ import {
   createBlockId,
   createDivider,
   emptyParagraph,
+  emptyTable,
   headingAnchors,
   isAtomicBlock,
+  isTableBlock,
   marksAt,
   mergeBlocks,
   normalizeRuns,
@@ -24,6 +26,17 @@ import {
   setMarkOnRuns,
   splitBlock as splitBlockModel,
   splitRuns,
+  tableCellAt,
+  tableCellRanges,
+  tableColumnCount,
+  tableDeleteColumn,
+  tableDeleteRange,
+  tableDeleteRow,
+  tableInsertColumn,
+  tableInsertRow,
+  tableInsertRuns,
+  tableMapRanges,
+  tableRowCount,
 } from "./model.js";
 import {
   blockEntry,
@@ -35,7 +48,10 @@ import {
   imageWidthFor,
   layoutDocument,
   lineAtY,
+  lineOffsetAtX,
   pointToOffset,
+  tableCellEntryAt,
+  tablePositionAtOffset,
 } from "./layout.js";
 import { EditorView } from "./view.js";
 
@@ -238,20 +254,13 @@ export class DocEditor {
     if (!block || isAtomicBlock(block) || block.type === "code") {
       return null;
     }
-    let from = 0;
-    for (let index = 0; index < block.runs.length; index += 1) {
-      const run = block.runs[index];
-      let to = from + run.text.length;
-      while (run.href && block.runs[index + 1]?.href === run.href) {
-        index += 1;
-        to += block.runs[index].text.length;
-      }
-      if (run.href && from <= this.focus.offset && this.focus.offset <= to) {
-        return { href: run.href, from, to };
-      }
-      from = to;
+    if (isTableBlock(block)) {
+      const cell = tableCellAt(block, this.focus.offset);
+      const local = this.focus.offset - cell.start;
+      const link = linkRunsAt(cell.runs, local);
+      return link ? { href: link.href, from: cell.start + link.from, to: cell.start + link.to } : null;
     }
-    return null;
+    return linkRunsAt(block.runs, this.focus.offset);
   }
 
   removeLinkAtCaret() {
@@ -259,11 +268,28 @@ export class DocEditor {
     if (!link) {
       return false;
     }
-    const index = this.focus.block;
-    const block = this.blocks[index];
-    const runs = setHrefOnRuns(block.runs, link.from, link.to, null);
-    this.commit(this.replaceBlock(index, { ...block, id: createBlockId(), runs }), this.anchor, this.focus);
+    const blocks = this.applyRunsEdit(
+      this.focus.block,
+      link.from,
+      link.to,
+      (runs, start, end) => setHrefOnRuns(runs, start, end, null),
+    );
+    this.commit(blocks, this.anchor, this.focus);
     return true;
+  }
+
+  // Replace the runs covering a flat range, in a table cell or a plain block.
+  // Keeps the block's type and formatting: only the runs change.
+  applyRunsEdit(index, start, end, mapper) {
+    const block = this.blocks[index];
+    if (!block || isAtomicBlock(block)) {
+      return this.blocks;
+    }
+    if (isTableBlock(block)) {
+      const next = tableMapRanges(block, start, end, mapper);
+      return next === block ? this.blocks : this.replaceBlock(index, next);
+    }
+    return this.replaceBlock(index, { ...block, id: createBlockId(), runs: mapper(block.runs, start, end) });
   }
 
   updateImageBlock(index, changes, options) {
@@ -280,6 +306,161 @@ export class DocEditor {
     next.splice(index, 1);
     const caret = previousPosition(next, index);
     this.commit(next.length ? next : [emptyParagraph()], caret, caret);
+  }
+
+  /* ---------------------------------------------------------------------
+     Tables
+     --------------------------------------------------------------------- */
+
+  tableBlockAtCaret() {
+    const block = this.blocks[this.focus.block];
+    return isTableBlock(block) ? block : null;
+  }
+
+  // What the table menu shows: the caret's cell and the grid's shape, or null
+  // when the caret is outside a table.
+  tableAtCaret() {
+    const block = this.tableBlockAtCaret();
+    if (!block) {
+      return null;
+    }
+    const cell = tableCellAt(block, this.focus.offset);
+    return {
+      rows: tableRowCount(block),
+      columns: tableColumnCount(block),
+      row: cell.row,
+      column: cell.column,
+    };
+  }
+
+  selectionTouchesTable() {
+    const { from, to } = this.normalized();
+    for (let index = from.block; index <= to.block; index += 1) {
+      if (isTableBlock(this.blocks[index])) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Insert a fresh table at the caret: splits a text block there and always
+  // leaves a paragraph after the grid so there is somewhere to keep writing.
+  insertTable(columns = 3, bodyRows = 1) {
+    if (this.sourceMode) {
+      return;
+    }
+    const deletion = this.selectionDeletion({ forInsertion: true });
+    const blocks = deletion ? deletion.blocks : this.blocks;
+    const index = deletion ? deletion.caret.block : this.focus.block;
+    const offset = deletion ? deletion.caret.offset : this.focus.offset;
+    const table = emptyTable(columns, bodyRows);
+    const current = blocks[index];
+    const next = blocks.slice();
+    let tableIndex = index;
+
+    if (current && !isAtomicBlock(current) && !isTableBlock(current)) {
+      const [head, tail] = splitBlockModel(current, offset);
+      const replacement = [];
+      if (blockLength(head) > 0 || current.type !== "p") {
+        replacement.push(head);
+      }
+      tableIndex = index + replacement.length;
+      replacement.push(table);
+      replacement.push(tail);
+      next.splice(index, 1, ...replacement);
+    } else {
+      next.splice(index + 1, 0, table);
+      tableIndex = index + 1;
+    }
+
+    const after = next[tableIndex + 1];
+    if (!after || isAtomicBlock(after) || isTableBlock(after)) {
+      next.splice(tableIndex + 1, 0, emptyParagraph());
+    }
+    const caret = { block: tableIndex, offset: 0 };
+    this.commit(next, caret, caret);
+  }
+
+  tableInsertRowAtCaret(before) {
+    const index = this.focus.block;
+    const block = this.blocks[index];
+    if (!isTableBlock(block)) {
+      return;
+    }
+    const cell = tableCellAt(block, this.focus.offset);
+    const row = before ? cell.row : cell.row + 1;
+    const next = tableInsertRow(block, row);
+    const target = tableCellRanges(next).find((range) => range.row === row && range.column === cell.column);
+    const caret = { block: index, offset: target ? target.start : 0 };
+    this.commit(this.replaceBlock(index, next), caret, caret);
+  }
+
+  tableInsertColumnAtCaret(before) {
+    const index = this.focus.block;
+    const block = this.blocks[index];
+    if (!isTableBlock(block)) {
+      return;
+    }
+    const cell = tableCellAt(block, this.focus.offset);
+    const column = before ? cell.column : cell.column + 1;
+    const next = tableInsertColumn(block, column);
+    if (next === block) {
+      return;
+    }
+    const target = tableCellRanges(next).find((range) => range.row === cell.row && range.column === column);
+    const caret = { block: index, offset: target ? target.start : 0 };
+    this.commit(this.replaceBlock(index, next), caret, caret);
+  }
+
+  tableDeleteRowAtCaret() {
+    const index = this.focus.block;
+    const block = this.blocks[index];
+    if (!isTableBlock(block)) {
+      return;
+    }
+    const cell = tableCellAt(block, this.focus.offset);
+    if (tableRowCount(block) <= 1) {
+      this.replaceTableWithParagraph(index);
+      return;
+    }
+    const next = tableDeleteRow(block, cell.row);
+    const row = Math.min(cell.row, tableRowCount(next) - 1);
+    const column = Math.min(cell.column, tableColumnCount(next) - 1);
+    const target = tableCellRanges(next).find((range) => range.row === row && range.column === column);
+    const caret = { block: index, offset: target ? target.start : 0 };
+    this.commit(this.replaceBlock(index, next), caret, caret);
+  }
+
+  tableDeleteColumnAtCaret() {
+    const index = this.focus.block;
+    const block = this.blocks[index];
+    if (!isTableBlock(block)) {
+      return;
+    }
+    const cell = tableCellAt(block, this.focus.offset);
+    if (tableColumnCount(block) <= 1) {
+      this.replaceTableWithParagraph(index);
+      return;
+    }
+    const next = tableDeleteColumn(block, cell.column);
+    const column = Math.min(cell.column, tableColumnCount(next) - 1);
+    const target = tableCellRanges(next).find((range) => range.row === cell.row && range.column === column);
+    const caret = { block: index, offset: target ? target.start : 0 };
+    this.commit(this.replaceBlock(index, next), caret, caret);
+  }
+
+  deleteTableAtCaret() {
+    const index = this.focus.block;
+    if (isTableBlock(this.blocks[index])) {
+      this.replaceTableWithParagraph(index);
+    }
+  }
+
+  replaceTableWithParagraph(index) {
+    const next = this.blocks.slice();
+    next.splice(index, 1, emptyParagraph());
+    const caret = { block: index, offset: 0 };
+    this.commit(next, caret, caret);
   }
 
   isCollapsed() {
@@ -504,7 +685,10 @@ export class DocEditor {
 
   replaceMisspelling(index, block, { start, end, word }, text) {
     // A suggestion may arrive after the user has edited or moved the block.
-    if (this.sourceMode || this.blocks[index] !== block || blockText(block).slice(start, end) !== word) {
+    if (
+      this.sourceMode || this.blocks[index] !== block || block.type === "table" ||
+      blockText(block).slice(start, end) !== word
+    ) {
       return false;
     }
     const { left, right } = splitRuns(block.runs, start);
@@ -588,7 +772,7 @@ export class DocEditor {
     }
     const index = this.focus.block;
     const block = this.blocks[index];
-    if (!block || isAtomicBlock(block) || block.type === "code") {
+    if (!block || isAtomicBlock(block) || isTableBlock(block) || block.type === "code") {
       return false;
     }
     const type = MARKDOWN_SHORTCUTS.get(blockText(block).slice(0, offset) + typed);
@@ -687,6 +871,21 @@ export class DocEditor {
       return;
     }
 
+    // A table cell holds inline content: the text (line feeds become hard
+    // breaks) lands in the caret's cell, never as new blocks inside the grid.
+    if (target && isTableBlock(target)) {
+      const payload = parts.join("\n");
+      const result = tableInsertRuns(target, caret.offset, [{ text: payload, ...marks }]);
+      const next = blocks.slice();
+      next[caret.block] = result.block;
+      const nextCaret = { block: caret.block, offset: result.caret };
+      if (deletion) {
+        this.typing = null;
+      }
+      this.commit(next, nextCaret, nextCaret, { coalesce, keepMarks: true });
+      return;
+    }
+
     for (let index = 0; index < parts.length; index += 1) {
       if (index > 0) {
         const split = this.splitAt(blocks, caret);
@@ -722,6 +921,13 @@ export class DocEditor {
       return;
     }
     if (this.sourceMode) {
+      this.insertText(pastedPlainText(pasted), undefined, { coalesce: false });
+      return;
+    }
+    // Rich content pasted into a table becomes plain text in the cell: a cell
+    // cannot hold headings or nested tables, so the text keeps its lines and
+    // nothing is silently dropped.
+    if (isTableBlock(this.blocks[this.focus.block]) || this.selectionTouchesTable()) {
       this.insertText(pastedPlainText(pasted), undefined, { coalesce: false });
       return;
     }
@@ -805,6 +1011,12 @@ export class DocEditor {
 
     let position = { block: caret.block + pasteEndIndex, offset: blockLength(pasted.at(-1)) };
 
+    // A pasted table needs a paragraph after the grid, exactly as an inserted
+    // one does, so writing can continue below it.
+    if (isTableBlock(next[position.block]) && !next[position.block + 1]) {
+      next.push(emptyParagraph());
+    }
+
     // A paste ending with a picture or divider needs a text caret after it.
     // Use the following text, or open a paragraph before the next picture.
     if (isAtomicBlock(next[position.block])) {
@@ -863,6 +1075,54 @@ export class DocEditor {
     const { from, to } = this.normalized();
     const first = this.blocks[from.block];
     const last = this.blocks[to.block];
+
+    // A selection inside one table clears the covered cells and stays in the
+    // grid. The table's separators are not text, so the edit never touches them.
+    if (from.block === to.block && isTableBlock(first)) {
+      const result = tableDeleteRange(first, from.offset, to.offset);
+      return { blocks: this.replaceBlock(from.block, result.block), caret: from };
+    }
+
+    // A selection spanning blocks that reaches a table takes the table whole:
+    // the grid goes with the selected range, and the unselected text at either
+    // end stays in a block of its own. Merging a paragraph into a table cell
+    // would mean something else entirely.
+    let touchesTable = false;
+    for (let index = from.block; index <= to.block; index += 1) {
+      if (isTableBlock(this.blocks[index])) {
+        touchesTable = true;
+        break;
+      }
+    }
+    if (touchesTable && from.block !== to.block) {
+      const replacement = [];
+      let caret = null;
+      const head =
+        !isTableBlock(first) && !isAtomicBlock(first)
+          ? { ...first, id: createBlockId(), runs: runsInRange(first, 0, from.offset) }
+          : null;
+      const tail =
+        !isTableBlock(last) && !isAtomicBlock(last)
+          ? { ...last, id: createBlockId(), runs: runsInRange(last, to.offset, blockLength(last)) }
+          : null;
+      if (head && (blockLength(head) > 0 || !tail)) {
+        caret = { block: from.block, offset: blockLength(head) };
+        replacement.push(head);
+      }
+      if (tail && (blockLength(tail) > 0 || !head)) {
+        if (!caret) {
+          caret = { block: from.block + replacement.length, offset: 0 };
+        }
+        replacement.push(tail);
+      }
+      if (!replacement.length) {
+        replacement.push(emptyParagraph());
+        caret = { block: from.block, offset: 0 };
+      }
+      const next = this.blocks.slice();
+      next.splice(from.block, to.block - from.block + 1, ...replacement);
+      return { blocks: next, caret };
+    }
 
     if (isAtomicBlock(first) && isAtomicBlock(last)) {
       const next = this.blocks.slice();
@@ -923,6 +1183,11 @@ export class DocEditor {
 
     if (isAtomicBlock(block)) {
       this.deleteBlockAt(position.block);
+      return;
+    }
+
+    if (isTableBlock(block)) {
+      this.backspaceInTable(block, position);
       return;
     }
 
@@ -996,6 +1261,11 @@ export class DocEditor {
       return;
     }
 
+    if (isTableBlock(block)) {
+      this.deleteForwardInTable(block, position);
+      return;
+    }
+
     if (position.offset < blockLength(block)) {
       const boundaries = graphemeBoundaries(blockText(block));
       const nextBoundary = nextBoundaryAfter(boundaries, position.offset);
@@ -1031,6 +1301,171 @@ export class DocEditor {
     this.commit(next, position, position);
   }
 
+  /* ---------------------------------------------------------------------
+     Table editing helpers
+     --------------------------------------------------------------------- */
+
+  backspaceInTable(block, position) {
+    const cell = tableCellAt(block, position.offset);
+    const text = runsText(cell.runs);
+    const local = Math.max(0, Math.min(text.length, position.offset - cell.start));
+    if (local <= 0) {
+      // The start of a cell is a wall, not a join: cells never merge.
+      return;
+    }
+    const previous = previousBoundary(graphemeBoundaries(text), local);
+    const result = tableDeleteRange(block, cell.start + previous, cell.start + local);
+    const caret = { block: position.block, offset: cell.start + previous };
+    this.commit(this.replaceBlock(position.block, result.block), caret, caret);
+  }
+
+  deleteForwardInTable(block, position) {
+    const cell = tableCellAt(block, position.offset);
+    const text = runsText(cell.runs);
+    const local = Math.max(0, Math.min(text.length, position.offset - cell.start));
+    if (local >= text.length) {
+      return;
+    }
+    const nextBoundary = nextBoundaryAfter(graphemeBoundaries(text), local);
+    const result = tableDeleteRange(block, cell.start + local, cell.start + nextBoundary);
+    this.commit(this.replaceBlock(position.block, result.block), position, position);
+  }
+
+  deleteWordBackwardInTable(block, position) {
+    const cell = tableCellAt(block, position.offset);
+    const text = runsText(cell.runs);
+    const local = Math.max(0, Math.min(text.length, position.offset - cell.start));
+    if (local <= 0) {
+      return;
+    }
+    const previous = previousWordStart(text, local);
+    if (previous === local) {
+      this.backspaceInTable(block, position);
+      return;
+    }
+    const result = tableDeleteRange(block, cell.start + previous, cell.start + local);
+    const caret = { block: position.block, offset: cell.start + previous };
+    this.commit(this.replaceBlock(position.block, result.block), caret, caret);
+  }
+
+  // A cell holds inline content, so Enter is a hard break there.
+  insertTableBreak(block, index, offset, blocks) {
+    const result = tableInsertRuns(block, offset, [{ text: "\n" }]);
+    const next = blocks.slice();
+    next[index] = result.block;
+    const caret = { block: index, offset: result.caret };
+    this.commit(next, caret, caret);
+  }
+
+  // Tab steps through the cells and appends a row after the last one, leaving
+  // the caret at the start of the cell it reaches.
+  handleTableTab(direction) {
+    const index = this.focus.block;
+    const block = this.blocks[index];
+    if (!isTableBlock(block) || !this.isCollapsed()) {
+      return;
+    }
+    const cell = tableCellAt(block, this.focus.offset);
+    const ranges = tableCellRanges(block);
+    const current = ranges.findIndex((range) => range.row === cell.row && range.column === cell.column);
+    if (current < 0) {
+      return;
+    }
+    if (direction > 0) {
+      if (current === ranges.length - 1) {
+        const nextBlock = tableInsertRow(block, tableRowCount(block));
+        const row = tableRowCount(nextBlock) - 1;
+        const target = tableCellRanges(nextBlock).find((range) => range.row === row && range.column === 0);
+        const caret = { block: index, offset: target ? target.start : 0 };
+        this.commit(this.replaceBlock(index, nextBlock), caret, caret);
+        return;
+      }
+      this.collapseTo({ block: index, offset: ranges[current + 1].start });
+      this.afterMove();
+      return;
+    }
+    if (current === 0) {
+      return;
+    }
+    this.collapseTo({ block: index, offset: ranges[current - 1].start });
+    this.afterMove();
+  }
+
+  // Up and Down stay in the same table column, stepping through the cell's own
+  // wrapped lines first. Leaving the grid falls back to the ordinary block
+  // movement, so the arrow keys never stop working at a table's edge.
+  moveVerticalInTable(entry, direction, extend) {
+    const point = caretPoint(entry, this.focus.offset, this.lineHint);
+    const x = point ? point.x : 0;
+    const position = tablePositionAtOffset(entry, this.focus.offset);
+    let target = null;
+
+    if (position) {
+      const { cell, lineIndex, row, column } = position;
+      if (direction < 0) {
+        if (lineIndex > 0) {
+          const line = cell.lines[lineIndex - 1];
+          target = { line, offset: lineOffsetAtX(line, x) };
+        } else if (row > 0) {
+          const above = tableCellEntryAt(entry, row - 1, column);
+          if (above && above.lines.length) {
+            const line = above.lines[above.lines.length - 1];
+            target = { line, offset: lineOffsetAtX(line, x) };
+          }
+        }
+      } else if (lineIndex < cell.lines.length - 1) {
+        const line = cell.lines[lineIndex + 1];
+        target = { line, offset: lineOffsetAtX(line, x) };
+      } else if (row < entry.table.rows.length - 1) {
+        const below = tableCellEntryAt(entry, row + 1, column);
+        if (below && below.lines.length) {
+          const line = below.lines[0];
+          target = { line, offset: lineOffsetAtX(line, x) };
+        }
+      }
+    }
+
+    if (target) {
+      this.lineHint = target.line;
+      const next = { block: entry.index, offset: target.offset };
+      if (extend) {
+        this.setSelection(this.anchor, next, { keepMarks: true });
+      } else {
+        this.collapseTo(next);
+      }
+      this.afterMove();
+      return;
+    }
+
+    let cursor = entry.index + direction;
+    let targetEntry = null;
+    let targetLine = null;
+    while (cursor >= 0 && cursor < this.layout.blocks.length) {
+      const candidate = this.layout.blocks[cursor];
+      if (!isAtomicBlock(candidate.block) && candidate.lines.length) {
+        targetEntry = candidate;
+        targetLine = direction < 0 ? candidate.lines[candidate.lines.length - 1] : candidate.lines[0];
+        break;
+      }
+      cursor += direction;
+    }
+
+    let next;
+    if (targetLine) {
+      next = { block: targetEntry.index, offset: pointToOffset(targetEntry, x, targetLine.y + 1) };
+    } else {
+      const last = this.blocks.length - 1;
+      next = direction < 0 ? { block: 0, offset: 0 } : { block: last, offset: blockLength(this.blocks[last]) };
+    }
+    this.lineHint = targetLine;
+    if (extend) {
+      this.setSelection(this.anchor, next, { keepMarks: true });
+    } else {
+      this.collapseTo(next);
+    }
+    this.afterMove();
+  }
+
   insertParagraph() {
     const deletion = this.selectionDeletion({ forInsertion: true });
     const blocks = deletion ? deletion.blocks : this.blocks;
@@ -1050,6 +1485,11 @@ export class DocEditor {
       next.splice(index + 1, 0, paragraph);
       const caret = { block: index + 1, offset: 0 };
       this.commit(next, caret, caret);
+      return;
+    }
+
+    if (isTableBlock(block)) {
+      this.insertTableBreak(block, index, offset, blocks);
       return;
     }
 
@@ -1132,7 +1572,9 @@ export class DocEditor {
     const value = !selectionHasMark(ranges, key);
     const blocks = this.blocks.slice();
     for (const { block, index, start, end } of ranges) {
-      blocks[index] = { ...block, id: createBlockId(), runs: setMarkOnRuns(block.runs, start, end, key, value) };
+      blocks[index] = isTableBlock(block)
+        ? tableMapRanges(block, start, end, (runs, from, to) => setMarkOnRuns(runs, from, to, key, value))
+        : { ...block, id: createBlockId(), runs: setMarkOnRuns(block.runs, start, end, key, value) };
     }
 
     this.commit(blocks, this.anchor, this.focus);
@@ -1147,7 +1589,7 @@ export class DocEditor {
 
     for (let index = from.block; index <= to.block; index += 1) {
       const block = blocks[index];
-      if (!block || isAtomicBlock(block)) {
+      if (!block || isAtomicBlock(block) || isTableBlock(block)) {
         continue;
       }
       blocks = blocks.slice();
@@ -1179,7 +1621,7 @@ export class DocEditor {
     const { from, to } = this.normalized();
     const indices = [];
     for (let index = from.block; index <= to.block; index += 1) {
-      if (this.blocks[index] && !isAtomicBlock(this.blocks[index])) {
+      if (this.blocks[index] && !isAtomicBlock(this.blocks[index]) && !isTableBlock(this.blocks[index])) {
         indices.push(index);
       }
     }
@@ -1241,7 +1683,7 @@ export class DocEditor {
 
     for (let index = from.block; index <= to.block; index += 1) {
       const block = blocks[index];
-      if (!block || isAtomicBlock(block) || block.type === "code") {
+      if (!block || isAtomicBlock(block) || isTableBlock(block) || block.type === "code") {
         continue;
       }
       if (blockAlignment(block) === align) {
@@ -1277,6 +1719,10 @@ export class DocEditor {
     if (!block || isAtomicBlock(block)) {
       return;
     }
+    if (isTableBlock(block)) {
+      this.handleTableTab(direction);
+      return;
+    }
     if (block.type === "list") {
       this.indentList(direction);
       return;
@@ -1304,7 +1750,7 @@ export class DocEditor {
         continue;
       }
       const block = blocks[index];
-      if (!block || isAtomicBlock(block)) {
+      if (!block || isAtomicBlock(block) || isTableBlock(block)) {
         continue;
       }
       if (block.type === "list") {
@@ -1350,7 +1796,7 @@ export class DocEditor {
   outdentAtCaret() {
     const position = this.focus;
     const block = this.blocks[position.block];
-    if (!block || isAtomicBlock(block)) {
+    if (!block || isAtomicBlock(block) || isTableBlock(block)) {
       return;
     }
 
@@ -1401,12 +1847,13 @@ export class DocEditor {
       const link = this.linkAtCaret();
       const block = this.blocks[from.block];
       if (link && block && !isAtomicBlock(block) && block.type !== "code") {
-        const runs = setHrefOnRuns(block.runs, link.from, link.to, href || null);
-        this.commit(
-          this.replaceBlock(from.block, { ...block, id: createBlockId(), runs }),
-          this.anchor,
-          this.focus,
+        const blocks = this.applyRunsEdit(
+          from.block,
+          link.from,
+          link.to,
+          (runs, start, end) => setHrefOnRuns(runs, start, end, href || null),
         );
+        this.commit(blocks, this.anchor, this.focus);
         return true;
       }
       if (href && label) {
@@ -1414,6 +1861,14 @@ export class DocEditor {
           return false;
         }
         const marks = this.pendingMarks || this.marksForTyping();
+        if (isTableBlock(block)) {
+          const result = tableInsertRuns(block, from.offset, [{ text: label, ...marks, href }]);
+          const caret = { block: from.block, offset: result.caret };
+          this.commit(this.replaceBlock(from.block, result.block), caret, caret, {
+            pendingMarks: { ...marks, href: "" },
+          });
+          return true;
+        }
         const runs = insertRuns(block, from.offset, label, { ...marks, href });
         const caret = { block: from.block, offset: from.offset + label.length };
         this.commit(this.replaceBlock(from.block, { ...block, id: createBlockId(), runs }), caret, caret, {
@@ -1426,7 +1881,7 @@ export class DocEditor {
       return true;
     }
 
-    let blocks = this.blocks;
+    let blocks = this.blocks.slice();
     for (let index = from.block; index <= to.block; index += 1) {
       const block = blocks[index];
       if (!block || isAtomicBlock(block) || block.type === "code") {
@@ -1434,8 +1889,10 @@ export class DocEditor {
       }
       const start = index === from.block ? from.offset : 0;
       const end = index === to.block ? to.offset : blockLength(block);
-      blocks = blocks.slice();
-      blocks[index] = { ...block, id: createBlockId(), runs: setHrefOnRuns(block.runs, start, end, href) };
+      blocks[index] = isTableBlock(block)
+        ? tableMapRanges(block, start, end, (runs, cellStart, cellEnd) =>
+            setHrefOnRuns(runs, cellStart, cellEnd, href))
+        : { ...block, id: createBlockId(), runs: setHrefOnRuns(block.runs, start, end, href) };
     }
     this.commit(blocks, this.anchor, this.focus);
     return true;
@@ -1459,10 +1916,14 @@ export class DocEditor {
       }
       const start = index === from.block ? from.offset : 0;
       const end = index === to.block ? to.offset : blockLength(block);
+      blocks = blocks.slice();
+      if (isTableBlock(block)) {
+        blocks[index] = tableMapRanges(block, start, end, clearRunsMarks);
+        continue;
+      }
       const runs = runsInRange(block, start, end).map((run) => ({ text: run.text }));
       const before = runsInRange(block, 0, start);
       const after = runsInRange(block, end, blockLength(block));
-      blocks = blocks.slice();
       blocks[index] = { ...block, id: createBlockId(), runs: normalizeRuns([...before, ...runs, ...after]) };
     }
     this.commit(blocks, this.anchor, this.focus);
@@ -1474,6 +1935,17 @@ export class DocEditor {
     const index = deletion ? deletion.caret.block : this.focus.block;
     const offset = deletion ? deletion.caret.offset : this.focus.offset;
     const current = blocks[index];
+
+    // A cell is inline content, so a picture cannot live in the grid. It goes
+    // after the table, with a paragraph after it for the caret.
+    if (isTableBlock(current)) {
+      const next = blocks.slice();
+      next.splice(index + 1, 0, { ...block, id: createBlockId() });
+      next.splice(index + 2, 0, emptyParagraph());
+      const caret = { block: index + 2, offset: 0 };
+      this.commit(next, caret, caret);
+      return;
+    }
 
     if (!current || isAtomicBlock(current)) {
       const next = blocks.slice();
@@ -1527,6 +1999,24 @@ export class DocEditor {
       return;
     }
     if (event.isComposing) {
+      return;
+    }
+
+    // Table structure shortcuts act at the caret's cell. They come before the
+    // Ctrl+Arrow word movement, which would otherwise eat Ctrl+Alt+Arrow.
+    if (
+      !this.sourceMode &&
+      event.altKey &&
+      (event.ctrlKey || event.metaKey) &&
+      (event.key === "ArrowRight" || event.key === "ArrowDown") &&
+      this.tableBlockAtCaret()
+    ) {
+      event.preventDefault();
+      if (event.key === "ArrowRight") {
+        this.tableInsertColumnAtCaret(false);
+      } else {
+        this.tableInsertRowAtCaret(false);
+      }
       return;
     }
 
@@ -1689,6 +2179,10 @@ export class DocEditor {
       }
       return;
     }
+    if (isTableBlock(block)) {
+      this.insertTableBreak(block, index, offset, blocks);
+      return;
+    }
     const marks = block.type === "code" ? {} : this.pendingMarks || this.marksForTyping();
     const runs = insertRuns(block, offset, "\n", marks);
     const next = blocks.slice();
@@ -1737,6 +2231,10 @@ export class DocEditor {
     }
     const entry = blockEntry(this.layout, this.focus.block);
     if (!entry) {
+      return;
+    }
+    if (entry.table) {
+      this.moveVerticalInTable(entry, direction, extend);
       return;
     }
 
@@ -1923,7 +2421,15 @@ export class DocEditor {
     }
     const position = this.focus;
     const block = this.blocks[position.block];
-    if (!block || isAtomicBlock(block) || position.offset === 0) {
+    if (!block || isAtomicBlock(block)) {
+      this.backspace();
+      return;
+    }
+    if (isTableBlock(block)) {
+      this.deleteWordBackwardInTable(block, position);
+      return;
+    }
+    if (position.offset === 0) {
       this.backspace();
       return;
     }
@@ -2529,6 +3035,12 @@ export class DocEditor {
       this.lineHint = null;
       return { block: entry.index, offset: 0 };
     }
+    if (entry.table) {
+      const offset = pointToOffset(entry, x, y, options);
+      const position = tablePositionAtOffset(entry, offset);
+      this.lineHint = position ? position.line : null;
+      return { block: entry.index, offset };
+    }
     // A click belongs to the line under the pointer, which resolves the shared
     // offset at a soft wrap in that line's favour.
     this.lineHint = lineAtY(entry, y);
@@ -2542,6 +3054,11 @@ export class DocEditor {
     const rect = this.root.getBoundingClientRect();
     const y = event.clientY - rect.top;
     const entry = entryAtY(this.layout, y);
+    if (entry && entry.table) {
+      const offset = pointToOffset(entry, event.clientX - rect.left, y);
+      const position = tablePositionAtOffset(entry, offset);
+      return position ? position.line : null;
+    }
     return entry ? lineAtY(entry, y) : null;
   }
 }
@@ -2549,6 +3066,39 @@ export class DocEditor {
 /* --------------------------------------------------------------------------
    Helpers
    -------------------------------------------------------------------------- */
+
+// The link run covering an offset in a block's (or cell's) runs.
+function linkRunsAt(runs, offset) {
+  let from = 0;
+  for (let index = 0; index < runs.length; index += 1) {
+    const run = runs[index];
+    let to = from + run.text.length;
+    while (run.href && runs[index + 1]?.href === run.href) {
+      index += 1;
+      to += runs[index].text.length;
+    }
+    if (run.href && from <= offset && offset <= to) {
+      return { href: run.href, from, to };
+    }
+    from = to;
+  }
+  return null;
+}
+
+function runsText(runs) {
+  let text = "";
+  for (const run of runs || []) {
+    text += run.text;
+  }
+  return text;
+}
+
+// Strip every mark and link from a range of a table cell's runs.
+function clearRunsMarks(runs, start, end) {
+  const { left: head, right: rest } = splitRuns(runs, start);
+  const { left: middle, right: tail } = splitRuns(rest, end - start);
+  return normalizeRuns([...head, ...middle.map((run) => ({ text: run.text })), ...tail]);
+}
 
 function spellingCorrectionRuns(runs, word, correction) {
   if (runs.length === 1) return [{ ...runs[0], text: correction }];

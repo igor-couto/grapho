@@ -1,4 +1,10 @@
-import { extensionEnabled, onExtensionsChange, setExtensionEnabled } from "./extensions.js";
+import {
+  extensionEnabled,
+  loadExtensions,
+  onExtensionsChange,
+  refreshExtensions,
+  setExtensionEnabled,
+} from "./extensions.js";
 
 (function () {
   "use strict";
@@ -18,6 +24,7 @@ import { extensionEnabled, onExtensionsChange, setExtensionEnabled } from "./ext
     loaded: false,
     canChooseDocumentType: false,
     duplicating: new Set(),
+    converting: new Set(),
     busy: false,
     pending: null,
     returnFocus: null,
@@ -127,6 +134,7 @@ import { extensionEnabled, onExtensionsChange, setExtensionEnabled } from "./ext
     bindStaticEvents();
     syncExtensions();
     onExtensionsChange(syncExtensions);
+    loadExtensions();
     loadDocuments();
   }
 
@@ -228,12 +236,28 @@ import { extensionEnabled, onExtensionsChange, setExtensionEnabled } from "./ext
     els.extensionsButton.addEventListener("click", function () {
       closeLibraryMenu();
       els.extensionsDialog.showModal();
+      // Another computer may have changed the switches since this page loaded.
+      refreshExtensions();
     });
     els.extensionsDialog.addEventListener("change", function (event) {
       var option = event.target;
       if (!option.matches("[data-extension]")) return;
-      setExtensionEnabled(option.dataset.extension, option.checked);
+      var saving = setExtensionEnabled(
+        option.dataset.extension,
+        option.checked,
+      );
       syncExtensions();
+      option.disabled = true;
+      saving
+        .catch(function (error) {
+          showToast(
+            error.userMessage || "That extension couldn't be changed. Try again.",
+            true,
+          );
+        })
+        .finally(function () {
+          option.disabled = false;
+        });
     });
     els.extensionsDialog.addEventListener("close", function () {
       els.libraryMenuButton.focus();
@@ -425,6 +449,8 @@ import { extensionEnabled, onExtensionsChange, setExtensionEnabled } from "./ext
       els.newDocument.removeAttribute("aria-controls");
       if (els.newDocumentDialog.open) els.newDocumentDialog.close();
     }
+    // Convert to board is per-card, and the switch belongs to the server.
+    state.cards.forEach(syncCardMenu);
   }
 
   // The page ships a few placeholder rows so the very first paint is never an
@@ -705,11 +731,13 @@ import { extensionEnabled, onExtensionsChange, setExtensionEnabled } from "./ext
     var openItem = fragment.querySelector(".card-open");
     var renameItem = fragment.querySelector(".card-rename");
     var duplicateItem = fragment.querySelector(".card-duplicate");
+    var boardItem = fragment.querySelector(".card-board");
     var moveItem = fragment.querySelector(".card-move");
     var deleteItem = fragment.querySelector(".card-delete");
 
     card.element.dataset.documentId = document.id;
     card.openItem = openItem;
+    card.boardItem = boardItem;
     moveItem.hidden = !state.spaces.size;
     syncCard(card, document);
 
@@ -734,6 +762,9 @@ import { extensionEnabled, onExtensionsChange, setExtensionEnabled } from "./ext
 
     duplicateItem.addEventListener("click", function () {
       duplicateDocument(card.document);
+    });
+    boardItem.addEventListener("click", function () {
+      convertDocument(card.document);
     });
     moveItem.addEventListener("click", function () {
       openMoveDialog(card.document);
@@ -773,6 +804,7 @@ import { extensionEnabled, onExtensionsChange, setExtensionEnabled } from "./ext
 
   function syncCard(card, document) {
     card.document = document;
+    syncCardMenu(card);
     card.element.classList.toggle("is-board", Boolean(document.board));
     card.element.classList.toggle("is-drawing", Boolean(document.drawing));
     card.link.href = "/doc/" + encodeURIComponent(document.id);
@@ -813,6 +845,13 @@ import { extensionEnabled, onExtensionsChange, setExtensionEnabled } from "./ext
         ? "Edited " + relativeTime(document.updated_at)
         : dateFormatter.format(updated);
     card.edited.title = "Edited " + dateTimeFormatter.format(updated);
+  }
+
+  // Convert to board belongs to the Boards extension and only makes sense for
+  // ordinary documents: a board is already one, and a drawing is its own type.
+  function syncCardMenu(card) {
+    var document = card.document;
+    card.boardItem.hidden = !extensionEnabled("boards") || Boolean(document.board || document.drawing);
   }
 
   function showMatch(element, excerpt) {
@@ -912,6 +951,43 @@ import { extensionEnabled, onExtensionsChange, setExtensionEnabled } from "./ext
       }
     } finally {
       state.duplicating.delete(document.id);
+    }
+  }
+
+  // The server reads the document's Markdown as board source and decides whether
+  // a board can show it. Its answer is the card summary, so the card switches to
+  // the board glyph and open label in place. A document the server cannot read
+  // as a board explains why in the toast and stays a document.
+  async function convertDocument(document) {
+    if (state.converting.has(document.id)) {
+      return;
+    }
+    state.converting.add(document.id);
+
+    try {
+      var converted = await request(
+        "/api/documents/" + encodeURIComponent(document.id) + "/board",
+        { method: "POST" },
+      );
+      state.documents = state.documents.map(function (entry) {
+        return entry.id === document.id ? converted : entry;
+      });
+      applySort();
+      await refreshAfterChange();
+      showToast("Document converted to a board.");
+      focusCard(document.id);
+    } catch (error) {
+      showToast(
+        error.userMessage ||
+          "The document couldn't be converted to a board.",
+        true,
+      );
+      var menuButton = cardMenuButton(document.id);
+      if (menuButton) {
+        menuButton.focus();
+      }
+    } finally {
+      state.converting.delete(document.id);
     }
   }
 

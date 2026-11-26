@@ -1,6 +1,5 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -27,7 +26,7 @@ use crate::settings::{self, BackupLocation, BackupTarget, Source};
 use crate::store::{
     drawing_strokes, summary_for, DeletedDocument, Document, DocumentKind, DocumentMatch,
     DocumentSummary, PencilStrokes, RelocateError, SharedStore, Space, SpaceError, SpaceSummary,
-    StoreError,
+    StoreError, EXTENSION_NAMES,
 };
 
 const BODY_LIMIT_BYTES: usize = 24 * 1024 * 1024;
@@ -129,6 +128,14 @@ pub fn router(store: SharedStore, auth: Option<Arc<Auth>>, options: ServerOption
         .route("/api/storage/backups/ssh", post(add_ssh_backup))
         .route("/api/storage/backups/google", post(start_google_backup))
         .route("/api/storage/backups/{id}", delete(remove_backup))
+        // The Extensions dialog's switches are the server's, not a browser's,
+        // so they are shared by every device that signs in.
+        .route(
+            "/api/extensions",
+            get(get_extensions)
+                .put(update_extensions)
+                .layer(DefaultBodyLimit::max(1024)),
+        )
         .route(
             "/api/spelling/words",
             get(get_spelling_words)
@@ -145,7 +152,12 @@ pub fn router(store: SharedStore, auth: Option<Arc<Auth>>, options: ServerOption
                 .delete(delete_document),
         )
         .route("/api/documents/{id}/draft", put(save_draft))
-        .route("/api/documents/{id}/board", get(get_board).put(save_board))
+        .route(
+            "/api/documents/{id}/board",
+            get(get_board)
+                .put(save_board)
+                .post(convert_document_to_board),
+        )
         .route(
             "/api/documents/{id}/drawing",
             get(get_drawing).put(save_drawing),
@@ -220,6 +232,24 @@ impl LibrarySelection {
             Ok(Some(None)) => redirect_to(&format!("{path}?space=general")),
             Ok(Some(Some(space))) => redirect_to(&format!("{path}?space={space}")),
             Err(_) => page_not_found(),
+        }
+    }
+}
+
+/// The Space whose custom spelling words an editor is asking for. General is
+/// the unnamed Space, so it is what a request without a `space` names.
+#[derive(Deserialize, Default)]
+struct SpellingSelection {
+    space: Option<String>,
+}
+
+impl SpellingSelection {
+    fn scope(&self) -> Result<Option<Uuid>, ApiError> {
+        match self.space.as_deref() {
+            None | Some("general") => Ok(None),
+            Some(id) => Uuid::parse_str(id)
+                .map(Some)
+                .map_err(|_| ApiError::bad_request("That Space doesn't exist.")),
         }
     }
 }
@@ -571,6 +601,25 @@ async fn save_board(
     BoardDocument::from_document(document)
 }
 
+/// Turn a regular document into a board from its card in the library.
+///
+/// The server decides whether the document's own Markdown can be a board; the
+/// answer is the library summary, so the card can switch its glyph and open
+/// label in place without reloading the listing.
+async fn convert_document_to_board(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+) -> Result<Json<DocumentSummary>, ApiError> {
+    let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
+    let document = state
+        .store
+        .convert_to_board(id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    state.backups.mirror_document(id);
+    Ok(Json(summary_for(&document)))
+}
+
 #[derive(Deserialize, Serialize)]
 struct DrawingDocument {
     title: String,
@@ -630,10 +679,11 @@ async fn get_document_title(
 
 async fn get_spelling_words(
     State(state): State<AppState>,
+    Query(selection): Query<SpellingSelection>,
 ) -> Result<Json<BTreeSet<String>>, ApiError> {
     state
         .store
-        .spelling_words()
+        .spelling_words(selection.scope()?)
         .await
         .map(Json)
         .map_err(spelling_error)
@@ -646,6 +696,7 @@ struct AddSpellingWordRequest {
 
 async fn add_spelling_word(
     State(state): State<AppState>,
+    Query(selection): Query<SpellingSelection>,
     Json(payload): Json<AddSpellingWordRequest>,
 ) -> Result<Json<BTreeSet<String>>, ApiError> {
     let word = payload.word.trim().to_lowercase().replace('\u{2019}', "'");
@@ -662,15 +713,45 @@ async fn add_spelling_word(
     }
     state
         .store
-        .add_spelling_word(word)
+        .add_spelling_word(selection.scope()?, word)
         .await
         .map(Json)
         .map_err(spelling_error)
 }
 
-fn spelling_error(error: io::Error) -> ApiError {
-    eprintln!("could not access custom spelling words: {error}");
-    ApiError::server_error("Grapho couldn't access your custom dictionary.")
+fn spelling_error(error: StoreError) -> ApiError {
+    match error {
+        StoreError::Io(error) => {
+            eprintln!("could not access custom spelling words: {error}");
+            ApiError::server_error("Grapho couldn't access your custom dictionary.")
+        }
+        error => ApiError::from(error),
+    }
+}
+
+/// The Extensions dialog's switches, as every browser sees them.
+async fn get_extensions(State(state): State<AppState>) -> Json<BTreeMap<String, bool>> {
+    Json(extension_view(state.store.extensions().await))
+}
+
+/// Change one or more switches. Every other switch keeps its current value, so
+/// two devices changing different extensions cannot overwrite each other.
+async fn update_extensions(
+    State(state): State<AppState>,
+    Json(changes): Json<BTreeMap<String, bool>>,
+) -> Result<Json<BTreeMap<String, bool>>, ApiError> {
+    if changes.is_empty() {
+        return Err(ApiError::bad_request("Choose an extension to change."));
+    }
+    let extensions = state.store.set_extensions(&changes).await?;
+    Ok(Json(extension_view(extensions)))
+}
+
+fn extension_view(extensions: BTreeSet<String>) -> BTreeMap<String, bool> {
+    EXTENSION_NAMES
+        .iter()
+        .map(|name| ((*name).to_owned(), extensions.contains(*name)))
+        .collect()
 }
 
 #[derive(Deserialize, Default)]
@@ -1835,8 +1916,21 @@ impl From<StoreError> for ApiError {
         if matches!(error, StoreError::InvalidDrawing) {
             return Self::bad_request("The drawing contains invalid pencil strokes.");
         }
+        if matches!(error, StoreError::NoBoardLayout) {
+            return Self::bad_request(
+                "This document has no board columns yet. A board needs ## headings for columns and - items for cards.",
+            );
+        }
+        if matches!(error, StoreError::BoardImages) {
+            return Self::bad_request(
+                "This document has images, and a board can't show them. Remove the images, then convert.",
+            );
+        }
         if matches!(error, StoreError::UnknownSpace) {
             return Self::bad_request("That Space doesn't exist.");
+        }
+        if matches!(error, StoreError::UnknownExtension) {
+            return Self::bad_request("Grapho doesn't have that extension.");
         }
         if matches!(error, StoreError::UnavailableSpace) {
             return Self {
@@ -2007,48 +2101,243 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spelling_words_are_shared_persisted_and_deduplicated() {
+    async fn spelling_words_are_stored_per_space_and_follow_the_library() {
+        use serde_json::json;
+
         const WORDS: &str = "/api/spelling/words";
         let (app, directory) = test_app(None).await;
-        let words = app.clone().oneshot(get(WORDS)).await.unwrap();
-        assert_eq!(json_body(words).await, serde_json::json!([]));
+        let request = |request| {
+            let app = app.clone();
+            async move { json_body(app.oneshot(request).await.unwrap()).await }
+        };
 
-        let (first, second) = tokio::join!(
-            app.clone()
-                .oneshot(post_json(WORDS, serde_json::json!({ "word": "Grapho" }))),
-            app.clone().oneshot(post_json(
-                WORDS,
-                serde_json::json!({ "word": "Neuraspace" })
-            )),
+        assert_eq!(request(get(WORDS)).await, json!([]));
+        let storage = request(post_json("/api/storage/spaces", json!({ "name": "Work" }))).await;
+        let space = storage["spaces"][0]["id"].as_str().unwrap().to_owned();
+        let space_words = format!("{WORDS}?space={space}");
+        assert_eq!(request(get(&space_words)).await, json!([]));
+
+        assert_eq!(
+            request(post_json(WORDS, json!({ "word": "Grapho" }))).await,
+            json!(["grapho"])
         );
-        assert_eq!(first.unwrap().status(), StatusCode::OK);
-        assert_eq!(second.unwrap().status(), StatusCode::OK);
+        assert_eq!(
+            request(post_json(&space_words, json!({ "word": "Neuraspace" }))).await,
+            json!(["neuraspace"])
+        );
 
-        let expected = serde_json::json!(["grapho", "neuraspace"]);
-        let duplicate = app
-            .clone()
-            .oneshot(post_json(WORDS, serde_json::json!({ "word": "GRAPHO" })))
-            .await
-            .unwrap();
-        assert_eq!(json_body(duplicate).await, expected);
+        // Each Space keeps its own list, and adding is case-insensitive.
+        assert_eq!(request(get(WORDS)).await, json!(["grapho"]));
+        assert_eq!(
+            request(get(&format!("{WORDS}?space=general"))).await,
+            json!(["grapho"])
+        );
+        assert_eq!(request(get(&space_words)).await, json!(["neuraspace"]));
+        assert_eq!(
+            request(post_json(WORDS, json!({ "word": "GRAPHO" }))).await,
+            json!(["grapho"])
+        );
+        assert_eq!(request(get(&space_words)).await, json!(["neuraspace"]));
+
         let invalid = app
             .clone()
-            .oneshot(post_json(WORDS, serde_json::json!({ "word": "two words" })))
+            .oneshot(post_json(WORDS, json!({ "word": "two words" })))
             .await
             .unwrap();
         assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            json_body(app.oneshot(get(WORDS)).await.unwrap()).await,
-            expected
-        );
+        let unknown = app
+            .clone()
+            .oneshot(get(&format!("{WORDS}?space={}", Uuid::new_v4())))
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+        assert!(json_body(unknown).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("Space doesn't exist"));
 
         let reopened = Store::load(directory.clone()).await.unwrap();
         let target = directory.join("moved");
         reopened.relocate(target.clone()).await.unwrap();
         let moved = Store::load(target).await.unwrap();
         assert_eq!(
-            serde_json::to_value(moved.spelling_words().await.unwrap()).unwrap(),
-            expected
+            serde_json::to_value(moved.spelling_words(None).await.unwrap()).unwrap(),
+            json!(["grapho"])
+        );
+        assert_eq!(
+            serde_json::to_value(
+                moved
+                    .spelling_words(Some(space.parse().unwrap()))
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            json!(["neuraspace"])
+        );
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_library_wide_dictionary_becomes_the_general_list() {
+        use serde_json::json;
+
+        let directory =
+            std::env::temp_dir().join(format!("grapho-spelling-test-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+        tokio::fs::write(
+            directory.join("spelling-words.json"),
+            r#"["grapho","neuraspace"]"#,
+        )
+        .await
+        .unwrap();
+        let (app, _) = test_app_for_directory(&directory, None, Drive::new()).await;
+
+        assert_eq!(
+            json_body(
+                app.clone()
+                    .oneshot(get("/api/spelling/words"))
+                    .await
+                    .unwrap()
+            )
+            .await,
+            json!(["grapho", "neuraspace"])
+        );
+        let storage = json_body(
+            app.clone()
+                .oneshot(post_json("/api/storage/spaces", json!({ "name": "Work" })))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let space = storage["spaces"][0]["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            json_body(
+                app.oneshot(post_json(
+                    &format!("/api/spelling/words?space={space}"),
+                    json!({ "word": "Teh" }),
+                ))
+                .await
+                .unwrap()
+            )
+            .await,
+            json!(["teh"])
+        );
+
+        // The rewrite kept the old library-wide list as General's.
+        let reopened = Store::load(directory.clone()).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(reopened.spelling_words(None).await.unwrap()).unwrap(),
+            json!(["grapho", "neuraspace"])
+        );
+        assert_eq!(
+            serde_json::to_value(
+                reopened
+                    .spelling_words(Some(space.parse().unwrap()))
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            json!(["teh"])
+        );
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn extension_switches_are_shared_by_the_server_and_survive_a_restart() {
+        use serde_json::json;
+
+        const EXTENSIONS: &str = "/api/extensions";
+        let (app, directory) = test_app(None).await;
+        let request = |request: Request| {
+            let app = app.clone();
+            async move { json_body(app.oneshot(request).await.unwrap()).await }
+        };
+        let status = |request: Request| {
+            let app = app.clone();
+            async move { app.oneshot(request).await.unwrap().status() }
+        };
+
+        assert_eq!(
+            request(get(EXTENSIONS)).await,
+            json!({ "boards": false, "draw": false })
+        );
+        assert_eq!(
+            request(put_json(EXTENSIONS, json!({ "boards": true }))).await,
+            json!({ "boards": true, "draw": false })
+        );
+        assert_eq!(
+            request(put_json(EXTENSIONS, json!({ "draw": true }))).await,
+            json!({ "boards": true, "draw": true })
+        );
+        assert_eq!(
+            request(get(EXTENSIONS)).await,
+            json!({ "boards": true, "draw": true })
+        );
+        assert_eq!(
+            request(put_json(EXTENSIONS, json!({ "boards": false }))).await,
+            json!({ "boards": false, "draw": true })
+        );
+
+        // A name this build does not have is refused and changes nothing.
+        assert_eq!(
+            status(put_json(EXTENSIONS, json!({ "pencil": true }))).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(put_json(EXTENSIONS, json!({}))).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            request(get(EXTENSIONS)).await,
+            json!({ "boards": false, "draw": true })
+        );
+
+        // A restart reads the same switches from the folder, and moving the
+        // folder carries them along.
+        let reopened = Store::load(directory.clone()).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(reopened.extensions().await).unwrap(),
+            json!(["draw"])
+        );
+        let moved = directory.join("moved");
+        reopened.relocate(moved.clone()).await.unwrap();
+        let after_move = Store::load(moved).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(after_move.extensions().await).unwrap(),
+            json!(["draw"])
+        );
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn extension_switches_ignore_names_this_build_does_not_know() {
+        use serde_json::json;
+
+        let directory = std::env::temp_dir().join(format!("grapho-extension-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+        // A file written by a newer Grapho can name a feature this build lacks.
+        tokio::fs::write(directory.join("extensions.json"), br#"["boards","pencil"]"#)
+            .await
+            .unwrap();
+        let (app, _) = test_app_for_directory(&directory, None, Drive::new()).await;
+
+        assert_eq!(
+            json_body(app.clone().oneshot(get("/api/extensions")).await.unwrap()).await,
+            json!({ "boards": true, "draw": false })
+        );
+        json_body(
+            app.oneshot(put_json("/api/extensions", json!({ "draw": true })))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let written = tokio::fs::read_to_string(directory.join("extensions.json"))
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&written).unwrap(),
+            ["boards", "draw"],
+            "an unknown name is dropped the next time the switches are written"
         );
         tokio::fs::remove_dir_all(directory).await.unwrap();
     }
@@ -2205,6 +2494,204 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_library_document_converts_to_a_board_when_its_markdown_has_columns() {
+        use serde_json::json;
+        use tokio::fs;
+
+        let (app, directory) = test_app(None).await;
+        let request = |request| async { app.clone().oneshot(request).await.unwrap() };
+        let document = json_body(request(post_json("/api/documents", json!({}))).await).await;
+        let id = document["id"].as_str().unwrap().to_owned();
+        let api_path = format!("/api/documents/{id}");
+        let convert_path = format!("{api_path}/board");
+        let written = request(put_json(
+            &api_path,
+            json!({
+                "title": "Release plan",
+                "content": "<h2>To do</h2><ul><li>Review</li></ul><h2>Done</h2>",
+            }),
+        ))
+        .await;
+        assert_eq!(written.status(), StatusCode::OK);
+        let file = directory.join("Release plan.md");
+        let markdown = fs::read_to_string(&file).await.unwrap();
+        assert!(markdown.contains("## To do"), "{markdown}");
+
+        let converted = request(post_json(&convert_path, json!({}))).await;
+        assert_eq!(converted.status(), StatusCode::OK);
+        let summary = json_body(converted).await;
+        assert_eq!(summary["id"], id.as_str());
+        assert_eq!(summary["title"], "Release plan");
+        assert_eq!(summary["board"], true);
+
+        // The document's own Markdown became the board source, with its title
+        // heading synchronized, and the file on disk agrees.
+        let board = json_body(request(get(&convert_path)).await).await;
+        let source = board["markdown"].as_str().unwrap();
+        assert!(source.starts_with("# Release plan\n\n## To do"), "{source}");
+        assert_eq!(fs::read_to_string(&file).await.unwrap(), source);
+        assert_eq!(board["title"], "Release plan");
+
+        // The document URL now serves the board page, and the rich editor route
+        // keeps refusing the body, as it does for every board.
+        let page = request(get(&format!("/doc/{id}"))).await;
+        let html = axum::body::to_bytes(page.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&html).contains("id=\"boardSource\""));
+        assert_eq!(
+            request(put_json(
+                &api_path,
+                json!({ "content": "<p>Other editor</p>" })
+            ))
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+
+        // The index keeps the board, its writing stays searchable, and the flag
+        // survives a restart.
+        let listing = json_body(request(get("/api/documents")).await).await;
+        assert_eq!(listing["documents"][0]["board"], true);
+        let found = json_body(request(get("/api/documents/search?q=review")).await).await;
+        assert_eq!(found["matches"][0]["id"], id.as_str());
+        let reopened = Store::load(directory.clone()).await.unwrap();
+        assert_eq!(
+            reopened
+                .get(id.parse().unwrap())
+                .await
+                .unwrap()
+                .board_markdown
+                .as_deref(),
+            Some(source)
+        );
+
+        // Converting a board again leaves it alone.
+        assert_eq!(
+            request(post_json(&convert_path, json!({}))).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            json_body(request(get(&convert_path)).await).await["markdown"],
+            source
+        );
+        fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_document_that_cannot_be_read_as_a_board_says_why() {
+        use serde_json::json;
+
+        let (app, directory) = test_app(None).await;
+        let request = |request| async { app.clone().oneshot(request).await.unwrap() };
+        let image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/1i9fWwAAAABJRU5ErkJggg==";
+        let cases = [
+            ("Prose", "<p>Just a paragraph.</p>".to_owned(), "no board columns"),
+            (
+                "Illustrated",
+                format!("<h2>To do</h2><ul><li>Review</li></ul><p><img src=\"{image}\" alt=\"shot\"></p>"),
+                "images",
+            ),
+        ];
+
+        for (title, content, expected) in cases {
+            let document = json_body(request(post_json("/api/documents", json!({}))).await).await;
+            let id = document["id"].as_str().unwrap().to_owned();
+            let api_path = format!("/api/documents/{id}");
+            assert_eq!(
+                request(put_json(
+                    &api_path,
+                    json!({ "title": title, "content": content }),
+                ))
+                .await
+                .status(),
+                StatusCode::OK
+            );
+
+            let refused = request(post_json(&format!("{api_path}/board"), json!({}))).await;
+            assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{title}");
+            let error = json_body(refused).await;
+            assert!(
+                error["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(expected),
+                "{title}: {error}"
+            );
+
+            // The document is still a regular document, with its body intact,
+            // and its page still opens in the editor.
+            let current = json_body(request(get(&api_path)).await).await;
+            assert_eq!(current["title"], title);
+            assert_eq!(current["content"], content);
+            let page = request(get(&format!("/doc/{id}"))).await;
+            let html = axum::body::to_bytes(page.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            assert!(!String::from_utf8_lossy(&html).contains("id=\"boardSource\""));
+            assert_eq!(
+                request(delete_request(&api_path)).await.status(),
+                StatusCode::NO_CONTENT
+            );
+        }
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_imported_markdown_board_converts_back_into_a_board() {
+        use serde_json::json;
+        use tokio::fs;
+
+        let (app, root) = test_app(None).await;
+        let request = |request| async { app.clone().oneshot(request).await.unwrap() };
+        let folder = root.join("imported");
+        let source = "# Release board\r\n\r\nPrepare it.\r\n\r\n## To do\r\n    - Review:\r\n    ```\r\n        The checklist.\r\n    ```\r\n\r\n## Done\r\n";
+        fs::create_dir_all(&folder).await.unwrap();
+        fs::write(folder.join("Release board.md"), source)
+            .await
+            .unwrap();
+
+        let created = request(post_json(
+            "/api/storage/spaces",
+            json!({ "name": "Imported", "folder": folder, "import_markdown": true }),
+        ))
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let storage = json_body(created).await;
+        let space = storage["spaces"][0]["id"].as_str().unwrap();
+        assert_eq!(storage["imported_documents"], 1);
+        let listing = json_body(request(get("/api/documents")).await).await;
+        let imported = listing["documents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|document| document["title"] == "Release board")
+            .expect("the imported Markdown is a document");
+        assert_eq!(imported["board"], json!(null), "import made a document");
+        let id = imported["id"].as_str().unwrap().to_owned();
+
+        let convert_path = format!("/api/documents/{id}/board");
+        let converted = request(post_json(&convert_path, json!({}))).await;
+        assert_eq!(converted.status(), StatusCode::OK);
+        assert_eq!(json_body(converted).await["board"], true);
+
+        // The file was already board source, so adopting it changes nothing.
+        assert_eq!(
+            fs::read_to_string(folder.join("Release board.md"))
+                .await
+                .unwrap(),
+            source
+        );
+        let board = json_body(request(get(&convert_path)).await).await;
+        assert_eq!(board["title"], "Release board");
+        assert_eq!(board["markdown"], source);
+        let listing = json_body(request(get("/api/documents")).await).await;
+        assert_eq!(listing["documents"][0]["space_id"], space);
+        assert_eq!(listing["documents"][0]["board"], true);
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn drawings_round_trip_as_library_documents() {
         use serde_json::json;
         use tokio::fs;
@@ -2313,6 +2800,7 @@ mod tests {
             "/api/documents",
             "/api/documents/search?q=notes",
             "/api/documents/deleted",
+            "/api/extensions",
             "/api/documents/3f0b3b0a-0c5a-4b8f-9a55-0d1f3b8a0000/title",
             "/api/documents/3f0b3b0a-0c5a-4b8f-9a55-0d1f3b8a0000/board",
             "/api/documents/3f0b3b0a-0c5a-4b8f-9a55-0d1f3b8a0000/drawing",

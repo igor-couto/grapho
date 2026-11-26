@@ -13,7 +13,7 @@ import {
 } from "../pretext/layout.js";
 import { getGraphemeEnds } from "../pretext/line-text.js";
 import { findGraphemeEnds } from "../pretext/graphemes.js";
-import { blockAlignment, blockIndent, blockText, isAtomicBlock } from "./model.js";
+import { blockAlignment, blockIndent, blockText, isAtomicBlock, tableCellRanges, tableColumnCount } from "./model.js";
 
 // These stacks must match --font-reading and --font-mono in app.css: Canvas
 // and the DOM have to resolve to the same font when a bundled face is missing.
@@ -22,6 +22,14 @@ const MONO = '"Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", mo
 const IMAGE_GAP = 24;
 const DOC_TOP = 29;
 const INDENT_STEP = 24;
+
+// A table paints a one-pixel grid inside the column: cell text keeps this much
+// padding, and a border line is reserved on every side of it.
+const TABLE_PAD_X = 9;
+const TABLE_PAD_Y = 7;
+const TABLE_BORDER = 1;
+const TABLE_MIN_COLUMN = 48;
+const TABLE_LINE = 16 * 1.55;
 
 // A divider is a rule with its own breathing room, not a line of text. The
 // entry keeps a whole band so a click near the rule still lands on the block;
@@ -85,10 +93,24 @@ const STYLES = {
     paddingX: 19,
     tracking: 0,
   },
+  // A table cell's own line. The painted .doc-line.is-table rule in app.css
+  // repeats these numbers.
+  table: {
+    size: 16,
+    weight: 400,
+    italic: false,
+    lineHeight: 1.55,
+    before: 30,
+    after: 30,
+    tracking: 0,
+  },
 };
 
 let preparedByBlock = new WeakMap();
 let segmentsByBlock = new WeakMap();
+// Table cells are laid out from their runs array; a cell's runs array is
+// replaced on edit, so the array itself is the cache key.
+let preparedByCellRuns = new WeakMap();
 let measureContext = null;
 let measureCache = new Map();
 const imageSizes = new Map();
@@ -96,6 +118,7 @@ const imageSizes = new Map();
 export function resetCaches() {
   preparedByBlock = new WeakMap();
   segmentsByBlock = new WeakMap();
+  preparedByCellRuns = new WeakMap();
   measureCache = new Map();
 }
 
@@ -816,6 +839,426 @@ function segmentStarts(segments) {
 }
 
 /* --------------------------------------------------------------------------
+   Tables
+   -------------------------------------------------------------------------- */
+
+// One pseudo-block stands in for every cell so fontFor() resolves the table
+// face without each cell carrying a block type.
+const CELL_BLOCK = { type: "table" };
+
+function cellFacet(runs, header) {
+  return { runs, header };
+}
+
+function cellMarks(run, header) {
+  return header ? { ...run, b: true } : run;
+}
+
+// The cell's runs cut at hard breaks, with offsets relative to the whole table
+// so fragments keep the editor's flat selection offsets.
+function cellSegments(facet, startOffset) {
+  const style = STYLES.table;
+  const tracking = style.tracking ? style.tracking * style.size : 0;
+  const segments = [];
+  let current = { items: [], start: startOffset };
+  let offset = startOffset;
+  let runIndex = 0;
+
+  for (const run of facet.runs) {
+    const marks = cellMarks(run, facet.header);
+    let start = 0;
+    for (let index = 0; index < run.text.length; index += 1) {
+      if (run.text[index] !== "\n") {
+        continue;
+      }
+      if (index > start) {
+        current.items.push({
+          text: run.text.slice(start, index),
+          font: fontFor(CELL_BLOCK, marks),
+          letterSpacing: tracking,
+          marks,
+          start: offset,
+          runIndex,
+        });
+        offset += index - start;
+      }
+      segments.push(current);
+      offset += 1;
+      current = { items: [], start: offset };
+      start = index + 1;
+    }
+    if (start < run.text.length) {
+      const text = run.text.slice(start);
+      current.items.push({
+        text,
+        font: fontFor(CELL_BLOCK, marks),
+        letterSpacing: tracking,
+        marks,
+        start: offset,
+        runIndex,
+      });
+      offset += text.length;
+    }
+    runIndex += 1;
+  }
+
+  segments.push(current);
+  return segments;
+}
+
+function cellPrepared(facet) {
+  const key = facet.header ? "header" : "body";
+  let cached = preparedByCellRuns.get(facet.runs);
+  if (!cached) {
+    cached = {};
+    preparedByCellRuns.set(facet.runs, cached);
+  }
+  if (!cached[key]) {
+    cached[key] = cellSegments(facet, 0).map((segment) =>
+      segment.items.length ? prepareRichInline(segment.items, { whiteSpace: "pre-wrap" }) : null,
+    );
+  }
+  return cached[key];
+}
+
+function cellSegmentWidth(segment) {
+  let width = 0;
+  for (const item of segment.items) {
+    width += textWidth(item.text, item.font) + (item.letterSpacing || 0) * graphemeCount(item.text);
+  }
+  return width;
+}
+
+// The widest hard-break line of a cell, before padding.
+function cellNaturalWidth(facet) {
+  let widest = 0;
+  for (const segment of cellSegments(facet, 0)) {
+    widest = Math.max(widest, cellSegmentWidth(segment));
+  }
+  return widest;
+}
+
+// Column edges that fill the paper. Natural widths win when they fit; a wider
+// table shrinks every column proportionally above a readable minimum.
+function tableColumns(naturals, totalWidth) {
+  const count = naturals.length;
+  const desired = naturals.map((width) =>
+    Math.max(TABLE_MIN_COLUMN, Math.ceil(width) + TABLE_PAD_X * 2 + TABLE_BORDER * 2),
+  );
+  const desiredTotal = desired.reduce((sum, width) => sum + width, 0);
+  let widths;
+  if (desiredTotal <= totalWidth) {
+    widths = desired.map((width) => (width * totalWidth) / desiredTotal);
+  } else if (totalWidth <= count * TABLE_MIN_COLUMN) {
+    widths = new Array(count).fill(totalWidth / count);
+  } else {
+    const spare = totalWidth - count * TABLE_MIN_COLUMN;
+    const excess = desiredTotal - count * TABLE_MIN_COLUMN;
+    widths = desired.map((width) => TABLE_MIN_COLUMN + ((width - TABLE_MIN_COLUMN) * spare) / excess);
+  }
+
+  const sample = widths.reduce((sum, width) => sum + width, 0) || 1;
+  const edges = [0];
+  let cumulative = 0;
+  for (let index = 0; index < count; index += 1) {
+    cumulative += widths[index];
+    edges.push(index === count - 1 ? totalWidth : Math.round((cumulative * totalWidth) / sample));
+  }
+  return edges.slice(0, -1).map((x, index) => ({ x, width: edges[index + 1] - x }));
+}
+
+function layoutCellLines(facet, width, x, startOffset) {
+  const segments = cellSegments(facet, startOffset);
+  const preparedAll = cellPrepared(facet);
+  const lineHeight = TABLE_LINE;
+  const lines = [];
+  let y = 0;
+
+  for (let index = 0; index < preparedAll.length; index += 1) {
+    const prepared = preparedAll[index];
+    const segment = segments[index];
+    const items = segment.items;
+    const isLast = index === preparedAll.length - 1;
+    const segmentStart = lines.length;
+
+    if (!prepared && isLast && index > 0) {
+      break;
+    }
+
+    if (!prepared) {
+      lines.push({
+        y,
+        x,
+        boxX: x,
+        boxRight: x + width,
+        width,
+        height: lineHeight,
+        fragments: [],
+        contentWidth: 0,
+        offsetStart: segment.start,
+        offsetEnd: segment.start,
+      });
+      lines[lines.length - 1].lastOfSegment = true;
+      y += lineHeight;
+      continue;
+    }
+
+    let cursor = { itemIndex: 0, segmentIndex: 0, graphemeIndex: 0 };
+    let guard = 0;
+
+    while (guard < 4000) {
+      guard += 1;
+      const range = layoutNextRichInlineLineRange(prepared, width, cursor);
+      if (!range) {
+        break;
+      }
+      const materialized = materializeRichInlineLineRange(prepared, range);
+      const line = {
+        y,
+        x,
+        boxX: x,
+        boxRight: x + width,
+        width,
+        height: lineHeight,
+        fragments: [],
+        contentWidth: 0,
+        offsetStart: segment.start,
+        offsetEnd: segment.start,
+        softWrapped: lines.length > segmentStart,
+      };
+      let cursorX = x;
+      for (const fragment of materialized.fragments) {
+        cursorX = pushFragment(line, fragment, items, cursorX);
+      }
+      line.contentWidth = cursorX - x;
+      if (line.fragments.length) {
+        line.offsetStart = line.fragments[0].start;
+        line.offsetEnd = line.fragments[line.fragments.length - 1].end;
+        const last = line.fragments[line.fragments.length - 1];
+        // A space hanging at a soft wrap is still painted by the DOM's line, so
+        // the caret after it must use the painted width.
+        if (last.text.endsWith(" ")) {
+          const painted = paintedFragmentWidth(last);
+          if (painted > last.width + 0.5) {
+            last.width = painted;
+          }
+        }
+      }
+      lines.push(line);
+      y += lineHeight;
+      cursor = range.end;
+    }
+
+    if (lines.length > segmentStart) {
+      lines[lines.length - 1].lastOfSegment = true;
+    }
+  }
+
+  return { lines, height: y };
+}
+
+function layoutTable(block, columnWidth, top) {
+  const rows = Array.isArray(block.rows) && block.rows.length ? block.rows : [[]];
+  const columnCount = Math.max(1, tableColumnCount(block));
+  const ranges = tableCellRanges(block);
+  const facets = rows.map((cells, row) => cells.map((runs) => cellFacet(runs, row === 0)));
+
+  const naturals = new Array(columnCount).fill(0);
+  for (const cells of facets) {
+    for (let column = 0; column < cells.length; column += 1) {
+      naturals[column] = Math.max(naturals[column], cellNaturalWidth(cells[column]));
+    }
+  }
+  const columns = tableColumns(naturals, columnWidth);
+
+  const lines = [];
+  const laidRows = [];
+  let y = top;
+  let rangeIndex = 0;
+
+  for (let row = 0; row < rows.length; row += 1) {
+    const cellLayouts = [];
+    let rowHeight = TABLE_LINE + TABLE_PAD_Y * 2;
+    for (let column = 0; column < columnCount; column += 1) {
+      const facet = facets[row][column] || cellFacet([], row === 0);
+      const entry = columns[column];
+      const range = ranges[rangeIndex] || { start: 0, end: 0 };
+      rangeIndex += 1;
+      const contentX = entry.x + TABLE_PAD_X + TABLE_BORDER;
+      const contentWidth = Math.max(24, entry.width - TABLE_PAD_X * 2 - TABLE_BORDER * 2);
+      const cell = layoutCellLines(facet, contentWidth, contentX, range.start);
+      rowHeight = Math.max(rowHeight, cell.height + TABLE_PAD_Y * 2);
+      cellLayouts.push({
+        row,
+        column,
+        x: entry.x,
+        width: entry.width,
+        top: y,
+        height: 0,
+        offsetStart: range.start,
+        offsetEnd: range.end,
+        lines: cell.lines,
+        contentX,
+      });
+    }
+
+    for (const cell of cellLayouts) {
+      cell.height = rowHeight;
+      for (const line of cell.lines) {
+        line.y += y + TABLE_PAD_Y;
+        lines.push(line);
+      }
+    }
+    laidRows.push({ row, top: y, height: rowHeight, cells: cellLayouts });
+    y += rowHeight;
+  }
+
+  return {
+    top,
+    height: y - top,
+    lines,
+    table: { x: 0, y: top, width: columnWidth, columns, rows: laidRows },
+  };
+}
+
+// Cell descriptors in row-major order for the editor's pointer and arrow keys.
+export function tableEntryCells(entry) {
+  const cells = [];
+  if (!entry || !entry.table) {
+    return cells;
+  }
+  for (const row of entry.table.rows) {
+    cells.push(...row.cells);
+  }
+  return cells;
+}
+
+export function tableCellEntryAtOffset(entry, offset) {
+  const cells = tableEntryCells(entry);
+  if (!cells.length) {
+    return null;
+  }
+  for (const cell of cells) {
+    if (offset <= cell.offsetEnd) {
+      return cell;
+    }
+  }
+  return cells[cells.length - 1];
+}
+
+export function tableCellEntryAt(entry, row, column) {
+  const rows = entry && entry.table ? entry.table.rows : [];
+  const cells = rows[row] ? rows[row].cells : null;
+  return cells && cells[column] ? cells[column] : null;
+}
+
+// Which cell of a table entry holds a document-space point. Used by the view
+// to place the per-cell options button under the pointer.
+export function tableCellAtPoint(entry, x, y) {
+  if (!entry || !entry.table || !entry.table.rows.length) {
+    return null;
+  }
+  const rows = entry.table.rows;
+  let row = rows[rows.length - 1];
+  for (const candidate of rows) {
+    if (y < candidate.top + candidate.height) {
+      row = candidate;
+      break;
+    }
+  }
+  const cells = row.cells;
+  let cell = cells[cells.length - 1];
+  for (const candidate of cells) {
+    if (x < candidate.x + candidate.width) {
+      cell = candidate;
+      break;
+    }
+  }
+  return cell;
+}
+
+// The line and line index holding a flat offset inside one cell.
+function cellLineAtOffset(cell, offset) {
+  for (let index = 0; index < cell.lines.length; index += 1) {
+    const line = cell.lines[index];
+    if (!line.fragments.length) {
+      if (offset === line.offsetStart) {
+        return { line, index };
+      }
+      continue;
+    }
+    if (offset <= line.fragments[line.fragments.length - 1].end) {
+      return { line, index };
+    }
+  }
+  const index = Math.max(0, cell.lines.length - 1);
+  return { line: cell.lines[index], index };
+}
+
+export function tablePositionAtOffset(entry, offset) {
+  const cell = tableCellEntryAtOffset(entry, offset);
+  if (!cell) {
+    return null;
+  }
+  const { line, index } = cellLineAtOffset(cell, offset);
+  return { cell, line, lineIndex: index, row: cell.row, column: cell.column };
+}
+
+// The flat offset closest to `x` on one laid-out line.
+export function lineOffsetAtX(line, x, character) {
+  if (!line || !line.fragments.length) {
+    return line ? line.offsetStart || 0 : 0;
+  }
+  if (character) {
+    const fragment = line.fragments.find((part) => x < xForOffset(part, part.end)) ?? line.fragments.at(-1);
+    const boundaries = graphemeBoundaries(fragment.text);
+    return fragment.start + boundaries[graphemeAtX(fragment, x, boundaries)];
+  }
+  let best = { offset: line.fragments[0].start, distance: Infinity };
+  for (const fragment of line.fragments) {
+    for (const offset of offsetCandidates(fragment, x)) {
+      const distance = Math.abs(xForOffset(fragment, offset) - x);
+      if (distance < best.distance || (distance === best.distance && offset < best.offset)) {
+        best = { offset, distance };
+      }
+    }
+  }
+  return best.offset;
+}
+
+function tablePointToOffset(entry, x, y, options) {
+  const table = entry.table;
+  let row = table.rows[table.rows.length - 1];
+  for (const candidate of table.rows) {
+    if (y < candidate.top + candidate.height) {
+      row = candidate;
+      break;
+    }
+  }
+  let cell = row.cells[row.cells.length - 1];
+  for (const candidate of row.cells) {
+    if (x < candidate.x + candidate.width) {
+      cell = candidate;
+      break;
+    }
+  }
+  if (!cell.lines.length) {
+    return cell.offsetStart;
+  }
+  let line = cell.lines[cell.lines.length - 1];
+  for (const candidate of cell.lines) {
+    if (y < candidate.y + candidate.height) {
+      line = candidate;
+      break;
+    }
+  }
+  if (!line.fragments.length) {
+    return line.offsetStart || cell.offsetStart;
+  }
+  return lineOffsetAtX(line, x, options && options.character);
+}
+
+/* --------------------------------------------------------------------------
    Document layout
    -------------------------------------------------------------------------- */
 
@@ -972,6 +1415,30 @@ function layoutPass(blocks, columnWidth, obstacles, pinned) {
       continue;
     }
 
+    // A table spans the paper, so it cannot be narrowed around a floating
+    // image; it starts below any image it would otherwise overlap.
+    if (block.type === "table") {
+      let tableTop = y;
+      for (const obstacle of obstacles) {
+        const bottom = obstacle.y + obstacle.height;
+        if (bottom > tableTop) {
+          tableTop = bottom + IMAGE_GAP;
+        }
+      }
+      const table = layoutTable(block, columnWidth, tableTop);
+      laid.push({
+        block,
+        index,
+        top: tableTop,
+        height: table.height,
+        lines: table.lines,
+        table: table.table,
+      });
+      y = tableTop + table.height;
+      previousAfter = style.after;
+      continue;
+    }
+
     const lines = layoutRichBlock(block, columnWidth, y, obstacles, style);
     const height = lines.length ? lines[lines.length - 1].y + lines[lines.length - 1].height - y : 0;
     laid.push({
@@ -1062,6 +1529,9 @@ export function lineAtY(entry, y) {
 export function pointToOffset(entry, x, y, { character = false } = {}) {
   if (!entry || isAtomicBlock(entry.block)) {
     return 0;
+  }
+  if (entry.table) {
+    return tablePointToOffset(entry, x, y, { character });
   }
   const line = lineAtY(entry, y);
   if (!line) {

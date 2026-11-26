@@ -12,13 +12,16 @@
 
 import {
   blockLength,
+  createBlock,
   createBlockId,
   emptyParagraph,
   escapeText,
+  isTableBlock,
   parseDocument,
   runsInRange,
   serializeCodeBlock,
   serializeDocument,
+  tableRunsInRange,
 } from "./model.js";
 
 // Headings above the editor's three levels are demoted the same way the store
@@ -174,6 +177,22 @@ export function selectionHtml(blocks, from, to) {
       }
       continue;
     }
+    if (isTableBlock(block)) {
+      // A whole table copies as a real table another program can paste back.
+      // A partial selection copies the covered text only, so cutting a few
+      // cells does not silently copy a whole grid.
+      const start = index === from.block ? from.offset : 0;
+      const end = index === to.block ? to.offset : blockLength(block);
+      if (start === 0 && end === blockLength(block)) {
+        copied.push({ ...block, id: createBlockId() });
+      } else {
+        const runs = tableRunsInRange(block, start, end);
+        if (runs.length) {
+          copied.push(createBlock("p", runs));
+        }
+      }
+      continue;
+    }
 
     const start = index === from.block ? from.offset : 0;
     const length = blockLength(block);
@@ -240,6 +259,10 @@ export function blocksFromPastedHtml(html) {
       return Boolean(block.src);
     }
     if (block.type === "divider") {
+      return true;
+    }
+    if (isTableBlock(block)) {
+      // An empty grid is still a table someone chose to copy.
       return true;
     }
     return Boolean(block.runs && block.runs.some((run) => run.text.trim()));
@@ -401,24 +424,49 @@ function renderListItem(node, context) {
   return "<li" + blockAttributes(node) + ">" + inline + nested + "</li>";
 }
 
-// Tables have no model block. Each row becomes a line and each cell a run
-// separated by a space, so pasted tabular text keeps its shape as text. Only
-// the table's own rows count: a nested table is flattened into its cell.
+// Tables paste as tables: the first row is the header (GFM's pipe table, and
+// the editor's own grid, always has one) and every other row is a body row.
+// Only the table's own cells count: a nested table is flattened into inline
+// content by renderInline, and any extra cells beyond the first row's count are
+// dropped, so the result is the rectangular grid the model stores.
 function renderTable(node, context) {
   const rows = [];
   for (const row of Array.from(node.rows || [])) {
     const cells = [];
     for (const cell of Array.from(row.children)) {
-      if (cell.tagName.toLowerCase() === "td" || cell.tagName.toLowerCase() === "th") {
+      const tag = cell.tagName.toLowerCase();
+      if (tag === "td" || tag === "th") {
         cells.push(renderInline(cell, context).trim());
       }
     }
-    const line = cells.filter(Boolean).join(" ");
-    if (line) {
-      rows.push(line);
+    if (cells.length) {
+      rows.push(cells);
     }
   }
-  return rows.join("<br>");
+  if (!rows.length) {
+    return "";
+  }
+  const columns = Math.max(...rows.map((cells) => cells.length));
+  for (const cells of rows) {
+    while (cells.length < columns) {
+      cells.push("");
+    }
+    cells.length = columns;
+  }
+  let html = "<table><thead><tr>";
+  for (const cell of rows[0]) {
+    html += "<th>" + cell + "</th>";
+  }
+  html += "</tr></thead><tbody>";
+  for (const row of rows.slice(1)) {
+    html += "<tr>";
+    for (const cell of row) {
+      html += "<td>" + cell + "</td>";
+    }
+    html += "</tr>";
+  }
+  html += "</tbody></table>";
+  return html;
 }
 
 // Inline content with block wrappers flattened away.

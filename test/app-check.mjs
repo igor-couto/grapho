@@ -4798,7 +4798,17 @@ async function checkBoards(cdp, base, dataDir) {
     document.querySelector('[data-extension="boards"]').click();
     document.querySelector('#extensionsDialog button[type="submit"]').click();
   })()`);
+  await waitForExpression(cdp, `(async () => {
+    const response = await fetch("/api/extensions", { cache: "no-store" });
+    return response.ok && (await response.json()).boards;
+  })()`, PAGE_TIMEOUT_MS);
+  // The switch belongs to the server, so this browser losing its local storage
+  // must not turn Boards off.
+  await evaluate(cdp, `localStorage.clear(); window.__graphoReloaded = true`);
   await cdp.send("Page.reload");
+  // Wait for the new page before its state is read: the old one still answers
+  // the next expression otherwise.
+  await waitForExpression(cdp, `window.__graphoReloaded !== true`, PAGE_TIMEOUT_MS);
   await waitForExpression(cdp, `document.getElementById("newDocument")?.getAttribute("aria-haspopup") === "dialog" && document.getElementById("librarySpace").value === "general"`, PAGE_TIMEOUT_MS);
   await evaluate(cdp, `document.getElementById("newDocument").click()`);
   check("New Document opens the type picker", await evaluate(cdp, `document.getElementById("newDocumentDialog").open`));
@@ -4814,7 +4824,7 @@ async function checkBoards(cdp, base, dataDir) {
   })()`));
   await cdp.send("Emulation.clearDeviceMetricsOverride");
 
-  await evaluate(cdp, `document.querySelector('#documentTypeOptions a[href^="/doc/new"]').click()`);
+  await evaluate(cdp, `[...document.querySelectorAll("#documentTypeOptions a")].find((link) => new URL(link.href).pathname === "/doc/new").click()`);
   await waitForPage(cdp, base + "/doc/new/", PAGE_TIMEOUT_MS);
   await waitForEditor(cdp, PAGE_TIMEOUT_MS);
   check("Document opens the regular editor", await evaluate(cdp, `Boolean(document.getElementById("docInput"))`));
@@ -4932,6 +4942,48 @@ async function checkBoards(cdp, base, dataDir) {
   await waitForBoardSave("## In progress\n    - Review again: Read the draft.");
   markdown = await readFile(boardFile, "utf8");
   check("visual card edits update the Markdown file", markdown.includes("## In progress\n    - Review again: Read the draft."));
+
+  // Deleting a card asks first; the board only changes after confirmation.
+  const deletePrompt = await evaluate(cdp, `(() => {
+    document.querySelector('[data-column="1"] .board-card .board-card-delete').click();
+    return {
+      open: document.getElementById("boardCardDeleteDialog").open,
+      heading: document.getElementById("boardCardDeleteTitle").textContent,
+      description: document.getElementById("boardCardDeleteDescription").textContent,
+      cardEditorOpen: document.getElementById("boardItemDialog").open,
+      focus: document.activeElement?.id,
+    };
+  })()`);
+  check("a card's delete button asks for confirmation", deletePrompt.open
+    && deletePrompt.heading === "Delete this card?"
+    && deletePrompt.description.includes("Review again")
+    && !deletePrompt.cardEditorOpen, JSON.stringify(deletePrompt));
+  equal("the card confirmation starts on Cancel", deletePrompt.focus, "boardCardDeleteCancel");
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  await waitForExpression(cdp, `!document.getElementById("boardCardDeleteDialog").open
+    && document.activeElement?.classList.contains("board-card-delete")`, PAGE_TIMEOUT_MS);
+  check("cancelling the card confirmation keeps the card and returns focus to its delete button", await evaluate(cdp,
+    `document.querySelectorAll('[data-column="1"] .board-card').length === 1
+      && document.querySelector('[data-column="1"] .board-card h3').textContent === "Review again"`));
+
+  await evaluate(cdp, `document.querySelector('[data-column="1"] .board-card .board-card-delete').click()`);
+  await waitForExpression(cdp, `document.getElementById("boardCardDeleteDialog").open`, PAGE_TIMEOUT_MS);
+  await evaluate(cdp, `document.getElementById("boardCardDeleteConfirm").click()`);
+  await waitForExpression(cdp, `!document.getElementById("boardCardDeleteDialog").open
+    && document.querySelectorAll('[data-column="1"] .board-card').length === 0
+    && document.activeElement?.classList.contains("board-add-card")`, PAGE_TIMEOUT_MS);
+  check("deleting a card removes it and moves focus to the column's Add card button", await evaluate(cdp,
+    `!document.getElementById("boardCardDeleteDialog").open
+      && document.querySelectorAll('[data-column="1"] .board-card').length === 0
+      && document.activeElement?.classList.contains("board-add-card")`));
+  await waitForExpression(cdp, `(async () => {
+    const response = await fetch("/api/documents/" + location.pathname.split("/").at(-1) + "/board", { cache: "no-store" });
+    return response.ok && !(await response.json()).markdown.includes("Review again");
+  })()`, PAGE_TIMEOUT_MS);
+  markdown = await readFile(boardFile, "utf8");
+  check("deleting a card updates the Markdown file", !markdown.includes("Review again")
+    && markdown.includes("## In progress"));
   await cdp.send("Emulation.clearDeviceMetricsOverride");
 
   const boardUrl = await evaluate(cdp, "location.href");
@@ -4947,15 +4999,139 @@ async function checkBoards(cdp, base, dataDir) {
     return row.querySelector(".board-glyph-icon").getBoundingClientRect().width > 0
       && row.querySelector(".document-glyph-icon").getBoundingClientRect().width === 0;
   })()`));
+
+  // A document whose Markdown already reads as a board converts from its card
+  // menu: the card turns into a board and the document URL serves the board
+  // page. A document with no columns is refused with a message and stays a
+  // document. The fixtures are deleted again so the checks below are unchanged.
+  const convertFixtures = await evaluate(cdp, `(async () => {
+    const create = async (title, content) => {
+      const made = await (await fetch("/api/documents", { method: "POST" })).json();
+      await fetch("/api/documents/" + encodeURIComponent(made.id), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, content }),
+      });
+      return made.id;
+    };
+    return {
+      boardId: await create("Converted plan", "<h2>To do</h2><ul><li>Review</li></ul><h2>Done</h2>"),
+      plainId: await create("Plain notes", "<p>Just a paragraph.</p>"),
+    };
+  })()`);
+  await cdp.send("Page.reload");
+  await waitForExpression(cdp, `(() => {
+    const card = document.querySelector('[data-document-id="${convertFixtures.boardId}"]');
+    return card && !card.querySelector(".card-board").hidden;
+  })()`, PAGE_TIMEOUT_MS);
+  const convertMenu = await evaluate(cdp, `(() => {
+    const card = document.querySelector('[data-document-id="${convertFixtures.boardId}"]');
+    card.querySelector(".card-menu-button").click();
+    const item = card.querySelector(".card-board");
+    return {
+      menuOpen: !card.querySelector(".card-menu").hidden,
+      label: item.textContent.trim(),
+      visible: item.getBoundingClientRect().width > 0,
+    };
+  })()`);
+  check(
+    "a document's card menu offers Convert to board",
+    convertMenu.menuOpen && convertMenu.visible && convertMenu.label === "Convert to board",
+    JSON.stringify(convertMenu),
+  );
+  const convertedCard = await evaluate(cdp, `(async () => {
+    const card = () => document.querySelector('[data-document-id="${convertFixtures.boardId}"]');
+    card().querySelector(".card-board").click();
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      if (card().classList.contains("is-board")) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const board = await (await fetch("/api/documents/${convertFixtures.boardId}/board", { cache: "no-store" })).json();
+    const toast = document.getElementById("toast");
+    return {
+      boardFlagged: card().classList.contains("is-board"),
+      glyph: card().querySelector(".board-glyph-icon").getBoundingClientRect().width,
+      markdown: board.markdown,
+      toast: toast.textContent,
+      toastVisible: toast.classList.contains("is-visible"),
+    };
+  })()`);
+  check(
+    "Convert to board keeps the document's Markdown as the board source",
+    convertedCard.boardFlagged &&
+      convertedCard.glyph > 0 &&
+      convertedCard.markdown.startsWith("# Converted plan") &&
+      convertedCard.markdown.includes("## To do"),
+    JSON.stringify(convertedCard),
+  );
+  check(
+    "converting announces the new board",
+    convertedCard.toast === "Document converted to a board." && convertedCard.toastVisible,
+    JSON.stringify(convertedCard),
+  );
+  await cdp.send("Page.navigate", { url: base + "/doc/" + convertFixtures.boardId });
+  await waitForExpression(cdp, `document.getElementById("boardView")?.hidden === false`, PAGE_TIMEOUT_MS);
+  check("the converted document opens as a board", await evaluate(cdp, `(() => {
+    const columns = [...document.querySelectorAll(".board-column")];
+    return columns.length === 2
+      && columns[0].querySelector(".board-heading-button").textContent === "To do"
+      && columns[0].querySelector(".board-card h3 button").textContent === "Review";
+  })()`));
+  await cdp.send("Page.navigate", { url: libraryUrl });
+  await waitForExpression(cdp, `(() => {
+    const card = document.querySelector('[data-document-id="${convertFixtures.plainId}"]');
+    return card && !card.querySelector(".card-board").hidden;
+  })()`, PAGE_TIMEOUT_MS);
+  const refusedConversion = await evaluate(cdp, `(async () => {
+    const card = document.querySelector('[data-document-id="${convertFixtures.plainId}"]');
+    card.querySelector(".card-menu-button").click();
+    card.querySelector(".card-board").click();
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      const toast = document.getElementById("toast");
+      if (toast.classList.contains("is-error") && toast.classList.contains("is-visible")) {
+        const listing = await (await fetch("/api/documents")).json();
+        return {
+          toast: toast.textContent,
+          stillDocument: !card.classList.contains("is-board"),
+          listed: listing.documents.find((entry) => entry.id === "${convertFixtures.plainId}") ?? null,
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return { toast: document.getElementById("toast").textContent, stillDocument: !card.classList.contains("is-board") };
+  })()`);
+  check(
+    "a document without columns shows why it cannot become a board",
+    refusedConversion.stillDocument &&
+      !refusedConversion.listed?.board &&
+      typeof refusedConversion.toast === "string" &&
+      refusedConversion.toast.includes("no board columns"),
+    JSON.stringify(refusedConversion),
+  );
   await evaluate(cdp, `(() => {
     document.getElementById("libraryMenuButton").click();
     document.getElementById("extensionsButton").click();
     document.querySelector('[data-extension="boards"]').click();
   })()`);
   check("disabling Boards restores direct document creation", await evaluate(cdp, `!document.getElementById("newDocument").hasAttribute("aria-haspopup")`));
+  check("Convert to board disappears when Boards is off", await evaluate(cdp, `(() => {
+    const card = document.querySelector('[data-document-id="${convertFixtures.plainId}"]');
+    return Boolean(card) && card.querySelector(".card-board").hidden;
+  })()`));
+  // The board page reads the switch from the server, so wait for the save
+  // before opening the board or it could still render the board view.
+  await waitForExpression(cdp, `(async () => {
+    const response = await fetch("/api/extensions", { cache: "no-store" });
+    return response.ok && !(await response.json()).boards;
+  })()`, PAGE_TIMEOUT_MS);
   await cdp.send("Page.navigate", { url: boardUrl });
   await waitForExpression(cdp, `document.getElementById("boardEditor")?.hidden === false`, PAGE_TIMEOUT_MS);
   equal("disabling Boards leaves the saved source accessible", await evaluate(cdp, `document.getElementById("boardSource").value`), markdown);
+  await evaluate(cdp, `(async () => {
+    for (const id of ["${convertFixtures.boardId}", "${convertFixtures.plainId}"]) {
+      await fetch("/api/documents/" + encodeURIComponent(id), { method: "DELETE" });
+    }
+  })()`);
 }
 
 async function checkDrawings(cdp, base, dataDir, pressKey) {
@@ -5064,7 +5240,7 @@ async function checkSpaces(cdp, base, dataDir) {
   await waitForPage(cdp, base + "/storage", PAGE_TIMEOUT_MS);
   await waitForExpression(cdp, `document.getElementById("spaceAdd")?.hidden === false`, PAGE_TIMEOUT_MS);
   const folder = path.join(dataDir, "work");
-  const notes = "# Draft notes\n\nMarkdown that was here before the Space.\n";
+  const notes = "# Draft notes\n\nRecieve qzxqzxqz Markdown that was here before the Space.\n";
   await mkdir(folder);
   await writeFile(path.join(folder, "Draft notes.md"), notes);
   await evaluate(cdp, `(() => {
@@ -5127,6 +5303,61 @@ async function checkSpaces(cdp, base, dataDir) {
   await chooseSpace("general");
   check("the same document appears in General after moving", await evaluate(cdp, `Boolean(document.querySelector('[data-document-id="${id}"]'))`));
   equal("the moved Markdown now lives in the main folder", await readFile(path.join(dataDir, "Space test document.md"), "utf8"), "");
+
+  // Custom spelling words belong to the Space. General's list was filled by
+  // the earlier spellcheck check, so those words are still wrong in Work.
+  await chooseSpace(space);
+  await waitForExpression(cdp, `document.querySelector('[data-document-id] .document-card-link')`, PAGE_TIMEOUT_MS);
+  await evaluate(cdp, `document.querySelector('[data-document-id] .document-card-link').click()`);
+  await waitForPage(cdp, base + "/doc/", PAGE_TIMEOUT_MS);
+  await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+  const markedWords = ".doc-spelling-mark:not([hidden])";
+  check("the Space marks both words while its dictionary is empty", await waitForExpression(cdp,
+    `document.querySelectorAll(${JSON.stringify(markedWords)}).length === 2`, PAGE_TIMEOUT_MS));
+
+  // Spelling marks are underline rectangles without text, so the word's point
+  // comes from the painted text and the marks only say that it is marked.
+  async function wordPoint(word) {
+    return evaluate(cdp, `(() => {
+      const word = ${JSON.stringify(word)};
+      for (const line of document.querySelectorAll(".doc-line")) {
+        const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+          const index = node.nodeValue.indexOf(word);
+          if (index < 0) continue;
+          const range = document.createRange();
+          range.setStart(node, index);
+          range.setEnd(node, index + word.length);
+          const rect = range.getBoundingClientRect();
+          return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        }
+      }
+      return null;
+    })()`);
+  }
+
+  const uniqueMark = await wordPoint("qzxqzxqz");
+  await cdp.send("Input.dispatchMouseEvent", { ...uniqueMark, button: "right", type: "mousePressed", clickCount: 1 });
+  await cdp.send("Input.dispatchMouseEvent", { ...uniqueMark, button: "right", type: "mouseReleased", clickCount: 1 });
+  await waitForExpression(cdp, `!document.getElementById("spellingMenu").hidden`, PAGE_TIMEOUT_MS);
+  await evaluate(cdp, `document.querySelector("#spellingMenu .spelling-add").click()`);
+  check("adding a word stores it in the Space's dictionary", await waitForExpression(cdp,
+    `(async () => {
+      const words = await fetch("/api/spelling/words?space=${space}").then((response) => response.json());
+      return words.includes("qzxqzxqz");
+    })()`, PAGE_TIMEOUT_MS));
+  check("the word does not join General's dictionary", await evaluate(cdp,
+    `fetch("/api/spelling/words").then((response) => response.json()).then((words) => !words.includes("qzxqzxqz"))`));
+  check("the Space's document accepts the added word", await waitForExpression(cdp,
+    `document.querySelectorAll(${JSON.stringify(markedWords)}).length === 1`, PAGE_TIMEOUT_MS));
+
+  await cdp.send("Page.navigate", { url: base + "/doc/" + id });
+  await waitForPage(cdp, base + "/doc/" + id, PAGE_TIMEOUT_MS);
+  await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+  await evaluate(cdp, `document.getElementById("docInput").focus()`);
+  await cdp.send("Input.insertText", { text: "qzxqzxqz " });
+  check("a Space's dictionary word is still misspelled in General", await waitForExpression(cdp,
+    `document.querySelectorAll(${JSON.stringify(markedWords)}).length === 1`, PAGE_TIMEOUT_MS));
   await cdp.send("Emulation.clearDeviceMetricsOverride");
 }
 

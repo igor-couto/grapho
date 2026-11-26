@@ -25,7 +25,7 @@ export function bindBoardDrag(columns, moveCard) {
     blockClick = false;
     const card = event.target.closest(".board-card");
     const handle = event.target.closest(".board-card-grip");
-    if (!card || event.target.closest("a") || (event.pointerType === "touch" && !handle)) return;
+    if (!card || event.target.closest("a, .board-card-delete") || (event.pointerType === "touch" && !handle)) return;
 
     drag = {
       id: event.pointerId,

@@ -2,7 +2,14 @@
 // sync. Only blocks whose geometry or text changed are rebuilt.
 
 import { blockLength, imageRadius } from "./model.js";
-import { dividerLineY, entryAtY, fontFor, fragmentTextWidth, textWidth } from "./layout.js";
+import {
+  dividerLineY,
+  entryAtY,
+  fontFor,
+  fragmentTextWidth,
+  tableCellAtPoint,
+  textWidth,
+} from "./layout.js";
 
 const HANDLE_CORNERS = [
   ["nw", 0, 0],
@@ -32,6 +39,73 @@ export class EditorView {
     this.spellingRanges = new WeakMap();
     this.spellingCaret = null;
     this.customSpelling = new Set();
+    // One floating button, positioned over the hovered or focused table cell,
+    // opens the per-cell options menu. It is not one button per cell.
+    this.tableTool = null;
+    this.tableToolCell = null;
+  }
+
+  // The table cell at a client point, with its layout entry, or null.
+  tableCellAtPoint(clientX, clientY) {
+    if (!this.layout || !this.root) {
+      return null;
+    }
+    const rect = this.root.getBoundingClientRect();
+    const y = clientY - rect.top;
+    const entry = entryAtY(this.layout, y);
+    if (!entry || !entry.table) {
+      return null;
+    }
+    const cell = tableCellAtPoint(entry, clientX - rect.left, y);
+    return cell ? { entry, cell } : null;
+  }
+
+  ensureTableTool() {
+    if (this.tableTool || !this.overlay) {
+      return this.tableTool;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "doc-table-tool";
+    button.hidden = true;
+    button.tabIndex = -1;
+    button.setAttribute("aria-label", "Table options");
+    button.setAttribute("aria-haspopup", "menu");
+    button.setAttribute("aria-expanded", "false");
+    button.title = "Table options";
+    button.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">' +
+      '<path d="m7 10 5 5 5-5" stroke="currentColor" stroke-width="1.8" ' +
+      'stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    this.overlay.appendChild(button);
+    this.tableTool = button;
+    return button;
+  }
+
+  showTableCellTool(entry, cell) {
+    const button = this.ensureTableTool();
+    if (!button || !entry || !cell) {
+      return null;
+    }
+    const size = 24;
+    button.style.left = Math.max(cell.x + 2, cell.x + cell.width - size - 5) + "px";
+    button.style.top = cell.top + 4 + "px";
+    button.dataset.blockIndex = String(entry.index);
+    button.dataset.row = String(cell.row);
+    button.dataset.column = String(cell.column);
+    button.dataset.offset = String(cell.offsetStart);
+    button.hidden = false;
+    this.tableToolCell = { entry, cell };
+    return button;
+  }
+
+  hideTableCellTool() {
+    if (!this.tableTool) {
+      return;
+    }
+    this.tableTool.hidden = true;
+    this.tableTool.setAttribute("aria-expanded", "false");
+    this.tableToolCell = null;
   }
 
   setLayout(layout, blocks) {
@@ -171,6 +245,15 @@ export class EditorView {
     if (entry.divider) {
       parts.push("d");
     }
+    if (entry.table) {
+      parts.push("t");
+      for (const column of entry.table.columns) {
+        parts.push(column.x, column.width);
+      }
+      for (const row of entry.table.rows) {
+        parts.push(row.top, row.height);
+      }
+    }
     if (entry.image) {
       parts.push(
         "i",
@@ -233,6 +316,10 @@ export class EditorView {
       box.style.width = entry.box.width + "px";
       box.style.height = entry.box.height + "px";
       element.appendChild(box);
+    }
+
+    if (entry.table) {
+      paintTable(element, entry);
     }
 
     if (entry.image) {
@@ -513,7 +600,53 @@ function lineClass(block) {
   if (block.type === "code") {
     return "is-code";
   }
+  if (block.type === "table") {
+    return "is-table";
+  }
   return "is-p";
+}
+
+// The one-pixel grid sits under the text lines: an outer frame, the header
+// row's wash, then the inner column and row rules. Cells never paint their own
+// borders, so two neighbouring cells cannot draw a double line.
+function paintTable(element, entry) {
+  const table = entry.table;
+  const top = table.y - entry.top;
+  const frame = document.createElement("div");
+  frame.className = "doc-table-frame";
+  frame.style.left = table.x + "px";
+  frame.style.top = top + "px";
+  frame.style.width = table.width + "px";
+  frame.style.height = entry.height + "px";
+  element.appendChild(frame);
+
+  const header = table.rows[0];
+  if (header && table.width > 2 && header.height > 1) {
+    const wash = document.createElement("div");
+    wash.className = "doc-table-head";
+    wash.style.left = table.x + 1 + "px";
+    wash.style.top = top + 1 + "px";
+    wash.style.width = table.width - 2 + "px";
+    wash.style.height = header.height - 1 + "px";
+    element.appendChild(wash);
+  }
+
+  for (let index = 1; index < table.columns.length; index += 1) {
+    const rule = document.createElement("div");
+    rule.className = "doc-table-rule is-column";
+    rule.style.left = table.columns[index].x + "px";
+    rule.style.top = top + 1 + "px";
+    rule.style.height = Math.max(0, entry.height - 2) + "px";
+    element.appendChild(rule);
+  }
+  for (let index = 1; index < table.rows.length; index += 1) {
+    const rule = document.createElement("div");
+    rule.className = "doc-table-rule is-row";
+    rule.style.left = table.x + 1 + "px";
+    rule.style.top = table.rows[index].top - entry.top + "px";
+    rule.style.width = Math.max(0, table.width - 2) + "px";
+    element.appendChild(rule);
+  }
 }
 
 function fragmentClass(fragment) {

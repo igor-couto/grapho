@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { changeBoardCard, parseBoard, renderBoardMarkdown, setBoardHeading } from "../assets/board-markdown.js";
+import { changeBoardCard, parseBoard, removeBoardCard, renderBoardMarkdown, setBoardHeading } from "../assets/board-markdown.js";
 
 function cardContents(column) {
   return column.cards.map(({ title, description }) => ({ title, description }));
@@ -126,6 +126,63 @@ test("visual edits preserve heading placement and serialize multiline card detai
   assert.deepEqual(cardContents(parseBoard(edited).columns[1]), [{ title: "Task two", description: "Summary" }]);
   const appended = changeBoardCard(added, undefined, column, undefined, { title: "Last task", description: "" });
   assert.deepEqual(parseBoard(appended).columns[1].cards.map((card) => card.title), ["Task: one", "Last task"]);
+});
+
+test("deleting a card removes its lines and keeps the rest of the source untouched", () => {
+  const source = [
+    "# Release",
+    "",
+    "Intro",
+    "",
+    "## Queue",
+    "    - Draft:",
+    "    ```",
+    "        ## Details",
+    "        - Paragraph",
+    "    ```",
+    "    - Review",
+    "",
+    "## Doing",
+    "- Publish",
+    "",
+  ].join("\r\n");
+  const [queue] = parseBoard(source).columns;
+  const removed = removeBoardCard(source, queue.cards[0]);
+  assert.equal(removed, [
+    "# Release", "", "Intro", "", "## Queue", "    - Review", "",
+    "## Doing", "- Publish", "",
+  ].join("\r\n"));
+  const board = parseBoard(removed);
+  assert.deepEqual(board.columns.map((column) => column.title), ["Queue", "Doing"]);
+  assert.deepEqual(cardContents(board.columns[0]), [{ title: "Review", description: "" }]);
+});
+
+test("deleting the only card in a column leaves the column empty", () => {
+  const source = "# Plan\n\n## To do\n- Only card\n\n## Done\n";
+  const removed = removeBoardCard(source, parseBoard(source).columns[0].cards[0]);
+  assert.equal(removed, "# Plan\n\n## To do\n\n## Done\n");
+  assert.deepEqual(parseBoard(removed).columns[0].cards, []);
+});
+
+test("deleting a card keeps the BOM and the indentation of the cards after it", () => {
+  const source = "\uFEFF# Plan\n\n## Queue\n    - One: First.\n    - Two: Second.\n    - Three\n";
+  const queue = parseBoard(source).columns[0];
+  const removed = removeBoardCard(source, queue.cards[1]);
+  assert.equal(removed, "\uFEFF# Plan\n\n## Queue\n    - One: First.\n    - Three\n");
+  assert.deepEqual(parseBoard(removed).columns[0].cards.map((card) => card.title), ["One", "Three"]);
+});
+
+test("deleting a card with an unfinished fence takes the fence with it", () => {
+  const source = "# Plan\n\n## Next\n- Existing\n\n## Later\n- Review:\n  ```\n    Check links.\n";
+  const later = parseBoard(source).columns[1];
+  const removed = removeBoardCard(source, later.cards[0]);
+  assert.equal(removed, "# Plan\n\n## Next\n- Existing\n\n## Later\n");
+  assert.deepEqual(parseBoard(removed).columns.map((column) => column.title), ["Next", "Later"]);
+});
+
+test("deleting a card with no source removes nothing", () => {
+  const source = "# Plan\n\n## Next\n- Existing\n";
+  assert.equal(removeBoardCard(source, null), source);
 });
 
 test("moving a card with an unfinished fence keeps later columns visible", () => {

@@ -30,7 +30,17 @@ const DEFAULT_DRAWING_TITLE: &str = "Untitled drawing";
 const DRAWING_FENCE: &str = "```grapho-drawing-v1";
 const DRAWING_SIZE: u16 = 1000;
 pub(crate) const INDEX_FILE: &str = "metadata.json";
+/// The opt-in features the library can switch on. These are the only names the
+/// Extensions dialog, the API, and the stored file accept.
+pub(crate) const EXTENSION_NAMES: [&str; 2] = ["boards", "draw"];
+/// The switches live beside the documents so every browser on this Grapho
+/// server shares them, a restart keeps them, and moving the folder carries
+/// them along.
+const EXTENSIONS_FILE: &str = "extensions.json";
 const SPELLING_WORDS_FILE: &str = "spelling-words.json";
+/// The scope `spelling-words.json` uses for General, the unnamed Space every
+/// document without a Space belongs to.
+const SPELLING_GENERAL_SCOPE: &str = "general";
 const MAX_TITLE_CHARS: usize = 200;
 const EXCERPT_CHARS: usize = 220;
 /// How much text the home page's grid card miniature holds. The card renders
@@ -45,6 +55,13 @@ const PREVIEW_SCAN_BYTES: usize = 64 * 1024;
 /// so it survives reloads. These bounds keep a hand-edited file sane.
 const MIN_PAPER_WIDTH: u32 = 320;
 const MAX_PAPER_WIDTH: u32 = 4000;
+
+/// The custom words the spelling checker accepts, one list per Space.
+///
+/// Every Space, including General, has its own list. The lists share one file
+/// so moving the data folder carries all of them, and a Space that uses the
+/// main folder still keeps a dictionary of its own.
+type SpellingWords = BTreeMap<String, BTreeSet<String>>;
 
 /// The editor's document shape, served over the JSON API.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -249,7 +266,10 @@ pub enum StoreError {
     EmptyDraft,
     WrongDocumentFormat,
     InvalidDrawing,
+    NoBoardLayout,
+    BoardImages,
     UnknownSpace,
+    UnknownExtension,
     UnavailableSpace,
     Io(io::Error),
     Corrupt { path: PathBuf, message: String },
@@ -261,7 +281,10 @@ impl fmt::Display for StoreError {
             Self::EmptyDraft => write!(f, "empty untitled draft"),
             Self::WrongDocumentFormat => write!(f, "document has another format"),
             Self::InvalidDrawing => write!(f, "invalid pencil strokes"),
+            Self::NoBoardLayout => write!(f, "document has no board columns"),
+            Self::BoardImages => write!(f, "document has images a board cannot hold"),
             Self::UnknownSpace => write!(f, "space does not exist"),
+            Self::UnknownExtension => write!(f, "extension does not exist"),
             Self::UnavailableSpace => write!(f, "the Space's storage folder is unavailable"),
             Self::Io(error) => write!(f, "{error}"),
             Self::Corrupt { path, message } => {
@@ -278,7 +301,10 @@ impl std::error::Error for StoreError {
             Self::EmptyDraft
             | Self::WrongDocumentFormat
             | Self::InvalidDrawing
+            | Self::NoBoardLayout
+            | Self::BoardImages
             | Self::UnknownSpace
+            | Self::UnknownExtension
             | Self::UnavailableSpace
             | Self::Corrupt { .. } => None,
         }
@@ -340,6 +366,7 @@ struct State {
     directory: PathBuf,
     documents: HashMap<Uuid, Document>,
     index: LibraryIndex,
+    extensions: BTreeSet<String>,
     unavailable_spaces: HashSet<Uuid>,
 }
 
@@ -349,6 +376,9 @@ impl Store {
 
         let mut index = read_index(&directory).await?;
         index.backup = false;
+        // A malformed switch file only means every extension is off: a browser
+        // preference must never keep the library from opening.
+        let extensions = read_extensions(&directory).await.unwrap_or_default();
         let mut documents = HashMap::new();
         let mut folder_keys = HashSet::from([directory_key(&directory).await?]);
         let mut configured_paths = HashSet::from([directory.as_path()]);
@@ -424,6 +454,7 @@ impl Store {
                 directory,
                 documents,
                 index,
+                extensions,
                 unavailable_spaces,
             }),
         })
@@ -447,18 +478,66 @@ impl Store {
             .collect()
     }
 
-    pub async fn spelling_words(&self) -> io::Result<BTreeSet<String>> {
+    /// The words the spelling checker accepts in one Space's documents.
+    pub async fn spelling_words(
+        &self,
+        space: Option<Uuid>,
+    ) -> Result<BTreeSet<String>, StoreError> {
         let state = self.state.read().await;
-        read_spelling_words(&state.directory).await
+        state.require_space(space)?;
+        Ok(read_spelling_words(&state.directory)
+            .await?
+            .remove(&spelling_scope(space))
+            .unwrap_or_default())
     }
 
-    pub async fn add_spelling_word(&self, word: String) -> io::Result<BTreeSet<String>> {
+    /// Add a word to one Space's dictionary and answer with that Space's words.
+    pub async fn add_spelling_word(
+        &self,
+        space: Option<Uuid>,
+        word: String,
+    ) -> Result<BTreeSet<String>, StoreError> {
         let state = self.state.write().await;
+        state.require_space(space)?;
+        let scope = spelling_scope(space);
         let mut words = read_spelling_words(&state.directory).await?;
-        if words.insert(word) {
-            crate::settings::write_json(&state.directory.join(SPELLING_WORDS_FILE), &words).await?;
+        if words.entry(scope.clone()).or_default().insert(word) {
+            write_spelling_words(&state.directory, &words).await?;
         }
-        Ok(words)
+        Ok(words.remove(&scope).unwrap_or_default())
+    }
+
+    /// The extensions switched on for this Grapho server.
+    pub async fn extensions(&self) -> BTreeSet<String> {
+        self.state.read().await.extensions.clone()
+    }
+
+    /// Switch extensions on or off and answer with the full set. The change is
+    /// on disk before it is acknowledged, so every browser and the next start
+    /// see the same switches.
+    pub async fn set_extensions(
+        &self,
+        changes: &BTreeMap<String, bool>,
+    ) -> Result<BTreeSet<String>, StoreError> {
+        if changes
+            .keys()
+            .any(|name| !EXTENSION_NAMES.contains(&name.as_str()))
+        {
+            return Err(StoreError::UnknownExtension);
+        }
+
+        let mut state = self.state.write().await;
+        let mut extensions = state.extensions.clone();
+        for (name, enabled) in changes {
+            if *enabled {
+                extensions.insert(name.clone());
+            } else {
+                extensions.remove(name);
+            }
+        }
+        write_extensions(&state.directory, &extensions).await?;
+        state.extensions = extensions.clone();
+        Ok(extensions)
     }
 
     /// The live library across all of its folders, including deleted file bytes.
@@ -802,6 +881,43 @@ impl Store {
         Ok(Some(document))
     }
 
+    /// Adopt a regular document's Markdown as board source.
+    ///
+    /// The writing is kept verbatim: it is already the file a board saves, so
+    /// conversion only reads the structure to decide whether a board can show
+    /// it. Images block the conversion because a board has no way to paint them
+    /// and the board body's index entry drops the attachments. An existing board
+    /// is left alone, which makes a repeated request harmless.
+    pub async fn convert_to_board(&self, id: Uuid) -> Result<Option<Document>, StoreError> {
+        let mut state = self.state.write().await;
+        state.require_document_space(id)?;
+        let Some(document) = state.active_document(id).cloned() else {
+            return Ok(None);
+        };
+        if document.board_markdown.is_some() {
+            return Ok(Some(document));
+        }
+        if document.drawing_markdown.is_some() {
+            return Err(StoreError::WrongDocumentFormat);
+        }
+        let metadata = state.index.documents[&id].clone();
+        if !metadata.images.is_empty() {
+            return Err(StoreError::BoardImages);
+        }
+        let folder = state.folder_for(document.space_id).to_path_buf();
+        let source = fs::read_to_string(folder.join(&metadata.filename)).await?;
+        if !board_layout(&source) {
+            return Err(StoreError::NoBoardLayout);
+        }
+
+        let mut document = document;
+        document.updated_at = now_millis().max(document.updated_at.saturating_add(1));
+        document.board_markdown = Some(source);
+        synchronize_board_heading(&mut document);
+        state.persist(document.clone()).await?;
+        Ok(Some(document))
+    }
+
     pub(crate) async fn save_drawing(
         &self,
         id: Uuid,
@@ -1048,14 +1164,26 @@ impl Store {
         if !spelling_words.is_empty() {
             let copied = async {
                 let mut words = read_spelling_words(&target).await?;
-                words.extend(spelling_words);
-                crate::settings::write_json(&target.join(SPELLING_WORDS_FILE), &words).await
+                for (scope, added) in &spelling_words {
+                    words
+                        .entry(scope.clone())
+                        .or_default()
+                        .extend(added.iter().cloned());
+                }
+                write_spelling_words(&target, &words).await
             }
             .await;
             if let Err(error) = copied {
                 remove_copies(&created).await;
                 return Err(RelocateError::io(&target, error));
             }
+        }
+
+        // The switches belong to the server, not the folder, so the folder the
+        // server moves to now records the current answer.
+        if let Err(error) = write_extensions(&target, &state.extensions).await {
+            remove_copies(&created).await;
+            return Err(RelocateError::io(&target, error));
         }
 
         let write =
@@ -1088,12 +1216,62 @@ impl Store {
     }
 }
 
-async fn read_spelling_words(directory: &Path) -> io::Result<BTreeSet<String>> {
+/// The scope key a Space's words are stored under.
+fn spelling_scope(space: Option<Uuid>) -> String {
+    space.map_or_else(|| SPELLING_GENERAL_SCOPE.to_owned(), |id| id.to_string())
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredSpellingWords {
+    /// The first version of the file kept one list for the whole library.
+    Library(BTreeSet<String>),
+    Spaces(BTreeMap<String, BTreeSet<String>>),
+}
+
+async fn read_spelling_words(directory: &Path) -> io::Result<SpellingWords> {
     match fs::read(directory.join(SPELLING_WORDS_FILE)).await {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::from),
+        Ok(bytes) => match serde_json::from_slice(&bytes)? {
+            StoredSpellingWords::Library(words) => {
+                Ok(BTreeMap::from([(spelling_scope(None), words)]))
+            }
+            StoredSpellingWords::Spaces(words) => Ok(words),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(SpellingWords::new()),
+        Err(error) => Err(error),
+    }
+}
+
+async fn write_spelling_words(directory: &Path, words: &SpellingWords) -> io::Result<()> {
+    let mut words = words.clone();
+    words.retain(|_, words| !words.is_empty());
+    crate::settings::write_json(&directory.join(SPELLING_WORDS_FILE), &words).await
+}
+
+async fn read_extensions(directory: &Path) -> io::Result<BTreeSet<String>> {
+    match fs::read(directory.join(EXTENSIONS_FILE)).await {
+        Ok(bytes) => {
+            let names: Vec<String> = serde_json::from_slice(&bytes)?;
+            // A file written by a newer Grapho may carry a feature this build
+            // does not have. Keep only the names both know.
+            Ok(names
+                .into_iter()
+                .filter(|name| EXTENSION_NAMES.contains(&name.as_str()))
+                .collect())
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(BTreeSet::new()),
         Err(error) => Err(error),
     }
+}
+
+async fn write_extensions(directory: &Path, extensions: &BTreeSet<String>) -> io::Result<()> {
+    // The dialog's order, so the small file stays stable and easy to read.
+    let names: Vec<&str> = EXTENSION_NAMES
+        .iter()
+        .copied()
+        .filter(|name| extensions.contains(*name))
+        .collect();
+    crate::settings::write_json(&directory.join(EXTENSIONS_FILE), &names).await
 }
 
 fn in_space(document: &Document, space: Option<Option<Uuid>>) -> bool {
@@ -1102,6 +1280,51 @@ fn in_space(document: &Document, space: Option<Option<Uuid>>) -> bool {
 
 fn board_html(source: &str) -> String {
     sanitize_document_content(markdown::decode(source, &BTreeMap::new(), &BTreeMap::new()))
+}
+
+/// Whether this Markdown reads as a board the board page can lay out.
+///
+/// The browser's board parser reads `#` as the title, `##` as a column and `-`
+/// as a card, and it skips everything inside a code fence. Conversion needs the
+/// same answer, so this scan follows those line rules rather than rendering the
+/// Markdown: a document becomes a board only when at least one `##` column
+/// heading is waiting outside the fences. Without one there is no board to show.
+fn board_layout(source: &str) -> bool {
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let mut fence = None;
+    for line in source.split(['\n', '\r']) {
+        if let Some(marker) = fence {
+            if closes_fence(line, marker) {
+                fence = None;
+            }
+            continue;
+        }
+        match opening_fence(line) {
+            Some(marker) => fence = Some(marker),
+            None if column_heading(line) => return true,
+            None => {}
+        }
+    }
+    false
+}
+
+/// The opening of a fenced code block, as the board page sees it: at least three
+/// backticks with no further backtick after them.
+fn opening_fence(line: &str) -> Option<usize> {
+    let line = line.trim();
+    let ticks = line.bytes().take_while(|&byte| byte == b'`').count();
+    (ticks >= 3 && !line[ticks..].contains('`')).then_some(ticks)
+}
+
+fn closes_fence(line: &str, marker: usize) -> bool {
+    let line = line.trim();
+    line.len() >= marker && line.bytes().all(|byte| byte == b'`')
+}
+
+/// A `##` heading with a title, which the board parser turns into a column.
+fn column_heading(line: &str) -> bool {
+    let hashes = line.bytes().take_while(|&byte| byte == b'#').count();
+    hashes == 2 && line[2..].starts_with([' ', '\t']) && !line[2..].trim().is_empty()
 }
 
 fn board_heading(source: &str) -> Option<(usize, usize, &str)> {
@@ -1654,6 +1877,12 @@ pub fn sanitize_content(html: &str) -> String {
         "span",
         "strike",
         "strong",
+        "table",
+        "tbody",
+        "td",
+        "th",
+        "thead",
+        "tr",
         "u",
         "ul",
     ]
@@ -1881,7 +2110,20 @@ pub fn html_to_text(html: &str) -> String {
 fn is_line_break_tag(tag: &str) -> bool {
     matches!(
         tag.trim_start_matches('/'),
-        "br" | "img" | "hr" | "p" | "div" | "h1" | "h2" | "h3" | "li" | "blockquote" | "pre"
+        "br" | "img"
+            | "hr"
+            | "p"
+            | "div"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "li"
+            | "blockquote"
+            | "pre"
+            | "table"
+            | "tr"
+            | "th"
+            | "td"
     )
 }
 
@@ -2067,10 +2309,12 @@ fn preview_html(html: &str) -> String {
 }
 
 /// The tags a preview keeps, normalised. Inline versus block matters for the
-/// miniature: dropping a `<div>` or an `<a>` leaves its children in place.
+/// miniature: dropping a `<div>` or an `<a>` leaves its children in place. A
+/// table row becomes one paragraph, so its cells share a miniature line; the
+/// table's own tags drop and leave the cells' words behind.
 fn preview_tag(name: &str) -> Option<&'static str> {
     Some(match name {
-        "p" | "div" => "p",
+        "p" | "div" | "tr" => "p",
         "h1" => "h1",
         "h2" => "h2",
         "h3" => "h3",
@@ -2238,6 +2482,55 @@ mod tests {
     }
 
     #[test]
+    fn tables_survive_sanitising_without_attributes() {
+        let clean = sanitize_content(concat!(
+            "<p>Above</p>",
+            "<table class=\"layout\" border=\"1\"><thead>",
+            "<tr><th scope=\"col\">Name</th><th>Qty</th></tr></thead>",
+            "<tbody><tr><td>A &amp; B</td><td>2</td></tr></tbody></table>"
+        ));
+
+        assert_eq!(
+            clean,
+            concat!(
+                "<p>Above</p>",
+                "<table><thead><tr><th>Name</th><th>Qty</th></tr></thead>",
+                "<tbody><tr><td>A &amp; B</td><td>2</td></tr></tbody></table>"
+            ),
+            "the table tags are kept, bare: {clean}"
+        );
+    }
+
+    #[test]
+    fn scripts_and_styles_inside_a_cell_are_dropped() {
+        let clean = sanitize_content(concat!(
+            "<table><thead><tr><th>Safe</th></tr></thead><tbody><tr><td>",
+            "<script>alert('nope')</script>",
+            "<style>p { color: red }</style>",
+            "Cell</td></tr></tbody></table>"
+        ));
+
+        assert_eq!(
+            clean,
+            concat!(
+                "<table><thead><tr><th>Safe</th></tr></thead>",
+                "<tbody><tr><td>Cell</td></tr></tbody></table>"
+            ),
+            "the cell text survives without its scripts and styles: {clean}"
+        );
+    }
+
+    #[test]
+    fn table_text_does_not_run_cells_together() {
+        let html = concat!(
+            "<table><thead><tr><th>Name</th><th>Qty</th></tr></thead>",
+            "<tbody><tr><td>Tea</td><td>2</td></tr></tbody></table>"
+        );
+
+        assert_eq!(html_to_text(html), "Name Qty Tea 2");
+    }
+
+    #[test]
     fn stored_markup_becomes_readable_text() {
         let text =
             html_to_text("<h1>A title</h1><p>One &amp; two<br>three</p><ul><li>four</li></ul>");
@@ -2247,6 +2540,29 @@ mod tests {
             html_to_text("<ul><li>Parent<ul><li>Child</li></ul></li></ul>"),
             "Parent Child"
         );
+    }
+
+    #[test]
+    fn board_layout_finds_columns_the_way_the_board_page_does() {
+        assert!(board_layout("## To do\n"));
+        assert!(board_layout("# Board\r\n\r\n## To do\r\n- Card\r\n"));
+        assert!(board_layout("\u{feff}## To do"));
+        assert!(board_layout("##\tTabbed column"));
+
+        assert!(!board_layout(""));
+        assert!(!board_layout("# Only a title\n\nJust prose.\n"));
+        assert!(!board_layout("- a card with no column\n"));
+        assert!(!board_layout("##No space after the hashes\n"));
+        assert!(!board_layout("### Third level is content\n"));
+        assert!(!board_layout("## \n"));
+        // The board page skips everything inside a code fence, so a heading in
+        // one is prose, not a column.
+        assert!(!board_layout("```\n## Not a column\n```\n"));
+        assert!(!board_layout("````markdown\n## Not a column\n````\n"));
+        // A shorter line does not close a longer fence.
+        assert!(!board_layout("````\n```\n## Still code\n````\n"));
+        // An unclosed fence does not hide a column above it.
+        assert!(board_layout("## To do\n```\nstill code\n"));
     }
 
     #[test]
@@ -2569,6 +2885,21 @@ mod tests {
         assert_eq!(
             preview_html("<p>Above</p><hr><p>Below</p>"),
             "<p>Above</p><hr><p>Below</p>"
+        );
+    }
+
+    #[test]
+    fn a_preview_shows_one_line_per_table_row() {
+        let html = concat!(
+            "<p>Before</p>",
+            "<table><thead><tr><th>Title</th></tr></thead>",
+            "<tbody><tr><td>Cell</td></tr></tbody></table>",
+            "<p>After</p>"
+        );
+
+        assert_eq!(
+            preview_html(html),
+            "<p>Before</p><p>Title</p><p>Cell</p><p>After</p>"
         );
     }
 
@@ -3209,6 +3540,48 @@ mod tests {
 
         fs::remove_dir_all(directory).await.unwrap();
         fs::remove_dir_all(target).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tables_round_trip_through_the_markdown_file() {
+        let directory = temp_directory("table-markdown");
+        let store = Store::load(directory.clone()).await.unwrap();
+        let table = concat!(
+            "<table><thead><tr><th>Name</th><th>Qty</th></tr></thead><tbody><tr>",
+            "<td><b>Tea</b></td>",
+            "<td><a href=\"/doc/6f1c2f7a-58f7-4b1e-9f6d-8f1c2f7a58f7\">2</a></td>",
+            "</tr></tbody></table>"
+        );
+        let document = store
+            .save_draft(
+                Uuid::new_v4(),
+                Some("Stock".into()),
+                Some(table.into()),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(directory.join("Stock.md"))
+                .await
+                .unwrap(),
+            concat!(
+                "| Name | Qty |\n",
+                "| --- | --- |\n",
+                "| **Tea** | [2](/doc/6f1c2f7a-58f7-4b1e-9f6d-8f1c2f7a58f7) |\n"
+            )
+        );
+
+        drop(store);
+        let reopened = Store::load(directory.clone()).await.unwrap();
+        assert_eq!(
+            reopened.get(document.id).await.unwrap().content,
+            sanitize_content(table)
+        );
+        let summary = reopened.list().await.remove(0);
+        assert_eq!(summary.excerpt, "Name Qty Tea 2");
+        fs::remove_dir_all(directory).await.unwrap();
     }
 
     #[tokio::test]

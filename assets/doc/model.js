@@ -5,13 +5,18 @@
 // stay in the layout cache.
 
 const INLINE_TAGS = new Set(["a", "b", "code", "del", "em", "i", "s", "span", "strike", "strong", "u"]);
-const BLOCK_TAGS = new Set(["blockquote", "div", "h1", "h2", "h3", "p", "pre", "ul", "ol"]);
+const BLOCK_TAGS = new Set(["blockquote", "div", "h1", "h2", "h3", "p", "pre", "table", "ul", "ol"]);
 // Blocks with no text of their own. A caret can rest on one after a click, but
 // it cannot be typed into: typing replaces the whole block, and Enter, Delete,
 // and the arrow keys step over it.
 const ATOMIC_TYPES = new Set(["divider", "image"]);
 const HEADING_LEVELS = { h1: 1, h2: 2, h3: 3 };
 const LIST_DEPTH_LIMIT = 6;
+// A table is a grid of inline cells. One row and one column always remain, and
+// the first row is the header row: GFM's pipe tables need a header line, so the
+// stored document and the file on disk agree on what a table is.
+export const TABLE_COLUMNS_LIMIT = 12;
+export const TABLE_ROWS_LIMIT = 500;
 
 export const ALIGNMENTS = ["left", "center", "right", "justify"];
 export const INDENT_LIMIT = 6;
@@ -66,9 +71,323 @@ export function isListBlock(block) {
   return block.type === "list";
 }
 
+/* --------------------------------------------------------------------------
+   Tables
+
+   A table block holds `rows`, an array of rows, each row an array of cells,
+   each cell an array of inline runs. The first row is the header row. Cells are
+   one paragraph of inline content, so a hard break is a "\n" run exactly as it
+   is elsewhere.
+
+   The editor's flat selection model needs one offset space per block, so a
+   table's text joins its cells with a tab inside a row and a newline between
+   rows. Those separator characters exist only in the flat text: every edit maps
+   its offset range back to the cells it touches.
+   -------------------------------------------------------------------------- */
+
+export function isTableBlock(block) {
+  return Boolean(block) && block.type === "table";
+}
+
+function runsLength(runs) {
+  let length = 0;
+  for (const run of runs || []) {
+    length += run.text.length;
+  }
+  return length;
+}
+
+function runsText(runs) {
+  let text = "";
+  for (const run of runs || []) {
+    text += run.text;
+  }
+  return text;
+}
+
+function normalizeTableRows(rows) {
+  const normalized = [];
+  const source = Array.isArray(rows) ? rows.slice(0, TABLE_ROWS_LIMIT) : [];
+  let columns = 1;
+  for (const row of source) {
+    const cells = Array.isArray(row) ? row.slice(0, TABLE_COLUMNS_LIMIT) : [];
+    columns = Math.max(columns, cells.length);
+    normalized.push(cells);
+  }
+  if (!normalized.length) {
+    normalized.push([]);
+  }
+  for (const row of normalized) {
+    while (row.length < columns) {
+      row.push([]);
+    }
+    for (let index = 0; index < row.length; index += 1) {
+      row[index] = normalizeRuns(row[index] || []);
+    }
+  }
+  return normalized;
+}
+
+export function createTable(rows) {
+  return { id: createBlockId(), type: "table", rows: normalizeTableRows(rows) };
+}
+
+// The table the insert command makes: a header row plus `bodyRows` body rows.
+export function emptyTable(columns, bodyRows) {
+  const count = Math.max(1, Math.min(TABLE_COLUMNS_LIMIT, Math.floor(columns) || 1));
+  const body = Math.max(0, Math.min(TABLE_ROWS_LIMIT - 1, Math.floor(bodyRows) || 0));
+  const rows = [];
+  for (let row = 0; row <= body; row += 1) {
+    rows.push(Array.from({ length: count }, () => []));
+  }
+  return createTable(rows);
+}
+
+export function tableRowCount(block) {
+  return block && Array.isArray(block.rows) ? block.rows.length : 0;
+}
+
+export function tableColumnCount(block) {
+  let columns = 0;
+  for (const row of block && Array.isArray(block.rows) ? block.rows : []) {
+    columns = Math.max(columns, row.length);
+  }
+  return columns;
+}
+
+export function tableCellRuns(block, row, column) {
+  const cells = block && Array.isArray(block.rows) ? block.rows[row] : null;
+  return cells && cells[column] ? cells[column] : [];
+}
+
+export function tableText(block) {
+  const rows = block && Array.isArray(block.rows) ? block.rows : [];
+  return rows.map((row) => row.map(runsText).join("\t")).join("\n");
+}
+
+// Every cell's flat offset range, in row-major order. The one-character
+// separator after a cell (a tab inside a row, a newline between rows) is not
+// part of any cell's range.
+export function tableCellRanges(block) {
+  const ranges = [];
+  const rows = block && Array.isArray(block.rows) ? block.rows : [];
+  let total = 0;
+  for (const row of rows) {
+    total += row.length;
+  }
+  let offset = 0;
+  let ordinal = 0;
+  for (let row = 0; row < rows.length; row += 1) {
+    const cells = rows[row];
+    for (let column = 0; column < cells.length; column += 1) {
+      const runs = cells[column];
+      const length = runsLength(runs);
+      ranges.push({ row, column, start: offset, end: offset + length, ordinal });
+      offset += length;
+      ordinal += 1;
+      if (ordinal < total) {
+        offset += 1;
+      }
+    }
+  }
+  return ranges;
+}
+
+// The cell holding a flat offset. A cell's own end belongs to it, so typing at
+// the boundary stays in the cell before the separator.
+export function tableCellAt(block, offset) {
+  const ranges = tableCellRanges(block);
+  if (!ranges.length) {
+    return { row: 0, column: 0, start: 0, end: 0, ordinal: 0, runs: [] };
+  }
+  const flat = Math.max(0, Math.min(tableText(block).length, Math.floor(Number(offset) || 0)));
+  for (const range of ranges) {
+    if (flat <= range.end) {
+      return { ...range, runs: tableCellRuns(block, range.row, range.column) };
+    }
+  }
+  const last = ranges[ranges.length - 1];
+  return { ...last, runs: tableCellRuns(block, last.row, last.column) };
+}
+
+function tableWithCellRuns(block, row, column, runs) {
+  const rows = block.rows.map((cells, rowIndex) => {
+    if (rowIndex !== row) {
+      return cells;
+    }
+    const next = cells.slice();
+    next[column] = runs;
+    return next;
+  });
+  return { ...block, id: createBlockId(), rows };
+}
+
+export function tableSetCellRuns(block, row, column, runs) {
+  if (!block.rows[row] || block.rows[row][column] === undefined) {
+    return block;
+  }
+  return tableWithCellRuns(block, row, column, normalizeRuns(runs));
+}
+
+// Apply one edit over a flat range. Text is replaced in the cell the range
+// starts in; every other touched cell loses the part the range covers. The
+// returned caret is after the inserted runs, expressed in the new block.
+export function tableEditRange(block, start, end, replacementRuns) {
+  const from = Math.max(0, Math.min(tableText(block).length, Math.floor(Number(start) || 0)));
+  const to = Math.max(from, Math.min(tableText(block).length, Math.floor(Number(end) || 0)));
+  const rows = block.rows.map((cells) => cells.slice());
+  const ranges = tableCellRanges(block);
+  const inserted = normalizeRuns(replacementRuns || []);
+  for (const range of ranges) {
+    const cells = rows[range.row];
+    const runs = cells[range.column];
+    const localStart = Math.max(0, Math.min(runsLength(runs), from - range.start));
+    const localEnd = Math.max(localStart, Math.min(runsLength(runs), to - range.start));
+    if (range.start <= from && from <= range.end) {
+      if (to <= range.end) {
+        const removed = removeRangeFromRuns(runs, localStart, localEnd);
+        cells[range.column] = normalizeRuns([
+          ...runsInRangeOfRuns(removed, 0, localStart),
+          ...inserted,
+          ...runsInRangeOfRuns(removed, localStart, runsLength(removed)),
+        ]);
+      } else {
+        // The range starts in this cell and runs past its end.
+        cells[range.column] = normalizeRuns([
+          ...runsInRangeOfRuns(runs, 0, localStart),
+          ...inserted,
+        ]);
+      }
+      continue;
+    }
+    if (range.start > from && range.start < to) {
+      cells[range.column] = normalizeRuns(
+        to >= range.end ? [] : runsInRangeOfRuns(runs, to - range.start, runsLength(runs)),
+      );
+    }
+  }
+  const next = { ...block, id: createBlockId(), rows };
+  const caret = from + runsLength(inserted);
+  return { block: next, caret };
+}
+
+function runsInRangeOfRuns(runs, start, end) {
+  const from = Math.max(0, Math.min(runsLength(runs), start));
+  const to = Math.max(from, Math.min(runsLength(runs), end));
+  const out = [];
+  let offset = 0;
+  for (const run of runs) {
+    const runEnd = offset + run.text.length;
+    const pieceStart = Math.max(from, offset);
+    const pieceEnd = Math.min(to, runEnd);
+    if (pieceEnd > pieceStart) {
+      out.push({ ...run, text: run.text.slice(pieceStart - offset, pieceEnd - offset) });
+    }
+    offset = runEnd;
+  }
+  return normalizeRuns(out);
+}
+
+export function tableInsertRuns(block, offset, runs) {
+  return tableEditRange(block, offset, offset, runs);
+}
+
+export function tableInsertText(block, offset, text, marks) {
+  return tableEditRange(block, offset, offset, normalizeRuns([{ text, ...marks }]));
+}
+
+export function tableDeleteRange(block, start, end) {
+  return tableEditRange(block, start, end, []);
+}
+
+// Apply a per-cell run edit (marks, links, formatting) over a flat range.
+export function tableMapRanges(block, start, end, mapper) {
+  const ranges = tableCellRanges(block);
+  let rows = block.rows;
+  let changed = false;
+  for (const range of ranges) {
+    const localStart = Math.max(0, Math.min(runsLength(tableCellRuns(block, range.row, range.column)), start - range.start));
+    const localEnd = Math.max(localStart, Math.min(runsLength(tableCellRuns(block, range.row, range.column)), end - range.start));
+    if (localStart >= localEnd) {
+      continue;
+    }
+    const runs = tableCellRuns(block, range.row, range.column);
+    const mapped = mapper(runs, localStart, localEnd);
+    if (!changed) {
+      rows = rows.map((cells) => cells.slice());
+      changed = true;
+    }
+    rows[range.row][range.column] = mapped;
+  }
+  return changed ? { ...block, id: createBlockId(), rows } : block;
+}
+
+// The selected flat range as runs, with the tab/newline separators kept as plain
+// text so copying a table into a plain-text field keeps its shape.
+export function tableRunsInRange(block, start, end) {
+  const from = Math.max(0, Math.min(tableText(block).length, Math.floor(Number(start) || 0)));
+  const to = Math.max(from, Math.min(tableText(block).length, Math.floor(Number(end) || 0)));
+  const ranges = tableCellRanges(block);
+  const out = [];
+  for (const range of ranges) {
+    const runs = tableCellRuns(block, range.row, range.column);
+    const localStart = Math.max(0, Math.min(runsLength(runs), from - range.start));
+    const localEnd = Math.max(localStart, Math.min(runsLength(runs), to - range.start));
+    if (localEnd > localStart) {
+      out.push(...runsInRangeOfRuns(runs, localStart, localEnd));
+    }
+    if (range.ordinal + 1 < ranges.length && range.end >= from && range.end < to) {
+      const next = ranges[range.ordinal + 1];
+      out.push({ text: next.row === range.row ? "\t" : "\n" });
+    }
+  }
+  return normalizeRuns(out);
+}
+
+export function tableInsertRow(block, index) {
+  const at = Math.max(0, Math.min(block.rows.length, Math.floor(Number(index) || 0)));
+  const columns = tableColumnCount(block);
+  const rows = block.rows.map((cells) => cells.slice());
+  rows.splice(at, 0, Array.from({ length: columns }, () => []));
+  return { ...block, id: createBlockId(), rows };
+}
+
+export function tableDeleteRow(block, index) {
+  if (block.rows.length <= 1) {
+    return block;
+  }
+  const rows = block.rows.filter((cells, rowIndex) => rowIndex !== index);
+  return { ...block, id: createBlockId(), rows };
+}
+
+export function tableInsertColumn(block, index) {
+  const columns = tableColumnCount(block);
+  const at = Math.max(0, Math.min(columns, Math.floor(Number(index) || 0)));
+  if (columns >= TABLE_COLUMNS_LIMIT) {
+    return block;
+  }
+  const rows = block.rows.map((cells) => {
+    const next = cells.slice();
+    next.splice(at, 0, []);
+    return next;
+  });
+  return { ...block, id: createBlockId(), rows };
+}
+
+export function tableDeleteColumn(block, index) {
+  if (tableColumnCount(block) <= 1) {
+    return block;
+  }
+  const rows = block.rows.map((cells) => cells.filter((cell, column) => column !== index));
+  return { ...block, id: createBlockId(), rows };
+}
+
 export function blockLength(block) {
   if (isAtomicBlock(block)) {
     return 0;
+  }
+  if (isTableBlock(block)) {
+    return tableText(block).length;
   }
   let length = 0;
   for (const run of block.runs) {
@@ -80,6 +399,9 @@ export function blockLength(block) {
 export function blockText(block) {
   if (isAtomicBlock(block)) {
     return "";
+  }
+  if (isTableBlock(block)) {
+    return tableText(block);
   }
   return block.runs.map((run) => run.text).join("");
 }
@@ -220,6 +542,9 @@ export function runsInRange(block, start, end) {
   if (isAtomicBlock(block)) {
     return [];
   }
+  if (isTableBlock(block)) {
+    return tableRunsInRange(block, start, end);
+  }
   const runs = [];
   let index = 0;
   for (const run of block.runs) {
@@ -235,7 +560,15 @@ export function runsInRange(block, start, end) {
 }
 
 export function marksAt(block, offset) {
-  if (!block || isAtomicBlock(block) || !block.runs.length) {
+  if (!block || isAtomicBlock(block)) {
+    return {};
+  }
+  if (isTableBlock(block)) {
+    const cell = tableCellAt(block, offset);
+    const local = Math.max(0, Math.min(runsLength(cell.runs), offset - cell.start));
+    return marksAt({ runs: cell.runs }, local);
+  }
+  if (!block.runs.length) {
     return {};
   }
   let index = 0;
@@ -303,7 +636,7 @@ export function setHrefOnRuns(runs, start, end, href) {
 }
 
 export function splitBlock(block, offset) {
-  if (isAtomicBlock(block)) {
+  if (isAtomicBlock(block) || isTableBlock(block)) {
     return [block, emptyParagraph()];
   }
   const { left, right } = splitRuns(block.runs, offset);
@@ -313,7 +646,7 @@ export function splitBlock(block, offset) {
 }
 
 export function mergeBlocks(first, second) {
-  if (isAtomicBlock(first) || isAtomicBlock(second)) {
+  if (isAtomicBlock(first) || isAtomicBlock(second) || isTableBlock(first) || isTableBlock(second)) {
     return first;
   }
   const runs = normalizeRuns([...first.runs, ...second.runs]);
@@ -496,6 +829,13 @@ function parseBlockElement(node, tag, out, marks, format) {
     out.push({ id: createBlockId(), type: "code", runs: [{ text: node.textContent.replace(/\r\n/g, "\n") }] });
     return;
   }
+  if (tag === "table") {
+    const table = tableBlockFrom(node);
+    if (table) {
+      out.push(table);
+    }
+    return;
+  }
   if (tag === "blockquote") {
     const inner = [];
     parseChildren(node, inner, "p", marks, ownFormat, true);
@@ -518,8 +858,45 @@ function parseBlockElement(node, tag, out, marks, format) {
   }
 }
 
-function parseList(list, ordered, depth, out, marks, format) {
-  const listFormat = formatFromNode(list, format);
+// A table from parsed HTML: the browser's own nesting (an implicit tbody, a
+// thead, or bare tr elements) decides the rows, and the first row is the header
+// whatever element carried it. A cell is inline content only; nested blocks are
+// flattened into its runs and a nested table is left out.
+function tableBlockFrom(node) {
+  const rows = [];
+  const collectRow = (row) => {
+    const cells = [];
+    for (const cell of Array.from(row.children)) {
+      const tag = cell.tagName.toLowerCase();
+      if (tag !== "td" && tag !== "th") {
+        continue;
+      }
+      const runs = [];
+      for (const child of Array.from(cell.childNodes)) {
+        runs.push(...runsFromNode(child, {}));
+      }
+      cells.push(normalizeRuns(runs));
+    }
+    if (cells.length) {
+      rows.push(cells);
+    }
+  };
+  for (const section of Array.from(node.children)) {
+    const tag = section.tagName.toLowerCase();
+    if (tag === "tr") {
+      collectRow(section);
+    } else if (tag === "thead" || tag === "tbody" || tag === "tfoot") {
+      for (const row of Array.from(section.children)) {
+        if (row.tagName.toLowerCase() === "tr") {
+          collectRow(row);
+        }
+      }
+    }
+  }
+  return rows.length ? createTable(rows) : null;
+}
+
+function parseList(list, ordered, depth, out, marks, format) {  const listFormat = formatFromNode(list, format);
   for (const item of Array.from(list.children)) {
     if (item.tagName.toLowerCase() !== "li") {
       continue;
@@ -736,6 +1113,9 @@ function serializeBlock(block) {
   if (block.type === "divider") {
     return "<hr>";
   }
+  if (isTableBlock(block)) {
+    return serializeTable(block);
+  }
   if (block.type === "image") {
     const classes =
       block.mode === "left"
@@ -786,8 +1166,29 @@ function serializeBlock(block) {
   return "<p" + attributes + ">" + inner + "</p>";
 }
 
-export function serializeCodeBlock(text) {
-  // An HTML parser consumes a newline immediately after <pre>. Put the first
+// The canonical table HTML. The header row is explicit so a browser parses the
+// table back into the same rows, and Markdown mode can carry the whole table as
+// one serialized-HTML line.
+function serializeTable(block) {
+  const rows = block.rows && block.rows.length ? block.rows : [[]];
+  const header = rows[0];
+  let html = "<table><thead><tr>";
+  for (const cell of header) {
+    html += "<th>" + serializeRuns(cell, { allowBreaks: true }) + "</th>";
+  }
+  html += "</tr></thead><tbody>";
+  for (const row of rows.slice(1)) {
+    html += "<tr>";
+    for (const cell of row) {
+      html += "<td>" + serializeRuns(cell, { allowBreaks: true }) + "</td>";
+    }
+    html += "</tr>";
+  }
+  html += "</tbody></table>";
+  return html;
+}
+
+export function serializeCodeBlock(text) {  // An HTML parser consumes a newline immediately after <pre>. Put the first
   // newline inside a span so parsing, copying, and exporting keep the text.
   const content = escapeText(text).replace(/^\n/, "<span>\n</span>");
   return "<pre>" + content + "</pre>";

@@ -8,8 +8,11 @@ The home screen searches document titles and full text, highlights matching
 passages, and shows previews in grid view. The editor has the formatting I use
 most, holds images that can be
 dragged into the text so the words flow around them and resized from their
-corners, saves as you type, and can export to HTML, Markdown, PDF, or plain
-text. The menu switches between a dark theme (the default) and a light one. Focus
+corners, inserts tables (with a header row, Tab between cells, a hover button
+on each cell for adding or removing rows and columns, and Ctrl+Alt+Right /
+Ctrl+Alt+Down for a quick column or row), saves as you type, and can export to
+HTML, Markdown, PDF, or plain text. The menu switches between a dark theme (the
+default) and a light one. Focus
 mode, from the editor's menu, hides the toolbar and takes the page fullscreen so
 only the writing and the menu button remain. Markdown mode, next to it, turns the
 page into editable Markdown source. Leaving it renders the document again.
@@ -92,14 +95,20 @@ only. Images linked from other files need to be added through the editor.
 Enable **Boards** under **Extensions** in the library menu. **New Document**
 then offers **Document** or **Board**. Click the board title to rename it.
 Add columns and cards, click a card to edit it, or drag cards to reorder or
-move them. On a touch screen, drag using the grip on the card.
+move them. Hover a card to reveal its trash icon, which deletes the card after
+a confirmation. On a touch screen, drag using the grip beside it.
 Choose **Edit Markdown** to edit the source. The first `#` heading supplies
 the board's title.
 Text before the first column describes the board, each `##` heading starts a
 column, and `- Title: Description` adds a card. Put a longer Markdown
 description inside backtick fences below its card. Board and Markdown changes
-save automatically to the same file. The extension preference
-is remembered per browser. Existing boards open in Markdown when Boards is off.
+save automatically to the same file. A document's ⋯ menu offers **Convert to
+board** while Boards is on: Grapho keeps the document's Markdown as the board
+source, so it only converts when that Markdown already has board columns and
+the document has no images. When it does not fit, Grapho says so and leaves the
+document as it was. The extension switches belong to the Grapho server, so
+every browser and device that opens the library sees the same ones. Existing
+boards open in Markdown when Boards is off.
 
 Enable **Draw** under **Extensions**, then choose **Drawing** in **New Document**.
 Draw on the dotted canvas with a mouse, pen, or finger. The title and strokes
@@ -215,7 +224,9 @@ adds a number when a name is taken. Renaming in Grapho changes the filename.
 The shared `metadata.json` keeps filenames, stable document IDs, Spaces, dates,
 paper widths, and image layout. Images sit beside the Markdown and use relative
 links. A few rich-text features, such as centered paragraphs, use HTML inside
-the Markdown. Stop Grapho before editing Markdown by hand, and rename
+the Markdown. Tables are written as GFM pipe tables for other Markdown tools;
+one whose cells carry rich HTML the pipe form cannot hold falls back to safe
+HTML in the same file. Stop Grapho before editing Markdown by hand, and rename
 documents in Grapho so the index stays in sync. Version 1 Markdown libraries
 open in place. The next document or Space change writes the current index,
 and existing UUID filenames switch to title-based names when their documents
@@ -228,8 +239,12 @@ separate Space folders for a manual backup. Stop Grapho first if you want a
 consistent snapshot.
 
 **Add to dictionary** saves words for body spellcheck in `spelling-words.json`
-in the data directory. The list is shared across browsers on the same Grapho
-server and follows the library when you move the data folder.
+in the data directory, with one list per Space. A word added while writing in a
+Space is accepted throughout that Space; documents in General use their own
+list. The lists are shared across browsers on the same Grapho server and follow
+the library when you move the data folder. The library's **Extensions**
+switches live in `extensions.json` there too, so every browser sees the same
+ones.
 
 The folder is chosen in this order: `GRAPHO_DATA_DIR`, the folder saved on the
 Storage page, a `data/` folder in the working directory that already holds
@@ -326,8 +341,11 @@ and working notes.
 
 ## Current limits
 
-Single user. No sharing, real-time collaboration, comments, tables, or version
-history. The optional password signs one person in: there are no accounts, no TLS,
+Single user. No sharing, real-time collaboration, comments, or version
+history. Tables always have a first-row header and hold inline text only: no
+merged cells, pictures in cells, nested tables, or column widths to drag, and at
+most 12 columns. The optional password signs one person in: there are no
+accounts, no TLS,
 and failed logins pause per address, so behind a reverse proxy they share the
 proxy's address and one pause. PDF downloads use A4
 pages and PDF's standard fonts; characters outside WinAnsi are replaced with

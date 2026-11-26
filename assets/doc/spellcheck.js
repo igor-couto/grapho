@@ -64,7 +64,12 @@ export class Spellcheck {
   check() {
     if (!this.blocks || this.pending) return;
     const blocks = this.blocks.filter((block) =>
-      !this.checked.has(block) && !block.source && block.type !== "code" && !isAtomicBlock(block) && blockLength(block));
+      !this.checked.has(block) &&
+      !block.source &&
+      block.type !== "code" &&
+      block.type !== "table" &&
+      !isAtomicBlock(block) &&
+      blockLength(block));
     if (!blocks.length) return;
 
     try {

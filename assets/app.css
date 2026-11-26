@@ -3179,25 +3179,44 @@ html[data-theme="dark"] .toast.is-error {
   display: none;
 }
 
-@media (any-pointer: coarse) {
-  .board-card h3 {
-    padding-inline-end: 32px;
-  }
+/* The delete affordance stays quiet until the card is hovered or one of its
+   controls has keyboard focus. Touch screens always show it. */
+.board-card-delete {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--faint);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease, background 160ms ease, color 160ms ease;
+}
 
-  .board-card-grip {
-    position: absolute;
-    inset: 3px 3px auto auto;
-    display: grid;
-    width: 36px;
-    height: 36px;
-    place-items: center;
-    color: var(--muted);
-    touch-action: none;
-  }
+.board-card-delete svg {
+  width: 16px;
+  height: 16px;
+}
 
-  .board-card-grip svg {
-    width: 20px;
-    height: 20px;
+.board-card:hover .board-card-delete,
+.board-card:focus-within .board-card-delete {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.board-card-delete:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+@media (hover: none) {
+  .board-card-delete {
+    opacity: 1;
+    pointer-events: auto;
   }
 }
 
@@ -3227,8 +3246,37 @@ html[data-theme="dark"] .toast.is-error {
 
 .board-card h3 {
   margin: 0;
+  padding-inline-end: 30px;
   font-size: 0.875rem;
   line-height: 1.45;
+}
+
+@media (any-pointer: coarse) {
+  .board-card h3 {
+    padding-inline-end: 78px;
+  }
+
+  .board-card-delete {
+    width: 32px;
+    height: 32px;
+    right: 42px;
+  }
+
+  .board-card-grip {
+    position: absolute;
+    inset: 3px 3px auto auto;
+    display: grid;
+    width: 36px;
+    height: 36px;
+    place-items: center;
+    color: var(--muted);
+    touch-action: none;
+  }
+
+  .board-card-grip svg {
+    width: 20px;
+    height: 20px;
+  }
 }
 
 :is(.board-column, .board-drag-preview) .board-markdown {
@@ -3426,6 +3474,16 @@ html[data-theme="dark"] .toast.is-error {
   position: fixed;
   z-index: 60;
   min-width: 178px;
+}
+
+.table-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 180px;
+}
+
+.table-menu .menu-item[hidden] {
+  display: none;
 }
 
 .style-menu .menu-item[aria-checked="true"] {
@@ -3757,6 +3815,7 @@ html[data-theme="dark"] .toast.is-error {
 }
 
 .toolbar-button[aria-pressed="true"],
+.toolbar-button[aria-expanded="true"],
 .format-overflow-button[aria-expanded="true"] {
   background: var(--accent-soft);
   color: var(--accent);
@@ -4407,6 +4466,118 @@ body.is-resizing-paper * {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-soft);
+}
+
+/* A table: an outer frame, the header row's wash, and one-pixel inner rules.
+   layout.js owns the geometry; the text lines paint on top as usual. The
+   numbers here repeat STYLES.table in layout.js. */
+.doc-line.is-table {
+  font-family: var(--font-reading);
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 24.8px;
+}
+
+.doc-table-frame {
+  position: absolute;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+}
+
+.doc-table-head {
+  position: absolute;
+  background: color-mix(in srgb, var(--paper-ink) 5%, transparent);
+}
+
+.doc-table-rule {
+  position: absolute;
+  background: var(--line);
+}
+
+.doc-table-rule.is-column {
+  width: 1px;
+}
+
+.doc-table-rule.is-row {
+  height: 1px;
+}
+
+/* The one floating options button that follows the table cell under the
+   pointer. It lives in the overlay above the painted lines. */
+.doc-table-tool {
+  position: absolute;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--paper-muted);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
+  cursor: pointer;
+  pointer-events: auto;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.doc-table-tool[hidden] {
+  display: none;
+}
+
+.doc-table-tool svg {
+  width: 15px;
+  height: 15px;
+}
+
+.doc-table-tool:hover,
+.doc-table-tool[aria-expanded="true"] {
+  background: var(--surface-soft);
+  color: var(--paper-ink);
+}
+
+.doc-table-tool:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.table-cell-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 232px;
+}
+
+.table-cell-menu .menu-item {
+  gap: 9px;
+}
+
+.table-cell-menu .menu-label {
+  flex: 1 1 auto;
+  text-align: left;
+}
+
+.menu-shortcut {
+  margin-inline-start: auto;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .doc-table-tool {
+    transition: none;
+  }
+}
+
+@media print {
+  .doc-table-tool {
+    display: none !important;
+  }
 }
 
 .doc-marker {

@@ -40,6 +40,7 @@ const ACCENT = [0.098, 0.404, 0.824]; // #1967d2
 const PAPER = [1, 0.992, 0.976]; // #fffdf9
 const CODE_BG = [0.969, 0.953, 0.918]; // #f7f3ea
 const CODE_BORDER = [0.886, 0.863, 0.812]; // #e2dccf
+const TABLE_HEAD = [0.945, 0.925, 0.878]; // #f1ece0, the header wash
 const RULE = [0.827, 0.796, 0.733]; // #d3cbbb, the divider on light paper
 
 const IGNORED = new Set(["\u200b", "\u200c", "\u200d", "\ufeff"]);
@@ -131,6 +132,24 @@ function paginate(layout) {
       // to the next page with the text after it.
       if (entry.top + entry.height - start > CONTENT_HEIGHT + 0.5) {
         breakAt(entry.top, true);
+      }
+      previous = entry;
+      continue;
+    }
+
+    if (entry.table) {
+      // A table that fits a page moves whole; a taller one splits at its lines,
+      // the way a code block does.
+      if (entry.height <= CONTENT_HEIGHT + 0.5) {
+        if (entry.top + entry.height - start > CONTENT_HEIGHT + 0.5) {
+          breakAt(entry.top, true);
+        }
+      } else {
+        for (const line of entry.lines) {
+          if (line.y + line.height - start > CONTENT_HEIGHT + 0.5) {
+            breakAt(line.y, line === entry.lines[0]);
+          }
+        }
       }
       previous = entry;
       continue;
@@ -301,6 +320,10 @@ function renderPage(layout, page, pageIndex, freePages, images, names) {
       }
     }
 
+    if (entry.table) {
+      drawTable(ops, entry, start, end);
+    }
+
     if (entry.divider) {
       const lineY = dividerLineY(entry);
       if (lineY >= start && lineY < end) {
@@ -411,8 +434,52 @@ function drawTextLine(ops, block, line, start) {
   }
 }
 
-function drawCodeLine(ops, line, start) {
-  const size = styleFor({ type: "code" }).size;
+// The table grid, clipped to the page it is being drawn on: the header wash,
+// the outer frame, then the inner column and row rules. Text is drawn later by
+// the normal line loop, exactly as it is on screen.
+function drawTable(ops, entry, start, end) {
+  const table = entry.table;
+  const top = Math.max(table.y, start);
+  const bottom = Math.min(table.y + entry.height, end);
+  if (bottom <= top) {
+    return;
+  }
+
+  const header = table.rows[0];
+  if (header) {
+    const headerTop = Math.max(header.top, start);
+    const headerBottom = Math.min(header.top + header.height, end);
+    if (headerBottom > headerTop) {
+      ops.push(
+        fillColor(TABLE_HEAD),
+        `${rectAt(table.x, headerTop, table.width, headerBottom - headerTop, start)} f`,
+      );
+    }
+  }
+
+  ops.push(strokeColor(RULE), "0.75 w");
+  ops.push(`${rectAt(table.x, top, table.width, bottom - top, start)} S`);
+
+  const frameTop = pageY(top, start);
+  const frameBottom = pageY(bottom, start);
+  for (let index = 1; index < table.columns.length; index += 1) {
+    const x = number((MARGIN + table.columns[index].x) * POINT);
+    ops.push(`${x} ${number(frameTop)} m ${x} ${number(frameBottom)} l S`);
+  }
+  for (let index = 1; index < table.rows.length; index += 1) {
+    const rowTop = table.rows[index].top;
+    if (rowTop <= top || rowTop >= bottom) {
+      continue;
+    }
+    const y = number(pageY(rowTop, start));
+    ops.push(
+      `${number(MARGIN * POINT)} ${y} m ` +
+        `${number((MARGIN + table.width) * POINT)} ${y} l S`,
+    );
+  }
+}
+
+function drawCodeLine(ops, line, start) {  const size = styleFor({ type: "code" }).size;
   const width = textWidth(line.text, codeFont());
 
   appendText(ops, {

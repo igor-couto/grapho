@@ -1,8 +1,8 @@
 import { bindBoardDrag } from "./board-drag.js";
-import { changeBoardCard, parseBoard, renderBoardMarkdown, setBoardHeading } from "./board-markdown.js";
+import { changeBoardCard, parseBoard, removeBoardCard, renderBoardMarkdown, setBoardHeading } from "./board-markdown.js";
 import { inlineToRuns } from "./doc/markdown.js";
 import { serializeRuns } from "./doc/model.js";
-import { extensionEnabled, onExtensionsChange } from "./extensions.js";
+import { extensionEnabled, loadExtensions, onExtensionsChange } from "./extensions.js";
 
 const STARTER = [
   "# Untitled board",
@@ -37,6 +37,10 @@ const itemHeading = document.getElementById("boardItemHeading");
 const itemTitle = document.getElementById("boardItemTitle");
 const cardFields = document.getElementById("boardCardFields");
 const cardDescription = document.getElementById("boardCardDescription");
+const deleteDialog = document.getElementById("boardCardDeleteDialog");
+const deleteDescription = document.getElementById("boardCardDeleteDescription");
+const deleteCancel = document.getElementById("boardCardDeleteCancel");
+const deleteForm = document.getElementById("boardCardDeleteForm");
 
 const id = location.pathname.split("/").at(-1);
 const endpoint = "/api/documents/" + encodeURIComponent(id) + "/board";
@@ -61,6 +65,7 @@ let savedTitle = "Untitled board";
 let lineEnding = "\n";
 let board;
 let itemEdit;
+let cardDelete;
 const cancelCardDrag = bindBoardDrag(columns, moveCard);
 
 mode.addEventListener("click", () => setMode(!editing, true));
@@ -100,6 +105,15 @@ itemDialog.addEventListener("close", () => {
 itemDialog.addEventListener("click", (event) => {
   if (event.target === itemDialog) itemDialog.close();
 });
+deleteCancel.addEventListener("click", () => deleteDialog.close());
+deleteForm.addEventListener("submit", acceptCardDelete);
+deleteDialog.addEventListener("close", () => {
+  cardDelete?.returnFocus?.focus();
+  cardDelete = null;
+});
+deleteDialog.addEventListener("click", (event) => {
+  if (event.target === deleteDialog) deleteDialog.close();
+});
 document.addEventListener("keydown", (event) => {
   if (
     loaded && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey
@@ -116,6 +130,7 @@ onExtensionsChange(() => {
 loadBoard();
 
 async function loadBoard() {
+  const switches = loadExtensions();
   try {
     if (isDraft) {
       source.value = STARTER;
@@ -129,6 +144,9 @@ async function loadBoard() {
     loaded = true;
     actions.hidden = false;
     showError("");
+    // Choose the first view with the server's switch already known, so an
+    // enabled board does not flash its Markdown source on the way in.
+    await switches;
     setMode(false);
   } catch (error) {
     showError(error.message);
@@ -145,6 +163,7 @@ function setMode(edit, focus = false) {
   title.disabled = editing;
   addColumn.hidden = editing;
   if (editing && itemDialog.open) itemDialog.close();
+  if (editing && deleteDialog.open) deleteDialog.close();
   enableHint.hidden = enabled;
   mode.textContent = editing ? "View board" : "Edit Markdown";
   editor.hidden = !editing;
@@ -299,16 +318,17 @@ function renderColumn(column, index) {
     item.className = "board-card";
     item.dataset.card = position;
     const cardTitle = document.createElement("h3");
-    const edit = boardButton("board-heading-button", plainTitle(card.title) || "Untitled card");
+    const name = plainTitle(card.title);
+    const edit = boardButton("board-heading-button", name || "Untitled card");
     item.addEventListener("click", (event) => {
-      if (!event.target.closest("a")) openCard(index, position, edit);
+      if (!event.target.closest("a, .board-card-delete")) openCard(index, position, edit);
     });
     cardTitle.append(edit);
     const grip = document.createElement("span");
     grip.className = "board-card-grip";
     grip.setAttribute("aria-hidden", "true");
     grip.innerHTML = '<svg viewBox="0 0 20 20" fill="currentColor"><circle cx="7" cy="5" r="1.2"/><circle cx="13" cy="5" r="1.2"/><circle cx="7" cy="10" r="1.2"/><circle cx="13" cy="10" r="1.2"/><circle cx="7" cy="15" r="1.2"/><circle cx="13" cy="15" r="1.2"/></svg>';
-    item.append(cardTitle, grip);
+    item.append(cardTitle, grip, cardDeleteButton(index, position, name));
     if (card.description) item.append(markdownElement(card.description));
     list.append(item);
   }
@@ -322,6 +342,18 @@ function boardButton(className, label) {
   button.className = className;
   button.textContent = label;
   button.setAttribute("aria-haspopup", "dialog");
+  return button;
+}
+
+function cardDeleteButton(column, position, name) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "board-card-delete";
+  button.title = "Delete card";
+  button.setAttribute("aria-haspopup", "dialog");
+  button.setAttribute("aria-label", name.trim() ? "Delete card: " + name.trim() : "Delete card");
+  button.innerHTML = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 7h14M9 7V4.8h6V7M7 7l.8 12.2h8.4L17 7M10 11v4.5M14 11v4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  button.addEventListener("click", () => openCardDelete(column, position, button));
   return button;
 }
 
@@ -339,6 +371,41 @@ function openCard(column, position, returnFocus) {
   const card = board.columns[column].cards[position];
   cardDescription.value = card?.description ?? "";
   showItemDialog(card ? "Edit card" : "Add card", card?.title ?? "");
+}
+
+function openCardDelete(column, position, returnFocus) {
+  const card = board.columns[column]?.cards[position];
+  if (!card) return;
+  cardDelete = { column, position, returnFocus };
+  const name = plainTitle(card.title).trim();
+  deleteDescription.textContent = name
+    ? `“${name}” will be removed from this board.`
+    : "This untitled card will be removed from this board.";
+  deleteDialog.showModal();
+  deleteCancel.focus();
+}
+
+function acceptCardDelete(event) {
+  event.preventDefault();
+  const pending = cardDelete;
+  const card = pending && board.columns[pending.column]?.cards[pending.position];
+  if (!pending || !card) {
+    deleteDialog.close();
+    return;
+  }
+  applyBoardSource(removeBoardCard(source.value, card));
+  pending.returnFocus = nextCardFocus(pending.column, pending.position);
+  deleteDialog.close();
+}
+
+// The deleted card's button is gone, so focus moves to whatever now sits in
+// its place: the next card's delete button, or the column's own controls.
+function nextCardFocus(column, position) {
+  const section = columns.children[column];
+  if (!section) return null;
+  return section.querySelector(`.board-card[data-card="${position}"] .board-card-delete`)
+    ?? section.querySelector(".board-add-card")
+    ?? section.querySelector(".board-heading-button");
 }
 
 function showItemDialog(heading, value) {

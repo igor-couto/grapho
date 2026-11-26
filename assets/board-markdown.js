@@ -132,6 +132,14 @@ export function setBoardHeading(markdown, level, line, title) {
   return joinLines(markdown, lines);
 }
 
+export function removeBoardCard(markdown, card) {
+  if (!card) return markdown;
+  const lines = sourceLines(markdown);
+  if (card.start < 0 || card.end <= card.start || card.end > lines.length) return markdown;
+  lines.splice(card.start, card.end - card.start);
+  return joinLines(markdown, lines);
+}
+
 export function changeBoardCard(markdown, card, column, before, changes) {
   if (card && before === card && !changes) return markdown;
   const lines = sourceLines(markdown);

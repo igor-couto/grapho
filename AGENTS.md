@@ -84,7 +84,7 @@ src/main.rs       configuration, CLI, startup, graceful shutdown
 src/api.rs        routes, static assets, security headers, same-origin check
 src/auth.rs       password gate: Argon2id, sessions, throttling, cookies
 src/store.rs      document model, library persistence, HTML sanitization
-src/markdown.rs   Markdown bodies and relative image attachments on disk
+src/markdown.rs   Markdown bodies, GFM pipe tables, and relative image attachments on disk
 src/settings.rs   data folder rules and the remembered folder choice
 src/backup.rs     backup connectors: a background mirror of every save
 src/sftp.rs       the system sftp client, driven in batch mode for SSH backups
@@ -98,7 +98,8 @@ assets/doc/clipboard.js     rich copy/paste: selection HTML and sanitized pasted
 assets/doc/markdown.js      Markdown mode: rich blocks <-> editable source
 assets/doc/markdown-edit.js Markdown mode: toolbar commands edit the source
 assets/menu.js      the page menu on storage, version, shortcuts, and not-found
-assets/home.js      the library: listing, search, view, sort, rename, duplicate, delete
+assets/home.js      the library: listing, search, view, sort, rename, duplicate, convert to board, delete
+assets/extensions.js  the server-wide extension switches, shared by every page
 assets/quick-open.js  the Ctrl+O document search, shared by every page except the gate
 assets/shortcuts.html  the page listing every editor and app shortcut
 assets/storage.html  the page for the data folder and backup connectors
@@ -220,16 +221,30 @@ browser has no network, the page says so and nothing else changes.
 
 ## Library
 
-The library's Extensions dialog remembers opt-in features in localStorage.
-New Document shows a type picker when a document extension is enabled.
+The library's Extensions dialog switches opt-in features on or off for the whole
+Grapho server. `assets/extensions.js` reads `GET /api/extensions` and writes
+`PUT /api/extensions`, and the store keeps the enabled names in a small
+`extensions.json` beside `metadata.json`, so every browser that signs in sees the
+same switches, the next start keeps them, and moving the data folder carries
+them. New Document shows a type picker when a document extension is enabled.
 Boards use the ordinary document ID, filename, Space, and backup paths, with a
 board flag in the index. Board saves keep the source Markdown verbatim and
 derive a sanitized HTML projection for library previews and search. The board
-page renders columns and cards in the browser. Visual edits and moves update
-the Markdown source, and both views share a debounced, serialized save path.
-During a drag, the floating card and drop gap are temporary DOM. Pointer release
-over a column commits a single move through the normal save path. Keep
-board source out of the rich editor's HTML-to-Markdown save path.
+page renders columns and cards in the browser. Visual edits, moves, and deletes
+update the Markdown source, and both views share a debounced, serialized save
+path. A card's delete button opens a confirmation; only the confirmed delete
+calls `removeBoardCard`, which takes the card and its fenced details out of the
+source. During a drag, the floating card and drop gap are temporary DOM.
+Pointer release over a column commits a single move through the normal save
+path. Keep board source out of the rich editor's HTML-to-Markdown save path.
+A document's library card offers Convert to board while the extension is on. The
+conversion is server-side (`POST /api/documents/{id}/board`): it adopts the
+document's Markdown file as board source verbatim and synchronizes its `#` title
+heading to the document title. It refuses when the scan finds no `##` column
+heading outside a code fence, which is the same rule the board page parses by,
+and when the document has images, because a board body's index entry drops the
+attachment files. The answer is the library summary, so the card updates in
+place, and a document that is already a board is left alone.
 
 Draw adds a Drawing option to the same picker. Its SVG view box is a square
 from 0 to 1000 on each axis. Complete strokes are arrays of integer coordinate
@@ -399,6 +414,28 @@ hidden while the ghost stands in.
   keys step over it. A selection that reaches one paints its band. The `--- `
   shortcut creates one, the HTML export styles the `hr`, and in Markdown mode it
   is the source line `---` (see the dialect below).
+- A table is a block with `rows`, each row an array of cells, each cell an array
+  of inline runs; the first row is always the header. Cells are one paragraph of
+  inline content, so a hard break is a `"\n"` run exactly as elsewhere. The
+  editor's one-offset-per-block selection needs a flat space, so `model.js`
+  joins cells with a tab inside a row and a newline between rows: those
+  separators exist only in the flat text, and every edit maps its offset range
+  back to the cells it touches. `layout.js` sizes columns from their content,
+  wraps each cell with pretext, fills the paper, and records a `table` facet with
+  the column and row geometry so `view.js` and `pdf.js` can paint the same
+  one-pixel grid and header wash. Enter is a hard break in a cell, Tab walks the
+  cells (a new row is appended after the last one), Shift+Tab walks back (and
+  stops at the first cell), Up/Down stay in the same column, and Backspace at a
+  cell start or Delete at its end does nothing because cells never merge. The
+  toolbar's Table button inserts a 3x2 grid at a plain caret and becomes a small
+  menu inside one for rows and columns; the browser menu is rebuilt from the
+  caret's table each time it opens, and Markdown mode disables it. Hovering or
+  clicking a cell also raises one floating options button at that cell's top
+  right (`view.js` keeps a single `doc-table-tool` and `editor.js` moves it),
+  whose menu has Add column right, Add row below, Delete column, and Delete row
+  for that cell; `Ctrl+Alt+Right` and `Ctrl+Alt+Down` do the two add actions at
+  the caret. A selection
+  that spans blocks and reaches a table deletes the table whole.
 - Paragraph alignment is a block property stored as `data-align` on the block tag
   (or list item). Layout shifts each painted line for centre/right alignment and
   stretches spaces on justified lines except the last line of a segment. Older
@@ -464,8 +501,8 @@ hidden while the ghost stands in.
 - Copy writes the selection's plain text plus the selected blocks as semantic
   HTML; cut writes the same and then deletes. Paste prefers the HTML flavor and
   reduces it in `assets/doc/clipboard.js` to what the editor can represent:
-  headings, paragraphs, lists, quotes, code blocks, inline marks, links, and
-  embedded bitmap images. Inline styles other editors use for bold, italic,
+  headings, paragraphs, lists, quotes, code blocks, tables, inline marks, links,
+  and embedded bitmap images. Inline styles other editors use for bold, italic,
   underline, strike-through, and alignment become the same semantic marks and
   bounded `data-align`; scripts, styles, forms, media, remote images, unknown
   attributes, and unsafe URL schemes are dropped before parsing, and paste
@@ -519,7 +556,14 @@ hidden while the ghost stands in.
   empty paragraphs) rides a documented serialized-HTML escape hatch; images stay
   real image blocks and are never written into the source as base64 or urls, and
   only the accepted HTML shapes are parsed, so a stored document still cannot
-  reach the network. Both modes offer Heading 1 to 3, and nothing above three:
+  reach the network. A table is the one rich block made of several source lines:
+  Markdown mode shows the header row, `| --- | --- |`, and one line per body row,
+  and consecutive pipe rows are read back as one table. A table whose cells the
+  pipe form cannot carry exactly (a cell with leading/trailing spaces, a code
+  span holding a hard break) falls back to one serialized-HTML line instead, so
+  the conversion stays lossless. The file on disk is always a portable GFM pipe
+  table written by `src/markdown.rs`. Both modes offer Heading 1 to 3,
+  and nothing above three:
   the sanitizer turns an older document's `h4` into an `h3`. Toolbar actions in
   the mode edit the source text directly
   through `assets/doc/markdown-edit.js`; `DocEditor.setSourceMode` gates the
@@ -574,9 +618,11 @@ hidden while the ghost stands in.
   from the selection geometry. Right-click, tap, or Shift+F10 at a marked word
   opens suggestions. Corrections preserve inline formatting and use ordinary
   undo. Add to dictionary saves a word in `spelling-words.json` in the data
-  folder through the protected `/api/spelling/words` endpoint. The editor
-  loads custom words when starting spellcheck and accepts them across documents
-  and browsers. Code, URLs, and Markdown source are skipped. Assets under
+  folder through the protected `/api/spelling/words` endpoint, in the list for
+  the document's Space (General when it has none). The editor passes the
+  document's Space and loads that list when starting spellcheck, so a word is
+  accepted across the Space's documents and browsers and nowhere else. Code,
+  URLs, and Markdown source are skipped. Assets under
   `assets/spellcheck/` include the original licenses
   for Typo.js (BSD-3-Clause) and the SCOWL en_US dictionary (2020.12.07).
 - Known gaps: screen readers get the painted text but not a
@@ -592,6 +638,12 @@ hidden while the ghost stands in.
   links; other relative and fragment links already stored in a document
   round-trip unchanged. An inline toolbar toggle does nothing (rather than
   nesting markers) when the caret sits inside an existing emphasis or code span.
+  Tables hold inline text only: no merged cells, pictures, nested tables, or
+  column widths to drag, and the first row is always the header because that is
+  what a GFM pipe table has. The grid is bounded at 12 columns and 500 rows
+  (`TABLE_COLUMNS_LIMIT`/`TABLE_ROWS_LIMIT` in `model.js`); a wider or taller
+  pasted grid is cropped to that shape when it enters the editor. Spellcheck
+  skips table cells.
 - PDF export (`assets/doc/pdf.js`) lays the document out again at an A4 content
   width, so its line breaks can differ from the paper on screen. It writes the
   file itself and uses the standard PDF fonts (Times and Courier), so do not add
@@ -618,6 +670,17 @@ These should not be casually changed:
   `data-align` and `data-indent` use safe HTML in Markdown. The index carries
   the bounded image attributes. The sanitizer validates both, and CSP forbids
   inline styles.
+- Tables are a block of inline cells, and the store's allowlist is the only
+  trust boundary for them: `table`, `thead`, `tbody`, `tr`, `th`, `td` carry no
+  attributes, a cell holds only the inline tags the editor writes, and the first
+  row is the header. `src/markdown.rs` writes a GFM pipe table when the cells can
+  be written as inline Markdown and keeps the canonical serialized HTML as a raw
+  block otherwise; reading either form produces the same canonical HTML. In
+  Markdown mode a table is several consecutive pipe lines (header, delimiter,
+  then body rows) that parse back into one rich block; a table the pipe form
+  cannot carry exactly keeps the one-line HTML escape shape. Rows end at the
+  first line that is not a pipe row, so keep any new block syntax from starting
+  with a pipe-and-outer-pipe row unless it really is a table.
 - `parseDocument` and `serializeDocument` round-trip the API HTML.
   `src/markdown.rs` round-trips that content through the data folder.
 - Clipboard HTML is untrusted input. Copy writes semantic HTML; paste reduces it
@@ -665,6 +728,11 @@ These should not be casually changed:
   `nextPath()`); do not turn it into an open redirect.
 - Writes go through the temporary-file-and-replace path in `store.rs`. Do not
   introduce a database or write directly to a live document file.
+- Extension switches are server state, not browser state: enabled extensions
+  live in `extensions.json` in the data folder and change only through
+  `/api/extensions`. Never keep them in `localStorage` or in a session. The
+  store's write lock keeps two clients changing different extensions from
+  losing each other's switch.
 - The data folder is chosen by the rules in `settings.rs`: `GRAPHO_DATA_DIR`
   first, then the folder saved on the Storage page, then `./data` when it holds
   documents, then the per-user default. The Storage page must not overrule the

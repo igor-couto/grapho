@@ -3514,12 +3514,14 @@ test("clipboard: pasting a list inside a nested item keeps the nesting", async (
   assertEqual(blockText(blocks[5]), "second", "the following sibling is untouched");
 });
 
-test("clipboard: a nested table does not duplicate its cell text", async () => {
+test("clipboard: a nested table is flattened into its cell once", async () => {
   await load("<p></p>");
   pasteClipboard(
     "<table><tr><td>outer<table><tr><td>inner</td></tr></table></td><td>other</td></tr></table>",
   );
-  assertEqual(blockText(editor.getDocument()[0]), "outerinner other", "the nested text appears once");
+  const table = editor.getDocument()[0];
+  assertEqual(table.type, "table", "a pasted table becomes a table block");
+  assertEqual(blockText(table), "outerinner\tother", "the nested text appears once, inside its cell");
 });
 
 test("clipboard: copied image attributes stay inside the stored bounds", async () => {
