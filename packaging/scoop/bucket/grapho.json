@@ -1,19 +1,19 @@
 {
     "##": "Source of truth for the Scoop bucket. Copy to bucket/grapho.json in a repository named scoop-grapho.",
-    "version": "0.3.0",
+    "version": "0.4.1",
     "description": "A quiet, local-first document editor that runs in your browser.",
     "homepage": "https://github.com/igor-couto/grapho",
     "license": "GPL-3.0-only",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/igor-couto/grapho/releases/download/v0.3.0/grapho-0.3.0-windows-x86_64.zip",
-            "hash": "dae95747c5ffce4f29de83fb9723b972af5b9bc6db7c21b5f62958c9212291be",
-            "extract_dir": "grapho-0.3.0-windows-x86_64"
+            "url": "https://github.com/igor-couto/grapho/releases/download/v0.4.1/grapho-0.4.1-windows-x86_64.zip",
+            "hash": "65a95f66e8ea3327f06c1f71654f2993afaa129a6b4b5f8de5b7302a36ea24d0",
+            "extract_dir": "grapho-0.4.1-windows-x86_64"
         },
         "arm64": {
-            "url": "https://github.com/igor-couto/grapho/releases/download/v0.3.0/grapho-0.3.0-windows-aarch64.zip",
-            "hash": "5428cb0e97a972122df802ab97b38395b8ac493486bd8dd375c3baa5bdcb1cad",
-            "extract_dir": "grapho-0.3.0-windows-aarch64"
+            "url": "https://github.com/igor-couto/grapho/releases/download/v0.4.1/grapho-0.4.1-windows-aarch64.zip",
+            "hash": "417beccd59c0ba5a7b1d1421fe0852f54e1de9769a09d42b39efb70327191367",
+            "extract_dir": "grapho-0.4.1-windows-aarch64"
         }
     },
     "bin": "grapho.exe",
