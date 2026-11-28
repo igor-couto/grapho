@@ -47,6 +47,8 @@ const state = {
   retryTimer: null,
   savePromise: null,
   saveErrorNotified: false,
+  fileRevision: null,
+  fileConflict: false,
   imageEntry: null,
   imageBusy: false,
   linkAnchor: null,
@@ -128,6 +130,8 @@ document.addEventListener("DOMContentLoaded", init);
 
 async function init() {
   els.saveStatus = document.getElementById("saveStatus");
+  els.fileConflictDialog = document.getElementById("fileConflictDialog");
+  els.openDiskVersion = document.getElementById("openDiskVersion");
   els.backToLibrary = document.getElementById("backToLibrary");
   els.shortcutsLink = document.getElementById("shortcutsLink");
   els.documentMenuButton = document.getElementById("documentMenuButton");
@@ -289,6 +293,7 @@ async function applyDocument(document) {
 
   state.loaded = true;
   state.dirty = false;
+  state.fileRevision = document.file_revision || null;
 
   els.documentTitle.value = document.title || DEFAULT_TITLE;
   els.documentTitle.disabled = false;
@@ -512,6 +517,7 @@ function buildPayload() {
     // to the default follows the stylesheet again.
     paper_width: state.paperWidth || 0,
   };
+  if (state.fileRevision) payload.file_revision = state.fileRevision;
   return payload;
 }
 
@@ -527,7 +533,7 @@ function savePath() {
 }
 
 function scheduleSave(delay) {
-  if (!state.loaded) {
+  if (!state.loaded || state.fileConflict) {
     return;
   }
   window.clearTimeout(state.saveTimer);
@@ -541,7 +547,7 @@ function scheduleSave(delay) {
 }
 
 function saveNow() {
-  if (!state.loaded) {
+  if (!state.loaded || state.fileConflict) {
     return Promise.resolve(false);
   }
   if (state.saving) {
@@ -579,6 +585,7 @@ function saveNow() {
         history.replaceState(history.state, "", documentLinkHref(saved.id) + location.search + location.hash);
       }
       state.savedContent = payload.content;
+      state.fileRevision = saved.file_revision || null;
       state.saving = false;
       state.saveErrorNotified = false;
       hideSaveStatus();
@@ -591,6 +598,15 @@ function saveNow() {
       state.saving = false;
       state.dirty = true;
       showSaveStatus();
+
+      if (error.status === 412) {
+        state.fileConflict = true;
+        els.saveStatus.lastElementChild.textContent = "File changed";
+        els.saveStatus.title = "The file changed on disk. View your options.";
+        els.saveStatus.setAttribute("aria-label", els.saveStatus.title);
+        showToast("The file changed on disk. Autosave is paused.", true);
+        return false;
+      }
 
       if (!state.saveErrorNotified) {
         showToast(
@@ -620,7 +636,7 @@ async function flushBeforeLeaving() {
     return true;
   }
   let attempts = 0;
-  while ((state.dirty || state.saving) && attempts < 2) {
+  while (!state.fileConflict && (state.dirty || state.saving) && attempts < 2) {
     await saveNow();
     attempts += 1;
   }
@@ -652,13 +668,20 @@ function handlePageLink(event, beforeLeave) {
     if (saved) {
       beforeLeave?.();
       window.location.assign(target);
+    } else if (state.fileConflict) {
+      openFileConflict();
     } else {
       showToast("Your latest changes couldn't be saved. Try once more before leaving.", true);
     }
   });
 }
 
-function persistBeforeLeaving() {
+function persistBeforeLeaving(event) {
+  if ((state.fileRevision || state.fileConflict) && (state.dirty || state.saving)) {
+    event.preventDefault();
+    event.returnValue = true;
+    return;
+  }
   if (!state.loaded || !state.dirty || state.saving) {
     return;
   }
@@ -684,6 +707,11 @@ function hideSaveStatus() {
 
 function showSaveStatus() {
   els.saveStatus.hidden = false;
+}
+
+function openFileConflict() {
+  els.openDiskVersion.href = documentLinkHref(state.documentId);
+  if (!els.fileConflictDialog.open) els.fileConflictDialog.showModal();
 }
 
 /* --------------------------------------------------------------------------
@@ -719,8 +747,19 @@ function bindEvents() {
     if (!state.loaded || state.saving) {
       return;
     }
-    if (state.dirty) {
+    if (state.fileConflict) {
+      openFileConflict();
+    } else if (state.dirty) {
       saveNow();
+    }
+  });
+  document.getElementById("downloadConflictEdits").addEventListener("click", () => {
+    if (state.markdownMode) {
+      const title = normalizeTitle(els.documentTitle.value);
+      const source = editor.getDocument().map(blockText).join("\n");
+      downloadFile(slugify(title) + "-unsaved.md", source, "text/markdown;charset=utf-8");
+    } else {
+      exportHtml();
     }
   });
 

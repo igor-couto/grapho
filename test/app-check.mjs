@@ -6122,7 +6122,111 @@ async function checkSpaces(cdp, base, dataDir) {
   await cdp.send("Input.insertText", { text: "qzxqzxqz " });
   check("a Space's dictionary word is still misspelled in General", await waitForExpression(cdp,
     `document.querySelectorAll(${JSON.stringify(markedWords)}).length === 1`, PAGE_TIMEOUT_MS));
+
+  const noteFile = path.join(folder, "Draft notes.md");
+  const diskEdit = "# Dream Glimpse\n\nRead a sleeping character's dream.\n";
+  await writeFile(noteFile, diskEdit);
+  await cdp.send("Page.navigate", { url: base + "/?space=" + space + "&q=Dream+Glimpse" });
+  await waitForExpression(cdp, `document.querySelector('[data-document-id] .document-card-link')`, PAGE_TIMEOUT_MS);
+  await evaluate(cdp, `document.querySelector('[data-document-id] .document-card-link').click()`);
+  await waitForPage(cdp, base + "/doc/", PAGE_TIMEOUT_MS);
+  await waitForEditor(cdp, PAGE_TIMEOUT_MS);
+  check("reopening a Space document reads the external edit", await evaluate(cdp,
+    `document.querySelector(".doc-line").textContent.includes("Dream Glimpse")`));
+
+  const newerDiskEdit = diskEdit + "\nChanged outside Grapho again.\n";
+  await writeFile(noteFile, newerDiskEdit);
+  await evaluate(cdp, `document.getElementById("docInput").focus()`);
+  await cdp.send("Input.insertText", { text: "My unsaved edits" });
+  await waitForExpression(cdp, `document.getElementById("saveStatus").textContent.includes("File changed")`, PAGE_TIMEOUT_MS);
+  await evaluate(cdp, `document.getElementById("saveStatus").click()`);
+  check("the save conflict dialog fits a 390px viewport", await evaluate(cdp, `(() => {
+    const dialog = document.getElementById("fileConflictDialog");
+    const actions = dialog.querySelector(".modal-actions");
+    return dialog.open && dialog.getBoundingClientRect().width <= innerWidth
+      && actions.scrollWidth <= actions.clientWidth + 1;
+  })()`));
+  check("the conflict keeps the browser edit and offers the disk version in a new tab", await evaluate(cdp, `(() => {
+    const text = Array.from(document.querySelectorAll(".doc-line"), line => line.textContent).join(" ");
+    const disk = document.getElementById("openDiskVersion");
+    return text.includes("My unsaved edits") && disk.target === "_blank" && disk.pathname === location.pathname;
+  })()`));
+  equal("a stale autosave leaves the external edit on disk", await readFile(noteFile, "utf8"), newerDiskEdit);
+  check("leaving the conflicted tab warns about unsaved edits", await evaluate(cdp,
+    `!window.dispatchEvent(new Event("beforeunload", { cancelable: true }))`));
+  // The fixture has verified both copies. Let the next check leave this tab.
+  await evaluate(cdp, `window.addEventListener("beforeunload", event => event.stopImmediatePropagation(),
+    { capture: true, once: true })`);
   await cdp.send("Emulation.clearDeviceMetricsOverride");
+  await checkBoardFileConflict(cdp, base, folder, space);
+}
+
+async function checkBoardFileConflict(cdp, base, folder, space) {
+  const id = crypto.randomUUID();
+  const original = "# Field board\r\n\r\n## Queue\r\n- Review\r\n";
+  const boardUrl = base + "/doc/" + id;
+  const created = await fetch(base + "/api/documents/" + id + "/board?draft=true&space=" + space, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ markdown: original }),
+  });
+  if (!created.ok) throw new Error("Could not create the conflict test board: " + created.status);
+  await cdp.send("Page.navigate", { url: boardUrl });
+  const loaded = await waitForExpression(cdp,
+    `document.getElementById("boardSource")?.value === ${JSON.stringify(original.replaceAll("\r\n", "\n"))}
+      && (!document.getElementById("boardEditor").hidden || !document.getElementById("boardView").hidden)`, PAGE_TIMEOUT_MS);
+  if (!loaded) throw new Error("The conflict test board did not load");
+
+  const file = path.join(folder, "Field board.md");
+  const external = original + "- Added on disk\r\n";
+  const local = original + "- Added in Grapho\r\n";
+  await writeFile(file, external);
+  await evaluate(cdp, `(() => {
+    if (document.getElementById("boardEditor").hidden) document.getElementById("boardMode").click();
+    const source = document.getElementById("boardSource");
+    source.value = ${JSON.stringify(local)};
+    source.dispatchEvent(new Event("input", { bubbles: true }));
+  })()`);
+  const conflict = await waitForExpression(cdp, `!document.getElementById("boardError").hidden
+    && !document.getElementById("boardDownloadEdits").hidden`, PAGE_TIMEOUT_MS);
+  if (!conflict) throw new Error("Board autosave did not offer to recover the conflicting edit");
+  check("a conflicted board offers the current file in a separate tab", await evaluate(cdp, `(() => {
+    const link = document.getElementById("boardOpenDisk");
+    return !link.hidden && link.target === "_blank" && link.href === location.href;
+  })()`));
+  // Keep the actual browser download inside the temporary test folder.
+  const downloadDir = await mkdtemp(path.join(folder, "downloads-"));
+  await cdp.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: downloadDir });
+  try {
+    await evaluate(cdp, `(() => {
+      const source = document.getElementById("boardSource");
+      source.value += "- Still editing\\n";
+      source.dispatchEvent(new Event("input", { bubbles: true }));
+      document.getElementById("boardDownloadEdits").click();
+    })()`);
+    const recoveredFile = path.join(downloadDir, "board-unsaved.md");
+    const deadline = Date.now() + PAGE_TIMEOUT_MS;
+    while (true) {
+      try {
+        const recovered = await readFile(recoveredFile, "utf8");
+        equal("the downloaded board keeps later browser edits and the original CRLF endings",
+          recovered, local + "- Still editing\r\n");
+        break;
+      } catch (error) {
+        if (error.code !== "ENOENT" || Date.now() >= deadline) throw error;
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    }
+  } finally {
+    await cdp.send("Browser.setDownloadBehavior", { behavior: "default" });
+  }
+  equal("recovering the browser copy leaves the external board untouched", await readFile(file, "utf8"), external);
+  // Discard the recovered test edits so the following test can navigate normally.
+  await evaluate(cdp, `(() => {
+    const source = document.getElementById("boardSource");
+    source.value = ${JSON.stringify(original)};
+    source.dispatchEvent(new Event("input", { bubbles: true }));
+  })()`);
 }
 
 async function checkSpellcheck(cdp, base, pressKey, tap) {

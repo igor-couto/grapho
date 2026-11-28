@@ -164,6 +164,21 @@ test("deleting the only card in a column leaves the column empty", () => {
   assert.deepEqual(parseBoard(removed).columns[0].cards, []);
 });
 
+test("moving and deleting a card with a repeated title acts on the chosen copy", () => {
+  const source = [
+    "# Plan", "## Queue", "- Review: First copy", "- Review: Second copy",
+    "## Done", "- Review: Third copy", "",
+  ].join("\r\n");
+  const [queue, done] = parseBoard(source).columns;
+  const moved = changeBoardCard(source, queue.cards[1], done, done.cards[0]);
+  assert.equal(moved, [
+    "# Plan", "## Queue", "- Review: First copy",
+    "## Done", "- Review: Second copy", "- Review: Third copy", "",
+  ].join("\r\n"));
+  const selected = parseBoard(moved).columns[1].cards[0];
+  assert.equal(removeBoardCard(moved, selected), source.replace("- Review: Second copy\r\n", ""));
+});
+
 test("deleting a card keeps the BOM and the indentation of the cards after it", () => {
   const source = "\uFEFF# Plan\n\n## Queue\n    - One: First.\n    - Two: Second.\n    - Three\n";
   const queue = parseBoard(source).columns[0];

@@ -1,21 +1,19 @@
 use super::{
     copy_document_files, directory_key, document_files_for, filename_key, folder_for, index_bytes,
-    load_document, normalize_title, remove_copies, sanitize_document_content, valid_filename,
-    write_data_file, Document, DocumentMetadata, FilenameSet, LibraryIndex, RelocateError, State,
-    Store, StoreError, INDEX_FILE, MARKDOWN_SUFFIX,
+    load_document, markdown_files, normalize_title, remove_copies, valid_filename, write_data_file,
+    Document, DocumentMetadata, FilenameSet, LibraryIndex, RelocateError, State, Store, StoreError,
+    INDEX_FILE, MARKDOWN_SUFFIX,
 };
 use crate::markdown;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use tokio::fs;
 use tokio::time::timeout;
 use uuid::Uuid;
 
 const GENERAL: &str = "General";
-const SPACE_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Space {
@@ -194,6 +192,15 @@ impl Store {
         };
         index.spaces.insert(id, space);
         state.commit_index(index, &created).await?;
+        if moving {
+            for document in state
+                .documents
+                .values_mut()
+                .filter(|doc| doc.space_id == Some(id))
+            {
+                document.markdown_file = None;
+            }
+        }
         let imported_ids = imported.iter().map(|document| document.id).collect();
         state
             .documents
@@ -215,6 +222,7 @@ impl Store {
         state.require_space(space_id)?;
         state.require_available_space(space_id)?;
         state.require_document_space(id)?;
+        state.refresh_markdown(id).await?;
         let Some(mut document) = state.active_document(id).cloned() else {
             return Ok(None);
         };
@@ -255,9 +263,29 @@ impl Store {
 
         state.commit_index(index, &created).await?;
         document.space_id = space_id;
+        if moving {
+            document.markdown_file = None;
+        }
+        if let Some((folder, metadata)) = state.tracked_markdown(id) {
+            if let Ok(Some(current)) =
+                markdown_files::load(folder, id, &mut metadata.clone(), None).await
+            {
+                document = current;
+            }
+        }
+        let previous_file = state.documents[&id].markdown_file;
         state.documents.insert(id, document.clone());
         if moving {
-            clean_document_files(&metadata, &source).await;
+            let mut unchanged = true;
+            if let Some(expected) = previous_file {
+                unchanged =
+                    markdown_files::checked_bytes(&source.join(&metadata.filename), expected)
+                        .await
+                        .is_ok();
+            }
+            if unchanged {
+                clean_document_files(&metadata, &source).await;
+            }
         }
         Ok(Some(document))
     }
@@ -331,18 +359,43 @@ pub(super) async fn load_folder(
     folder: &Path,
     entries: Vec<(Uuid, DocumentMetadata)>,
 ) -> Result<(PathBuf, Vec<(Document, DocumentMetadata)>), StoreError> {
-    let key = timeout(SPACE_READ_TIMEOUT, async {
+    let key = timeout(markdown_files::READ_TIMEOUT, async {
         drop(fs::read_dir(folder).await?);
         directory_key(folder).await
     })
     .await
     .map_err(io::Error::from)??;
     let mut documents = Vec::with_capacity(entries.len());
+    let mut found_body = false;
     for (id, mut metadata) in entries {
-        let document = timeout(SPACE_READ_TIMEOUT, load_document(folder, id, &mut metadata))
+        let document = if metadata.drawing {
+            let document = timeout(
+                markdown_files::READ_TIMEOUT,
+                load_document(folder, id, &mut metadata),
+            )
             .await
             .map_err(io::Error::from)??;
+            found_body = true;
+            document
+        } else if let Some(document) = markdown_files::load(folder, id, &mut metadata, None).await?
+        {
+            found_body = true;
+            document
+        } else {
+            // Keep the index entry so one missing file won't hide its neighbors.
+            let mut document = metadata.document(id, String::new());
+            document.board_markdown = metadata.board.then(String::new);
+            document
+        };
         documents.push((document, metadata));
+    }
+    if !documents.is_empty() && !found_body {
+        // An unmounted network share can leave an empty mount point behind.
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no indexed documents in the Space folder",
+        )
+        .into());
     }
     Ok((key, documents))
 }
@@ -390,11 +443,6 @@ async fn read_import(
                 "“{filename}” has the same name as another Markdown file apart from capitalization."
             )));
         }
-        let source = fs::read_to_string(path).await.map_err(|error| {
-            SpaceError::Import(format!(
-                "Couldn't import “{filename}” as UTF-8 Markdown. {error}"
-            ))
-        })?;
         let (stem, _) = filename
             .rsplit_once('.')
             .expect("validated Markdown filename");
@@ -402,9 +450,14 @@ async fn read_import(
         document.space_id = Some(space);
         document.title = normalize_title(stem);
         let placement = markdown::ImageAttributes::new();
-        document.content =
-            sanitize_document_content(markdown::decode(&source, &BTreeMap::new(), &placement));
-        let metadata = DocumentMetadata::from_document(&document, filename.to_owned(), placement);
+        let mut metadata =
+            DocumentMetadata::from_document(&document, filename.to_owned(), placement);
+        let document = markdown_files::load(folder, document.id, &mut metadata, None)
+            .await
+            .map_err(|error| SpaceError::Import(format!("Couldn't import “{filename}”. {error}")))?
+            .ok_or_else(|| {
+                SpaceError::Import(format!("“{filename}” disappeared during import."))
+            })?;
         index.documents.insert(document.id, metadata);
         imported.push(document);
     }

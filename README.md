@@ -232,9 +232,13 @@ paper widths, and image layout. Images sit beside the Markdown and use relative
 links. A few rich-text features, such as centered paragraphs, use HTML inside
 the Markdown. Tables are written as GFM pipe tables for other Markdown tools;
 one whose cells carry rich HTML the pipe form cannot hold falls back to safe
-HTML in the same file. Stop Grapho before editing Markdown by hand, and rename
-documents in Grapho so the index stays in sync. Version 1 Markdown libraries
-open in place. The next document or Space change writes the current index,
+HTML in the same file. You can edit indexed Markdown in a dedicated Space folder
+while Grapho runs. Reopen the document to see disk edits, or refresh the library
+to update **Last modified**. Search checks for changed files. If autosave finds
+an external edit, it stops and lets you open the disk version or download your
+unsaved edits. For Markdown in the main data folder, stop Grapho before editing
+by hand. Rename documents in Grapho so the index stays in sync. Version 1
+Markdown libraries open in place. The next document or Space change writes the current index,
 and existing UUID filenames switch to title-based names when their documents
 change. Libraries from before Markdown storage require a fresh data folder.
 

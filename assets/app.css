@@ -1708,6 +1708,10 @@ html[data-theme="dark"] .skeleton {
   flex: 1;
 }
 
+#fileConflictDialog .modal-actions {
+  flex-wrap: wrap;
+}
+
 /* --------------------------------------------------------------------------
    Link dialog: a web address or a search over the library
    -------------------------------------------------------------------------- */

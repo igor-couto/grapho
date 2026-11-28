@@ -103,6 +103,34 @@ test("movement and image resizing respect negative viewport bounds", () => {
   });
 });
 
+test("every image corner preserves its opposite anchor and aspect ratio on a panned canvas", () => {
+  const view = { left: -400, top: -300, right: 600, bottom: 200 };
+  const image = { type: "image", start: [-100, -100], end: [100, 0] };
+  // Each drag goes beyond both edges. The edge reached first must limit both axes.
+  const cases = [
+    ["nw", [-1000, -1000], [-400, -250], [100, 0]],
+    ["ne", [1000, -1000], [-100, -300], [500, 0]],
+    ["sw", [-1000, 1000], [-400, -100], [100, 150]],
+    ["se", [1000, 1000], [-100, -100], [500, 200]],
+  ];
+  for (const [handle, pointer, start, end] of cases) {
+    const resized = resizeElement(image, handle, pointer, view);
+    assert.deepEqual([resized.start, resized.end], [start, end], handle);
+  }
+  assert.deepEqual([image.start, image.end], [[-100, -100], [100, 0]]);
+});
+
+test("resizing a pressure-sensitive stroke keeps samples paired with points and preserves the undo snapshot", () => {
+  const stroke = {
+    id: "stroke", type: "pencil", style: { pressure: "variable", width: 3 },
+    points: [[120, 140], [130, 160], [160, 180]], pressures: [30, 200, 75],
+  };
+  const before = structuredClone(stroke);
+  const resized = resizeElement(stroke, "se", [200, 260]);
+  assert.deepEqual(resized, { ...before, points: [[120, 140], [140, 200], [200, 260]] });
+  assert.deepEqual(stroke, before);
+});
+
 test("corner resizing preserves the opposite anchor and can cross it", () => {
   const shape = { type: "rectangle", start: [200, 100], end: [100, 200] };
   const resize = resizeElement(shape, "sw", [245, 80]);

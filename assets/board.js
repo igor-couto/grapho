@@ -25,6 +25,8 @@ const addColumn = document.getElementById("boardAddColumn");
 const errorNotice = document.getElementById("boardError");
 const errorMessage = document.getElementById("boardErrorMessage");
 const retry = document.getElementById("boardRetry");
+const downloadEdits = document.getElementById("boardDownloadEdits");
+const openDisk = document.getElementById("boardOpenDisk");
 const view = document.getElementById("boardView");
 const description = document.getElementById("boardDescription");
 const columns = document.getElementById("boardColumns");
@@ -62,6 +64,8 @@ let savePromise = null;
 let saveTimer;
 let savedSource = "";
 let savedTitle = "Untitled board";
+let fileRevision;
+let fileConflict = false;
 let lineEnding = "\n";
 let board;
 let itemEdit;
@@ -70,6 +74,16 @@ const cancelCardDrag = bindBoardDrag(columns, moveCard);
 
 mode.addEventListener("click", () => setMode(!editing, true));
 retry.addEventListener("click", () => loaded ? saveBoard() : loadBoard());
+downloadEdits.addEventListener("click", () => {
+  const url = URL.createObjectURL(new Blob([source.value.replaceAll("\n", lineEnding)], {
+    type: "text/markdown;charset=utf-8",
+  }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "board-unsaved.md";
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
 source.addEventListener("input", queueSave);
 library.addEventListener("click", async (event) => {
   if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey
@@ -138,6 +152,7 @@ async function loadBoard() {
       const response = await requestBoard(endpoint);
       source.value = response.markdown;
       savedTitle = response.title;
+      fileRevision = response.file_revision;
       lineEnding = response.markdown.match(/\r\n?|\n/)?.[0] ?? "\n";
     }
     savedSource = source.value;
@@ -204,7 +219,7 @@ function syncUnloadGuard() {
 function queueSave() {
   window.clearTimeout(saveTimer);
   syncUnloadGuard();
-  if (savePromise) return;
+  if (savePromise || fileConflict) return;
   if (hasChanges()) saveTimer = window.setTimeout(saveBoard, 350);
   else showError("");
 }
@@ -218,6 +233,7 @@ function saveBoard() {
   window.clearTimeout(saveTimer);
   if (savePromise) return savePromise;
   if (!loaded || !hasChanges()) return Promise.resolve(true);
+  if (fileConflict) return Promise.resolve(false);
   savePromise = persistBoard(source.value);
   syncUnloadGuard();
   return savePromise;
@@ -235,6 +251,7 @@ async function persistBoard(markdown) {
     const response = await requestBoard(target, markdown.replaceAll("\n", lineEnding));
     savedSource = markdown;
     savedTitle = response.title;
+    fileRevision = response.file_revision;
     if (isDraft) {
       history.replaceState(null, "", "/doc/" + id + location.search + location.hash);
       isDraft = false;
@@ -243,7 +260,14 @@ async function persistBoard(markdown) {
     showError("");
     saved = true;
   } catch (error) {
-    showError(error.message);
+    if (error.status === 412) {
+      fileConflict = true;
+      retry.hidden = true;
+      downloadEdits.hidden = false;
+      openDisk.hidden = false;
+      openDisk.href = "/doc/" + id;
+    }
+    showError(fileConflict ? "The Markdown file changed on disk. Autosave is paused. Your edits are still in this tab." : error.message);
   } finally {
     savePromise = null;
     syncUnloadGuard();
@@ -258,7 +282,7 @@ async function requestBoard(target, markdown) {
     response = await fetch(target, {
       method: markdown === undefined ? "GET" : "PUT",
       headers: { Accept: "application/json", "Content-Type": "application/json" },
-      body: markdown === undefined ? undefined : JSON.stringify({ markdown }),
+      body: markdown === undefined ? undefined : JSON.stringify({ markdown, file_revision: fileRevision }),
     });
   } catch {
     throw new Error("Couldn't reach Grapho. Check that the server is still running.");
@@ -270,7 +294,9 @@ async function requestBoard(target, markdown) {
   }
   if (!response.ok) {
     const result = await response.json().catch(() => null);
-    throw new Error(result?.error || "Grapho couldn't access this board.");
+    const error = new Error(result?.error || "Grapho couldn't access this board.");
+    error.status = response.status;
+    throw error;
   }
   return response.json();
 }

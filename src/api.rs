@@ -488,10 +488,14 @@ struct DocumentView {
     paper_width: Option<u32>,
     created_at: u64,
     updated_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_revision: Option<String>,
 }
 
 impl From<Document> for DocumentView {
     fn from(document: Document) -> Self {
+        let updated_at = document.modified_at();
+        let file_revision = document.file_revision();
         Self {
             id: document.id,
             space_id: document.space_id,
@@ -499,7 +503,8 @@ impl From<Document> for DocumentView {
             content: document.content,
             paper_width: document.paper_width,
             created_at: document.created_at,
-            updated_at: document.updated_at,
+            updated_at,
+            file_revision,
         }
     }
 }
@@ -538,8 +543,11 @@ async fn get_document(
     Path(raw_id): Path<String>,
 ) -> Result<Json<DocumentView>, ApiError> {
     let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
-    state.store.require_document_space(id).await?;
-    let document = state.store.get(id).await.ok_or_else(ApiError::not_found)?;
+    let document = state
+        .store
+        .open(id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
     Ok(Json(DocumentView::from(document)))
 }
 
@@ -547,14 +555,18 @@ async fn get_document(
 struct BoardDocument {
     title: String,
     markdown: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_revision: Option<String>,
 }
 
 impl BoardDocument {
     fn from_document(document: Document) -> Result<Json<Self>, ApiError> {
+        let file_revision = document.file_revision();
         let markdown = document.board_markdown.ok_or_else(ApiError::not_found)?;
         Ok(Json(Self {
             title: document.title,
             markdown,
+            file_revision,
         }))
     }
 }
@@ -564,8 +576,11 @@ async fn get_board(
     Path(raw_id): Path<String>,
 ) -> Result<Json<BoardDocument>, ApiError> {
     let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
-    state.store.require_document_space(id).await?;
-    let document = state.store.get(id).await.ok_or_else(ApiError::not_found)?;
+    let document = state
+        .store
+        .open(id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
     BoardDocument::from_document(document)
 }
 
@@ -579,6 +594,8 @@ struct ExtensionDraftSelection {
 #[derive(Deserialize)]
 struct SaveBoardRequest {
     markdown: String,
+    #[serde(default)]
+    file_revision: String,
 }
 
 async fn save_board(
@@ -594,6 +611,7 @@ async fn save_board(
             id,
             request.markdown,
             selection.draft.then_some(selection.space),
+            &request.file_revision,
         )
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -640,8 +658,11 @@ async fn get_drawing(
     Query(selection): Query<DrawingSelection>,
 ) -> Result<Json<DrawingDocument>, ApiError> {
     let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
-    state.store.require_document_space(id).await?;
-    let document = state.store.get(id).await.ok_or_else(ApiError::not_found)?;
+    let document = state
+        .store
+        .open(id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
     let data = document
         .drawing_data(selection.scene.then_some(selection.version.unwrap_or(1)))?
         .ok_or_else(ApiError::not_found)?;
@@ -771,6 +792,17 @@ struct UpdateDocumentRequest {
     content: Option<String>,
     #[serde(default)]
     paper_width: Option<u32>,
+    file_revision: Option<String>,
+}
+
+impl UpdateDocumentRequest {
+    fn expected_revision(&self) -> Option<&str> {
+        // Metadata-only clients can operate on the current disk body.
+        // A client submitting a body must identify the version it edited.
+        self.file_revision
+            .as_deref()
+            .or_else(|| self.content.as_ref().map(|_| ""))
+    }
 }
 
 async fn update_document(
@@ -779,9 +811,17 @@ async fn update_document(
     Json(patch): Json<UpdateDocumentRequest>,
 ) -> Result<Json<DocumentView>, ApiError> {
     let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
+    let expected = patch.expected_revision().map(str::to_owned);
     let document = state
         .store
-        .update(id, patch.title, patch.content, patch.paper_width)
+        .save(
+            id,
+            patch.title,
+            patch.content,
+            patch.paper_width,
+            None,
+            expected.as_deref(),
+        )
         .await?
         .ok_or_else(ApiError::not_found)?;
     state.backups.mirror_document(document.id);
@@ -795,14 +835,16 @@ async fn save_draft(
     Json(patch): Json<UpdateDocumentRequest>,
 ) -> Result<Json<DocumentView>, ApiError> {
     let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
+    let expected = patch.expected_revision().map(str::to_owned);
     let document = state
         .store
-        .save_draft_in_space(
+        .save(
             id,
             patch.title,
             patch.content,
             patch.paper_width,
-            selection.space,
+            Some(selection.space),
+            expected.as_deref(),
         )
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -1955,6 +1997,12 @@ impl From<StoreError> for ApiError {
                 message: "This Space's storage folder is unavailable. Reconnect the folder, then restart Grapho.".to_owned(),
             };
         }
+        if matches!(error, StoreError::FileChanged) {
+            return Self {
+                status: StatusCode::PRECONDITION_FAILED,
+                message: "The Markdown file changed on disk.".to_owned(),
+            };
+        }
         eprintln!("document store error: {error}");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -2705,6 +2753,22 @@ mod tests {
         let listing = json_body(request(get("/api/documents")).await).await;
         assert_eq!(listing["documents"][0]["space_id"], space);
         assert_eq!(listing["documents"][0]["board"], true);
+
+        let file = folder.join("Release board.md");
+        let external = source.replace("The checklist.", "Updated from disk.");
+        fs::write(&file, &external).await.unwrap();
+        let stale = request(put_json(
+            &convert_path,
+            json!({
+                "markdown": source.replace("Prepare it.", "An edit in Grapho."),
+                "file_revision": board["file_revision"],
+            }),
+        ))
+        .await;
+        assert_eq!(stale.status(), StatusCode::PRECONDITION_FAILED);
+        assert_eq!(fs::read_to_string(file).await.unwrap(), external);
+        let current = json_body(request(get(&convert_path)).await).await;
+        assert_eq!(current["markdown"], external);
         fs::remove_dir_all(root).await.unwrap();
     }
 
@@ -3185,6 +3249,58 @@ mod tests {
         let reopened = request(get(&format!("{path}?scene=true&version=12"))).await;
         assert_eq!(json_body(reopened).await, scene);
         tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_drawing_edits_preserve_the_saved_layers_and_filename_after_restart() {
+        use serde_json::json;
+        use tokio::fs;
+
+        let (app, directory) = test_app(None).await;
+        let path = format!("/api/documents/{}/drawing", Uuid::new_v4());
+        let scene = json!({
+            "title": "Map", "version": 12, "background": "grid", "pattern_color": "#334455",
+            "elements": [
+                {"id": Uuid::new_v4(), "type": "text", "at": [-30, 60], "text": "Gate"},
+                {"id": Uuid::new_v4(), "type": "pencil", "points": [[-10, 5], [8, 9]],
+                 "pressures": [20, 80], "style": {"pressure": "variable"}}
+            ]
+        });
+        let request = |request| async { app.clone().oneshot(request).await.unwrap() };
+        assert_eq!(
+            request(put_json(&format!("{path}?draft=true"), scene.clone()))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let file = directory.join("Map.drawing.json");
+        let before = fs::read(&file).await.unwrap();
+        // Each request also renames the drawing and edits the first, valid layer.
+        // Rejecting the later layer must discard the entire edit.
+        for (field, value) in [
+            ("pressures", json!([20])),
+            ("points", json!([[-10, 5], [65536, 9]])),
+            ("id", scene["elements"][0]["id"].clone()),
+        ] {
+            let mut edit = scene.clone();
+            edit["title"] = json!("Partial edit");
+            edit["elements"][0]["text"] = json!("Changed gate");
+            edit["elements"][1][field] = value;
+            assert_eq!(
+                request(put_json(&path, edit)).await.status(),
+                StatusCode::BAD_REQUEST,
+                "invalid stroke {field}"
+            );
+            assert_eq!(fs::read(&file).await.unwrap(), before);
+            assert!(!directory.join("Partial edit.drawing.json").exists());
+        }
+        let (restarted, _) = test_app_for_directory(&directory, None, Drive::new()).await;
+        let response = restarted
+            .oneshot(get(&format!("{path}?scene=true&version=12")))
+            .await
+            .unwrap();
+        assert_eq!(json_body(response).await, scene);
+        fs::remove_dir_all(directory).await.unwrap();
     }
 
     #[tokio::test]
@@ -3903,6 +4019,277 @@ mod tests {
         );
         fs::remove_dir_all(root).await.unwrap();
         fs::remove_dir_all(backup).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn folder_markdown_opens_and_searches_disk_edits_and_rejects_stale_saves() {
+        use serde_json::json;
+        use std::time::UNIX_EPOCH;
+        use tokio::fs;
+
+        let (app, root) = test_app(None).await;
+        let folder = root.join("project-docs");
+        fs::create_dir(&folder).await.unwrap();
+        let spell_list = folder.join("focus-mode-spell-list.md");
+        let other = folder.join("npcs.md");
+        let older = 1_700_000_000;
+        let set_modified = |path: &std::path::Path, seconds| {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(UNIX_EPOCH + Duration::from_secs(seconds))
+                .unwrap();
+        };
+        fs::write(&spell_list, "Original spell list.\n")
+            .await
+            .unwrap();
+        fs::write(&other, "NPCs.\n").await.unwrap();
+        set_modified(&spell_list, older);
+        set_modified(&other, older + 10);
+        let request = |request| app.clone().oneshot(request);
+        let response = request(post_json(
+            "/api/storage/spaces",
+            json!({"name": "Malbork", "folder": folder, "import_markdown": true}),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let listing = json_body(request(get("/api/documents")).await.unwrap()).await;
+        assert_eq!(listing["documents"][0]["title"], "npcs");
+        let id = listing["documents"][1]["id"].as_str().unwrap();
+        let endpoint = format!("/api/documents/{id}");
+        let original = json_body(request(get(&endpoint)).await.unwrap()).await;
+
+        let external = "# Dream Glimpse\n\nRead a sleeping character's dream.\n";
+        fs::write(&spell_list, external).await.unwrap();
+        set_modified(&spell_list, older + 20);
+        let listing = json_body(request(get("/api/documents")).await.unwrap()).await;
+        assert_eq!(listing["documents"][0]["id"], id);
+        assert_eq!(listing["documents"][0]["updated_at"], (older + 20) * 1000);
+        let results = json_body(
+            request(get("/api/documents/search?q=Dream+Glimpse"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(results["matches"][0]["id"], id);
+        let current = json_body(request(get(&endpoint)).await.unwrap()).await;
+        assert!(current["content"]
+            .as_str()
+            .unwrap()
+            .contains("Dream Glimpse"));
+        assert_ne!(current["file_revision"], original["file_revision"]);
+
+        let edits = "<h1>Dream Insight</h1><p>My browser edits.</p>";
+        let save = |revision: &serde_json::Value| {
+            put_json(
+                &endpoint,
+                json!({"content": edits, "file_revision": revision}),
+            )
+        };
+        let stale = request(save(&original["file_revision"])).await.unwrap();
+        assert_eq!(stale.status(), StatusCode::PRECONDITION_FAILED);
+        assert_eq!(fs::read_to_string(&spell_list).await.unwrap(), external);
+
+        // Detect byte changes even when a writer preserves the date and size.
+        let same_stamp = external.replace("Glimpse", "Insight");
+        fs::write(&spell_list, &same_stamp).await.unwrap();
+        set_modified(&spell_list, older + 20);
+        let stale = request(save(&current["file_revision"])).await.unwrap();
+        assert_eq!(stale.status(), StatusCode::PRECONDITION_FAILED);
+        assert_eq!(fs::read_to_string(&spell_list).await.unwrap(), same_stamp);
+
+        let current = json_body(request(get(&endpoint)).await.unwrap()).await;
+        let saved = request(save(&current["file_revision"])).await.unwrap();
+        assert_eq!(saved.status(), StatusCode::OK);
+        let saved = json_body(saved).await;
+        let on_disk = fs::read_to_string(&spell_list).await.unwrap();
+        assert!(on_disk.contains("My browser edits."));
+        assert_ne!(saved["file_revision"], current["file_revision"]);
+        let reopened = json_body(request(get(&endpoint)).await.unwrap()).await;
+        assert_eq!(reopened["file_revision"], saved["file_revision"]);
+        assert_eq!(reopened["updated_at"], saved["updated_at"]);
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn competing_space_saves_with_one_revision_commit_exactly_one_body() {
+        use serde_json::json;
+        use tokio::fs;
+
+        let (app, root) = test_app(None).await;
+        let (endpoint, file) = import_space_note(&app, &root).await;
+        let request = |request| async { app.clone().oneshot(request).await.unwrap() };
+        let original = json_body(request(get(&endpoint)).await).await;
+        let revision = original["file_revision"].as_str().unwrap();
+        let save = |content: &str| {
+            request(put_json(
+                &endpoint,
+                json!({
+                    "content": content, "file_revision": revision
+                }),
+            ))
+        };
+        let (left, right) = tokio::join!(save("<p>Left</p>"), save("<p>Right</p>"));
+        let (winner, loser, text) = if left.status() == StatusCode::OK {
+            (left, right, "Left")
+        } else {
+            (right, left, "Right")
+        };
+        assert_eq!(winner.status(), StatusCode::OK);
+        assert_eq!(loser.status(), StatusCode::PRECONDITION_FAILED);
+        let saved = json_body(winner).await;
+        assert_ne!(saved["file_revision"], revision);
+        assert_eq!(saved["content"], format!("<p>{text}</p>"));
+        let current = json_body(request(get(&endpoint)).await).await;
+        assert_eq!(current["file_revision"], saved["file_revision"]);
+        assert_eq!(fs::read_to_string(file).await.unwrap(), format!("{text}\n"));
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_missing_space_file_stays_missing_until_it_returns_at_the_same_path() {
+        use serde_json::json;
+        use tokio::fs;
+
+        let (app, root) = test_app(None).await;
+        let (endpoint, file) = import_space_note(&app, &root).await;
+        let request = |request| async { app.clone().oneshot(request).await.unwrap() };
+        let original = json_body(request(get(&endpoint)).await).await;
+        fs::remove_file(&file).await.unwrap();
+        assert_eq!(
+            request(get(&endpoint)).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            json_body(request(get("/api/documents")).await).await["documents"],
+            json!([])
+        );
+        assert_eq!(
+            json_body(request(get("/api/documents/search?q=Original")).await).await["matches"],
+            json!([])
+        );
+        let stale = put_json(
+            &endpoint,
+            json!({
+                "content": "<p>Pending edit</p>", "file_revision": original["file_revision"]
+            }),
+        );
+        assert_eq!(
+            request(stale).await.status(),
+            StatusCode::PRECONDITION_FAILED
+        );
+        assert!(!file.exists());
+
+        fs::write(&file, "Restored outside Grapho.\n")
+            .await
+            .unwrap();
+        let current = json_body(request(get(&endpoint)).await).await;
+        assert_eq!(current["id"], original["id"]);
+        assert_eq!(current["content"], "<p>Restored outside Grapho.</p>");
+        assert_ne!(current["file_revision"], original["file_revision"]);
+        let matches = json_body(request(get("/api/documents/search?q=Restored")).await).await;
+        assert_eq!(matches["matches"][0]["id"], original["id"]);
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_conflicted_board_can_reopen_the_disk_version_and_save_with_its_new_revision() {
+        use serde_json::json;
+        use tokio::fs;
+
+        let (app, root) = test_app(None).await;
+        let (endpoint, file) = import_space_note(&app, &root).await;
+        let board = format!("{endpoint}/board");
+        let request = |request| async { app.clone().oneshot(request).await.unwrap() };
+        // The imported note becomes a board *after* its file is edited outside Grapho.
+        let initial = "# Field notes\r\n\r\n## To do\r\n- Review\r\n";
+        fs::write(&file, initial).await.unwrap();
+        assert_eq!(
+            request(post_json(&board, json!({}))).await.status(),
+            StatusCode::OK
+        );
+        let opened = json_body(request(get(&board)).await).await;
+        assert_eq!(opened["markdown"], initial);
+        let stale_revision = opened["file_revision"].as_str().unwrap();
+        let external = initial.replace("- Review", "- Reviewed on disk");
+        fs::write(&file, &external).await.unwrap();
+        let stale = request(put_json(&board, json!({
+            "markdown": initial.replace("Field notes", "Stale title"), "file_revision": stale_revision
+        }))).await;
+        assert_eq!(stale.status(), StatusCode::PRECONDITION_FAILED);
+        assert_eq!(fs::read_to_string(&file).await.unwrap(), external);
+        assert!(!file.with_file_name("Stale title.md").exists());
+
+        let current = json_body(request(get(&board)).await).await;
+        assert_eq!(current["markdown"], external);
+        let current_revision = current["file_revision"].as_str().unwrap();
+        assert_ne!(current_revision, stale_revision);
+        let merged = external + "- Local follow-up\r\n";
+        let save = put_json(
+            &board,
+            json!({"markdown": merged, "file_revision": current_revision}),
+        );
+        assert_eq!(request(save).await.status(), StatusCode::OK);
+        assert_eq!(fs::read_to_string(file).await.unwrap(), merged);
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_library_rename_preserves_externally_edited_markdown_byte_for_byte() {
+        use serde_json::json;
+        use tokio::fs;
+
+        let (app, root) = test_app(None).await;
+        let (endpoint, file) = import_space_note(&app, &root).await;
+        let external = "# Field notes\r\n\r\n*   **Keep** this spelling.\r\n";
+        fs::write(&file, external).await.unwrap();
+        let request = |request| async { app.clone().oneshot(request).await.unwrap() };
+        let unversioned = put_json(&endpoint, json!({"content":"<p>Old tab</p>"}));
+        assert_eq!(
+            request(unversioned).await.status(),
+            StatusCode::PRECONDITION_FAILED
+        );
+        let renamed = request(put_json(&endpoint, json!({"title": "Revised notes"}))).await;
+        assert_eq!(renamed.status(), StatusCode::OK);
+        assert!(!file.exists());
+        assert_eq!(
+            fs::read_to_string(file.with_file_name("Revised notes.md"))
+                .await
+                .unwrap(),
+            external
+        );
+        let (restarted, _) = test_app_for_directory(&root, None, Drive::new()).await;
+        let reopened = json_body(restarted.oneshot(get(&endpoint)).await.unwrap()).await;
+        assert_eq!(reopened["title"], "Revised notes");
+        assert_eq!(
+            reopened["file_revision"],
+            json_body(renamed).await["file_revision"]
+        );
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    async fn import_space_note(app: &Router, root: &std::path::Path) -> (String, PathBuf) {
+        use serde_json::json;
+        use tokio::fs;
+
+        let folder = root.join("notes");
+        let file = folder.join("Field notes.md");
+        fs::create_dir(&folder).await.unwrap();
+        fs::write(&file, "Original notes.\n").await.unwrap();
+        let request = |request| async { app.clone().oneshot(request).await.unwrap() };
+        let response = request(post_json(
+            "/api/storage/spaces",
+            json!({
+                "name": "Notes", "folder": folder, "import_markdown": true
+            }),
+        ))
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let listing = json_body(request(get("/api/documents")).await).await;
+        let id = listing["documents"][0]["id"].as_str().unwrap();
+        (format!("/api/documents/{id}"), file)
     }
 
     #[tokio::test]

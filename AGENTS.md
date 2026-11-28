@@ -142,6 +142,14 @@ regular top-level `.md` files using the usual Markdown parser and sanitizer,
 keep the filenames and bodies, and commit all document entries with the Space
 in one metadata write. Queue their IDs as one batch for the backup worker.
 
+For indexed Markdown in a dedicated Space folder, the body on disk is current.
+Opening a document reads its file. A listing uses the file's modified timestamp
+and can show cached previews. Search checks the file's timestamp and size
+before reusing parsed text. Editors receive a revision derived from the exact
+Markdown bytes and send it back with each body save. A stale revision pauses
+autosave and leaves the browser's edits available for download. Check the bytes
+again just before replacing the body. There is no watcher or background refresh.
+
 The default data directory is per-user, not the working directory:
 `$XDG_DATA_HOME/grapho` or `~/.local/share/grapho` on Linux,
 `~/Library/Application Support/Grapho` on macOS, and `%LOCALAPPDATA%\Grapho` on

@@ -189,6 +189,9 @@ import {
         updateSearch(true);
       }
     });
+    window.addEventListener("pageshow", function (event) {
+      if (event.persisted) loadDocuments();
+    });
 
     els.searchDocuments.addEventListener("keydown", function (event) {
       if (event.key === "Escape" && els.searchDocuments.value) {
@@ -380,24 +383,29 @@ import {
     }
 
     state.busy = true;
-    els.documents.setAttribute("aria-busy", "true");
-    els.libraryMessage.hidden = true;
-    els.retryLoad.hidden = true;
-    els.retryLoad.disabled = true;
-    els.searchDocuments.disabled = true;
-    showLibrarySkeleton();
+    if (!state.loaded) {
+      els.documents.setAttribute("aria-busy", "true");
+      els.libraryMessage.hidden = true;
+      els.retryLoad.hidden = true;
+      els.retryLoad.disabled = true;
+      els.searchDocuments.disabled = true;
+      showLibrarySkeleton();
+    }
 
     try {
       var payload = await request("/api/documents");
       state.documents = Array.isArray(payload.documents) ? payload.documents : [];
       state.unavailableSpaces = new Set();
+      while (els.librarySpace.options.length > 2) els.librarySpace.remove(2);
       state.spaces = new Map((payload.spaces || []).map(function (space) {
         var unavailable = space.available === false;
         if (unavailable) state.unavailableSpaces.add(space.id);
         els.librarySpace.add(new Option(space.name + (unavailable ? " (unavailable)" : ""), space.id));
         return [space.id, space.name];
       }));
+      var query = els.searchDocuments.value;
       readLibraryLocation();
+      if (state.loaded) els.searchDocuments.value = query;
       els.librarySpace.disabled = false;
       state.loaded = true;
       els.signOut.hidden = !payload.auth_required;
@@ -405,7 +413,7 @@ import {
       applySort();
       updateSearch(true);
     } catch (error) {
-      showLoadError(error);
+      if (!state.loaded) showLoadError(error);
     } finally {
       state.busy = false;
       if (!state.loaded) {

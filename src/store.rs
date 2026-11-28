@@ -18,12 +18,14 @@ use crate::markdown::{self, ImageAttributes};
 
 mod drawing;
 mod filenames;
+mod markdown_files;
 mod spaces;
 use drawing::DrawingBody;
 pub(crate) use drawing::DrawingData;
 use filenames::{
     filename_key, has_suffix, valid_filename, FilenameSet, DRAWING_SUFFIX, MARKDOWN_SUFFIX,
 };
+use markdown_files::{FileStamp, MarkdownFile};
 pub use spaces::{Space, SpaceError, SpaceSummary};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -86,6 +88,8 @@ pub struct Document {
     pub updated_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     deleted_at: Option<u64>,
+    #[serde(skip)]
+    markdown_file: Option<MarkdownFile>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -138,6 +142,7 @@ impl DocumentMetadata {
             content,
             board_markdown: None,
             drawing: None,
+            markdown_file: None,
         }
     }
 
@@ -215,6 +220,30 @@ impl BackupSnapshot {
 }
 
 impl Document {
+    pub(crate) fn modified_at(&self) -> u64 {
+        self.markdown_file
+            .and_then(|file| file.stamp)
+            .and_then(FileStamp::millis)
+            .unwrap_or(self.updated_at)
+    }
+
+    pub(crate) fn file_revision(&self) -> Option<String> {
+        self.markdown_file.map(MarkdownFile::revision)
+    }
+
+    fn check_revision(&self, expected: Option<&str>) -> Result<(), StoreError> {
+        if let Some(expected) = expected {
+            let matches = match self.markdown_file {
+                Some(file) => expected == file.revision(),
+                None => expected.is_empty(),
+            };
+            if !matches {
+                return Err(StoreError::FileChanged);
+            }
+        }
+        Ok(())
+    }
+
     fn blank(id: Uuid) -> Self {
         let now = now_millis();
         Self {
@@ -229,6 +258,7 @@ impl Document {
             created_at: now,
             updated_at: now,
             deleted_at: None,
+            markdown_file: None,
         }
     }
 
@@ -304,6 +334,7 @@ pub enum StoreError {
     UnknownSpace,
     UnknownExtension,
     UnavailableSpace,
+    FileChanged,
     Io(io::Error),
     Corrupt { path: PathBuf, message: String },
 }
@@ -313,6 +344,7 @@ impl fmt::Display for StoreError {
         match self {
             Self::EmptyDraft => write!(f, "empty untitled draft"),
             Self::WrongDocumentFormat => write!(f, "document has another format"),
+            Self::FileChanged => write!(f, "the document changed on disk"),
             Self::InvalidDrawing => write!(f, "invalid or unsupported drawing scene"),
             Self::DrawingClientTooOld => {
                 write!(f, "drawing contains elements this client cannot edit")
@@ -343,6 +375,7 @@ impl std::error::Error for StoreError {
             | Self::UnknownSpace
             | Self::UnknownExtension
             | Self::UnavailableSpace
+            | Self::FileChanged
             | Self::Corrupt { .. } => None,
         }
     }
@@ -600,12 +633,24 @@ impl Store {
     }
 
     pub async fn list(&self) -> Vec<DocumentSummary> {
+        let disk = self.scan_markdown(None, false).await;
         let state = self.state.read().await;
         let mut summaries: Vec<_> = state
             .documents
             .values()
             .filter(|document| document.deleted_at.is_none())
-            .map(summary_for)
+            .filter_map(|document| {
+                let stamp = match disk.get(&document.id) {
+                    Some(Some(file)) => Some(file.stamp),
+                    Some(None) => return None,
+                    None => None,
+                };
+                let mut summary = summary_for(document);
+                if let Some(modified) = stamp.and_then(FileStamp::millis) {
+                    summary.updated_at = modified;
+                }
+                Some(summary)
+            })
             .collect();
         summaries.sort_by(|left, right| {
             right
@@ -645,20 +690,32 @@ impl Store {
             return Vec::new();
         }
 
+        let disk = self.scan_markdown(space, true).await;
         let state = self.state.read().await;
         state
             .documents
             .values()
             .filter(|document| document.deleted_at.is_none() && in_space(document, space))
             .filter_map(|document| {
+                let (document, stamp) = match disk.get(&document.id) {
+                    Some(Some(file)) => {
+                        (file.document.as_ref().unwrap_or(document), Some(file.stamp))
+                    }
+                    Some(None) => return None,
+                    None => (document, None),
+                };
                 let text = html_to_text(&document.content);
                 let title_match = search_excerpt(&document.title, &query);
                 let body_match = search_excerpt(&text, &query);
                 if title_match.is_none() && body_match.is_none() {
                     return None;
                 }
+                let mut summary = summarize(document, &text);
+                if let Some(modified) = stamp.and_then(FileStamp::millis) {
+                    summary.updated_at = modified;
+                }
                 Some(DocumentMatch {
-                    summary: summarize(document, &text),
+                    summary,
                     title_match,
                     body_match,
                 })
@@ -666,8 +723,59 @@ impl Store {
             .collect()
     }
 
+    #[cfg(test)]
     pub async fn get(&self, id: Uuid) -> Option<Document> {
         self.state.read().await.active_document(id).cloned()
+    }
+
+    pub async fn open(&self, id: Uuid) -> Result<Option<Document>, StoreError> {
+        let (folder, mut metadata) = {
+            let state = self.state.read().await;
+            state.require_document_space(id)?;
+            let Some((folder, metadata)) = state.tracked_markdown(id) else {
+                return Ok(state.active_document(id).cloned());
+            };
+            if metadata.deleted_at.is_some() {
+                return Ok(None);
+            }
+            (folder.to_owned(), metadata.clone())
+        };
+        markdown_files::load(&folder, id, &mut metadata, None).await
+    }
+
+    async fn scan_markdown(
+        &self,
+        space: Option<Option<Uuid>>,
+        read_changed: bool,
+    ) -> HashMap<Uuid, Option<markdown_files::ScannedFile>> {
+        let mut folders = HashMap::<PathBuf, Vec<_>>::new();
+        {
+            let state = self.state.read().await;
+            for document in state
+                .documents
+                .values()
+                .filter(|doc| doc.deleted_at.is_none() && in_space(doc, space))
+            {
+                if let Some((folder, metadata)) = state.tracked_markdown(document.id) {
+                    folders.entry(folder.to_owned()).or_default().push((
+                        document.id,
+                        metadata.clone(),
+                        document.markdown_file.and_then(|file| file.stamp),
+                    ));
+                }
+            }
+        }
+        let mut scans = JoinSet::new();
+        for (folder, entries) in folders {
+            scans.spawn(markdown_files::scan(folder, entries, read_changed));
+        }
+        let mut files = HashMap::new();
+        while let Some(result) = scans.join_next().await {
+            if let Ok(results) = result {
+                files.extend(results);
+            }
+        }
+        files
     }
 
     pub async fn require_document_space(&self, id: Uuid) -> Result<(), StoreError> {
@@ -784,8 +892,7 @@ impl Store {
         let mut document = Document::blank(Uuid::new_v4());
         document.space_id = space_id;
 
-        state.persist(document.clone()).await?;
-        Ok(document)
+        state.persist(document).await
     }
 
     /// Copy a document into a new file.
@@ -798,6 +905,7 @@ impl Store {
     pub async fn duplicate(&self, id: Uuid) -> Result<Option<Document>, StoreError> {
         let mut state = self.state.write().await;
         state.require_document_space(id)?;
+        state.refresh_markdown(id).await?;
         let Some(source) = state.active_document(id).cloned() else {
             return Ok(None);
         };
@@ -829,15 +937,16 @@ impl Store {
             created_at: now,
             updated_at: now,
             deleted_at: None,
+            markdown_file: None,
         };
         synchronize_board_heading(&mut document);
 
-        state.persist(document.clone()).await?;
-        Ok(Some(document))
+        state.persist(document).await.map(Some)
     }
 
     /// Apply a partial update. Sanitisation and title normalisation happen here,
     /// at the trust boundary, rather than in the browser.
+    #[cfg(test)]
     pub async fn update(
         &self,
         id: Uuid,
@@ -845,7 +954,7 @@ impl Store {
         content: Option<String>,
         paper_width: Option<u32>,
     ) -> Result<Option<Document>, StoreError> {
-        self.save(id, title, content, paper_width, None).await
+        self.save(id, title, content, paper_width, None, None).await
     }
 
     /// A draft already has an id, so a retry of the first save updates the
@@ -862,6 +971,7 @@ impl Store {
             .await
     }
 
+    #[cfg(test)]
     pub async fn save_draft_in_space(
         &self,
         id: Uuid,
@@ -870,7 +980,7 @@ impl Store {
         paper_width: Option<u32>,
         space_id: Option<Uuid>,
     ) -> Result<Option<Document>, StoreError> {
-        self.save(id, title, content, paper_width, Some(space_id))
+        self.save(id, title, content, paper_width, Some(space_id), None)
             .await
     }
 
@@ -879,9 +989,11 @@ impl Store {
         id: Uuid,
         source: String,
         draft_space: Option<Option<Uuid>>,
+        expected_revision: &str,
     ) -> Result<Option<Document>, StoreError> {
         let mut state = self.state.write().await;
         state.require_document_space(id)?;
+        state.refresh_markdown(id).await?;
         let mut document = match state.documents.get(&id) {
             Some(document) if document.deleted_at.is_some() => return Ok(None),
             Some(document) => {
@@ -891,6 +1003,7 @@ impl Store {
                 if previous == &source {
                     return Ok(Some(document.clone()));
                 }
+                document.check_revision(Some(expected_revision))?;
                 let mut document = document.clone();
                 document.updated_at = now_millis().max(document.updated_at.saturating_add(1));
                 document
@@ -917,8 +1030,7 @@ impl Store {
             );
         document.content = board_html(&source);
         document.board_markdown = Some(source);
-        state.persist(document.clone()).await?;
-        Ok(Some(document))
+        state.persist(document).await.map(Some)
     }
 
     /// Adopt a regular document's Markdown as board source.
@@ -931,6 +1043,7 @@ impl Store {
     pub async fn convert_to_board(&self, id: Uuid) -> Result<Option<Document>, StoreError> {
         let mut state = self.state.write().await;
         state.require_document_space(id)?;
+        state.refresh_markdown(id).await?;
         let Some(document) = state.active_document(id).cloned() else {
             return Ok(None);
         };
@@ -954,8 +1067,7 @@ impl Store {
         document.updated_at = now_millis().max(document.updated_at.saturating_add(1));
         document.board_markdown = Some(source);
         synchronize_board_heading(&mut document);
-        state.persist(document.clone()).await?;
-        Ok(Some(document))
+        state.persist(document).await.map(Some)
     }
 
     pub(crate) async fn save_drawing(
@@ -1009,16 +1121,18 @@ impl Store {
         Ok(Some(title))
     }
 
-    async fn save(
+    pub(crate) async fn save(
         &self,
         id: Uuid,
         title: Option<String>,
         content: Option<String>,
         paper_width: Option<u32>,
         draft_space: Option<Option<Uuid>>,
+        expected_revision: Option<&str>,
     ) -> Result<Option<Document>, StoreError> {
         let mut state = self.state.write().await;
         state.require_document_space(id)?;
+        state.refresh_markdown(id).await?;
         let (mut document, creating) = match state.documents.get(&id) {
             Some(document) if document.deleted_at.is_none() => (document.clone(), false),
             None if draft_space.is_some() => {
@@ -1064,6 +1178,7 @@ impl Store {
             {
                 return Ok(Some(document));
             }
+            document.check_revision(expected_revision)?;
             document.updated_at = now_millis().max(document.updated_at.saturating_add(1));
         }
 
@@ -1076,8 +1191,7 @@ impl Store {
             synchronize_board_heading(&mut document);
         }
 
-        state.persist(document.clone()).await?;
-        Ok(Some(document))
+        state.persist(document).await.map(Some)
     }
 
     pub async fn delete(&self, id: Uuid) -> Result<bool, StoreError> {
@@ -1099,7 +1213,7 @@ impl Store {
             return Ok(None);
         };
         if document.deleted_at.take().is_some() {
-            state.persist(document.clone()).await?;
+            return state.persist(document).await.map(Some);
         }
         Ok(Some(document))
     }
@@ -1402,16 +1516,47 @@ fn synchronize_board_heading(document: &mut Document) {
 }
 
 impl State {
+    fn tracked_markdown(&self, id: Uuid) -> Option<(&Path, &DocumentMetadata)> {
+        let metadata = self.index.documents.get(&id)?;
+        let folder = self
+            .index
+            .spaces
+            .get(&metadata.space_id?)?
+            .folder
+            .as_deref()?;
+        (!metadata.drawing).then_some((folder, metadata))
+    }
+
+    async fn refresh_markdown(&mut self, id: Uuid) -> Result<(), StoreError> {
+        let Some((folder, metadata)) = self.tracked_markdown(id) else {
+            return Ok(());
+        };
+        if metadata.deleted_at.is_none() {
+            let document =
+                markdown_files::load(folder, id, &mut metadata.clone(), self.documents.get(&id))
+                    .await?
+                    .ok_or(StoreError::FileChanged)?;
+            self.documents.insert(id, document);
+        }
+        Ok(())
+    }
+
     fn active_document(&self, id: Uuid) -> Option<&Document> {
         self.documents
             .get(&id)
             .filter(|doc| doc.deleted_at.is_none())
     }
 
-    async fn persist(&mut self, document: Document) -> Result<(), StoreError> {
+    async fn persist(&mut self, mut document: Document) -> Result<Document, StoreError> {
         self.require_available_space(document.space_id)?;
         let id = document.id;
         let folder = self.folder_for(document.space_id).to_path_buf();
+        let track_markdown = document.drawing.is_none() && folder != self.directory;
+        let old_file = self
+            .documents
+            .get(&id)
+            .and_then(|doc| doc.markdown_file)
+            .filter(|_| track_markdown);
         let old_metadata = self.index.documents.get(&id);
         let old_name = old_metadata.map(|metadata| metadata.filename.as_str());
         let suffix = document
@@ -1435,6 +1580,7 @@ impl State {
         };
         let new_path = old_name != Some(&filename);
         let path = folder.join(&filename);
+        let previous_path = old_name.map(|name| folder.join(name));
         let mut created = Vec::new();
         let mut old_body = None;
         let body_changed = self.documents.get(&id).is_none_or(|old| {
@@ -1462,7 +1608,7 @@ impl State {
                     )
                 }
             };
-            if !new_path {
+            if !new_path && old_file.is_none() {
                 old_body = Some(fs::read(&path).await?);
             }
             let write = async {
@@ -1477,23 +1623,44 @@ impl State {
                     }
                 }
                 if new_path {
+                    if let (Some(previous), Some(expected)) = (&previous_path, old_file) {
+                        markdown_files::checked_bytes(previous, expected).await?;
+                    }
                     write_new_data_file(&path, source.as_bytes()).await?;
                     created.push(path.clone());
-                    Ok(())
+                } else if let Some(expected) = old_file {
+                    let (previous, stamp) =
+                        replace_markdown(&path, source.as_bytes(), expected).await?;
+                    old_body = Some(previous);
+                    document.markdown_file =
+                        Some(MarkdownFile::new(source.as_bytes(), Some(stamp)));
                 } else {
-                    write_data_file(&path, source.as_bytes()).await
+                    write_data_file(&path, source.as_bytes()).await?;
                 }
+                if track_markdown && new_path {
+                    document.markdown_file = Some(markdown_version(&path, source.as_bytes()).await);
+                }
+                Ok::<_, StoreError>(())
             };
             if let Err(error) = write.await {
                 remove_copies(&created).await;
-                return Err(error.into());
+                return Err(error);
             }
             attributes
         } else {
             if new_path {
-                let previous = folder.join(old_name.expect("unchanged document has a body"));
-                write_new_data_file(&path, &fs::read(previous).await?).await?;
+                let previous = previous_path
+                    .as_deref()
+                    .expect("unchanged document has a body");
+                let bytes = match old_file {
+                    Some(expected) => markdown_files::checked_bytes(previous, expected).await?,
+                    None => fs::read(previous).await?,
+                };
+                write_new_data_file(&path, &bytes).await?;
                 created.push(path.clone());
+                if track_markdown {
+                    document.markdown_file = Some(markdown_version(&path, &bytes).await);
+                }
             }
             old_metadata.map_or_else(ImageAttributes::new, |old| old.images.clone())
         };
@@ -1510,7 +1677,13 @@ impl State {
                 self.index.documents.insert(id, previous);
             }
             if let Some(bytes) = old_body {
-                if let Err(rollback) = write_data_file(&path, &bytes).await {
+                let rollback = match document.markdown_file {
+                    Some(written) => replace_markdown(&path, &bytes, written).await.map(|_| ()),
+                    None => write_data_file(&path, &bytes)
+                        .await
+                        .map_err(StoreError::from),
+                };
+                if let Err(rollback) = rollback {
                     eprintln!("could not roll back document save for {id}: {rollback}");
                     return Err(error.into());
                 }
@@ -1522,7 +1695,19 @@ impl State {
         if let Some(previous) = previous {
             let current = &self.index.documents[&id];
             if new_path {
-                remove_old_body(&folder, &previous.filename).await;
+                // Leave a copy if an external writer edited the old name while
+                // Grapho was committing the renamed document.
+                let safe_to_remove = match old_file {
+                    Some(expected) => {
+                        markdown_files::checked_bytes(&folder.join(&previous.filename), expected)
+                            .await
+                            .is_ok()
+                    }
+                    None => true,
+                };
+                if safe_to_remove {
+                    remove_old_body(&folder, &previous.filename).await;
+                }
             }
             for name in previous
                 .images
@@ -1532,8 +1717,8 @@ impl State {
                 let _ = fs::remove_file(folder.join(name)).await;
             }
         }
-        self.documents.insert(id, document);
-        Ok(())
+        self.documents.insert(id, document.clone());
+        Ok(document)
     }
 }
 
@@ -1549,6 +1734,15 @@ async fn load_document(
             path,
             message: format!("could not read the document's body file: {error}"),
         })?;
+    decode_document(folder, id, metadata, source).await
+}
+
+async fn decode_document(
+    folder: &Path,
+    id: Uuid,
+    metadata: &mut DocumentMetadata,
+    source: String,
+) -> Result<Document, StoreError> {
     if metadata.drawing {
         let mut document = metadata.document(id, String::new());
         document.drawing = Some(if metadata.body_suffix() == DRAWING_SUFFIX {
@@ -2275,7 +2469,7 @@ fn summarize(document: &Document, text: &str) -> DocumentSummary {
         preview,
         word_count: text.split_whitespace().count(),
         created_at: document.created_at,
-        updated_at: document.updated_at,
+        updated_at: document.modified_at(),
     }
 }
 
@@ -2438,7 +2632,31 @@ fn close_preview_tag(output: &mut String, open: &mut Vec<&'static str>, name: &s
     }
 }
 
-pub(crate) async fn write_data_file(destination: &Path, bytes: &[u8]) -> io::Result<()> {
+async fn markdown_version(path: &Path, bytes: &[u8]) -> MarkdownFile {
+    let stamp = fs::metadata(path).await.ok().as_ref().map(FileStamp::read);
+    MarkdownFile::new(bytes, stamp)
+}
+
+async fn replace_markdown(
+    destination: &Path,
+    bytes: &[u8],
+    expected: MarkdownFile,
+) -> Result<(Vec<u8>, FileStamp), StoreError> {
+    let temporary = stage_data_file(destination, bytes).await?;
+    let result = async {
+        let stamp = FileStamp::read(&fs::metadata(&temporary).await?);
+        let previous = markdown_files::checked_bytes(destination, expected).await?;
+        replace_file(&temporary, destination).await?;
+        Ok((previous, stamp))
+    }
+    .await;
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary).await;
+    }
+    result
+}
+
+async fn stage_data_file(destination: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
     let mut name = std::ffi::OsString::from(".");
     name.push(destination.file_name().expect("data files have a name"));
     name.push(".tmp");
@@ -2447,10 +2665,18 @@ pub(crate) async fn write_data_file(destination: &Path, bytes: &[u8]) -> io::Res
         let mut file = fs::File::create(&temporary).await?;
         file.write_all(bytes).await?;
         file.sync_all().await?;
-        drop(file);
-        replace_file(&temporary, destination).await
+        Ok(temporary.clone())
     };
     let result = write.await;
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary).await;
+    }
+    result
+}
+
+pub(crate) async fn write_data_file(destination: &Path, bytes: &[u8]) -> io::Result<()> {
+    let temporary = stage_data_file(destination, bytes).await?;
+    let result = replace_file(&temporary, destination).await;
     if result.is_err() {
         let _ = fs::remove_file(&temporary).await;
     }

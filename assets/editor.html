@@ -410,6 +410,18 @@
     </form>
   </dialog>
 
+  <dialog class="modal" id="fileConflictDialog" aria-labelledby="fileConflictTitle">
+    <form class="modal-panel" method="dialog">
+      <h2 id="fileConflictTitle">Markdown file changed on disk</h2>
+      <p class="modal-description">Autosave is paused. Your edits are still in this tab. Open the disk version in a new tab or download your edits to keep a copy.</p>
+      <div class="modal-actions">
+        <button class="button button-quiet" type="submit">Close</button>
+        <button class="button button-quiet" type="button" id="downloadConflictEdits">Download my edits</button>
+        <a class="button button-primary" id="openDiskVersion" target="_blank" rel="noopener">Open disk version</a>
+      </div>
+    </form>
+  </dialog>
+
   <div class="toast toast-editor" id="toast" role="status" aria-live="polite"></div>
 </body>
 </html>
