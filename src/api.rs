@@ -2902,6 +2902,7 @@ mod tests {
 
     #[tokio::test]
     async fn drawing_tools_round_trip_and_reject_lossy_pencil_saves() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
         use serde_json::json;
 
         let (app, directory) = test_app(None).await;
@@ -3155,6 +3156,18 @@ mod tests {
         panned_scene["version"] = json!(10);
         panned_scene["elements"][7]["start"] = json!([-150, -220]);
         panned_scene["elements"][7]["end"] = json!([90, -100]);
+        // GIF comment extensions make a valid bitmap exceed Draw's old per-image limit.
+        let mut gif = STANDARD
+            .decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+            .unwrap();
+        let trailer = gif.pop().unwrap();
+        let mut comment = vec![0x21, 0xfe, 255];
+        comment.extend([b'x'; 255]);
+        comment.push(0);
+        gif.extend(comment.repeat(5_000));
+        gif.push(trailer);
+        panned_scene["elements"][7]["src"] =
+            json!(format!("data:image/gif;base64,{}", STANDARD.encode(gif)));
         assert_eq!(
             request(put_json(&path, panned_scene.clone()))
                 .await
@@ -3166,7 +3179,15 @@ mod tests {
             request(put_json(&path, picture_scene)).await.status(),
             StatusCode::CONFLICT
         );
-        assert_eq!(json_body(request(get(&v10_path)).await).await, panned_scene);
+        let response = request(get(&v10_path)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), BODY_LIMIT_BYTES)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            panned_scene
+        );
         tokio::fs::remove_dir_all(directory).await.unwrap();
     }
 

@@ -6,6 +6,7 @@ import {
 const BASE_SIZE = 1000;
 const MAX_COORDINATE = 65535;
 const MIN_COORDINATE = -MAX_COORDINATE;
+const SCENE_BOUNDS = { left: MIN_COORDINATE, top: MIN_COORDINATE, right: MAX_COORDINATE, bottom: MAX_COORDINATE };
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const samePoint = (a, b) => a[0] === b[0] && a[1] === b[1];
 
@@ -27,6 +28,8 @@ function unionBounds(elements) {
 }
 
 function moveGroup(elements, bounds, dx, dy, view) {
+  // An image at its natural size can cover the entire viewport and still move.
+  if (elements.some(element => element.type === "image")) view = SCENE_BOUNDS;
   dx = clamp(dx, Math.ceil(Math.min(0, view.left - bounds.left)), Math.floor(Math.max(0, view.right - bounds.right)));
   dy = clamp(dy, Math.ceil(Math.min(0, view.top - bounds.top)), Math.floor(Math.max(0, view.bottom - bounds.bottom)));
   return dx || dy ? elements.map(element => moveElement(element, dx, dy, view)) : elements;
@@ -425,22 +428,20 @@ export function createDrawingTools({
   }
 
   function imagePlacement(event) {
-    const point = event
+    return event
       ? pointAt(event, canvas.getBoundingClientRect())
       : [(view.left + view.right) / 2, (view.top + view.bottom) / 2];
-    return { point, bounds: view, unitsPerPixel: displayScale };
   }
 
-  function addImage({ src, alt, width, height }, placement = imagePlacement()) {
-    const { point: [x, y], bounds: { left, top, right, bottom }, unitsPerPixel } = placement;
-    const scale = Math.min(unitsPerPixel, (right - left) / (2 * width), (bottom - top) / (2 * height));
-    const placedWidth = Math.max(1, Math.round(width * scale));
-    const placedHeight = Math.max(1, Math.round(height * scale));
-    const imageX = clamp(Math.floor(x - placedWidth / 2), left, right - placedWidth);
-    const imageY = clamp(Math.floor(y - placedHeight / 2), top, bottom - placedHeight);
+  function addImage({ src, alt, width, height }, [x, y] = imagePlacement()) {
+    if (width > MAX_COORDINATE - MIN_COORDINATE || height > MAX_COORDINATE - MIN_COORDINATE) {
+      throw new Error("This image is too wide or tall for the drawing canvas.");
+    }
+    const imageX = clamp(Math.floor(x - width / 2), MIN_COORDINATE, MAX_COORDINATE - width);
+    const imageY = clamp(Math.floor(y - height / 2), MIN_COORDINATE, MAX_COORDINATE - height);
     const image = {
       id: newId(), type: "image", src, alt,
-      start: [imageX, imageY], end: [imageX + placedWidth, imageY + placedHeight],
+      start: [imageX, imageY], end: [imageX + width, imageY + height],
     };
     if (!commit([...getElements(), image])) return;
     updateSelection([image.id]);

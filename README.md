@@ -114,7 +114,8 @@ Enable **Draw** under **Extensions**, then choose **Drawing** in **New Document*
 Use a mouse, pen, or finger to sketch, add shapes, connect them with arrows,
 or write text. Select an object to move it, or use the eraser to remove it.
 Paste an image, drag an image file onto the canvas, or use **Add image** to
-embed a picture in the drawing.
+embed a picture at its original dimensions and quality. The saved drawing,
+including its embedded images, must fit within 24 MiB.
 Choose **Background** under **More actions** to set the pattern and colors for
 that drawing.
 Drawings autosave to files such as `Workshop sketch.drawing.json`. Older

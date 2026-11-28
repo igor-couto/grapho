@@ -1,6 +1,6 @@
 import { createDrawingTools } from "./draw-tools.js";
 import { createDrawingStyle } from "./draw-style.js";
-import { prepareClipboardImage, prepareImage } from "./doc/image.js";
+import { prepareClipboardImage, prepareDrawingImage } from "./doc/image.js";
 
 const DEFAULT_TITLE = "Untitled drawing";
 const DEFAULT_BACKGROUND = { pattern: "dots", color: null, patternColor: null };
@@ -134,7 +134,7 @@ document.addEventListener("copy", event => {
 
 document.addEventListener("paste", event => {
   if (!acceptsDrawingCommand(event) || !event.clipboardData || imageImport) return;
-  const image = prepareClipboardImage(event.clipboardData);
+  const image = prepareClipboardImage(event.clipboardData, MAX_DRAWING_REQUEST);
   if (!image) return;
   event.preventDefault();
   importPreparedImage(image);
@@ -142,7 +142,7 @@ document.addEventListener("paste", event => {
 
 function importImage(file, placement) {
   if (!file || !loaded || imageImport) return;
-  importPreparedImage(prepareImage(file), placement);
+  importPreparedImage(prepareDrawingImage(file, MAX_DRAWING_REQUEST), placement);
 }
 
 async function importPreparedImage(preparation, placement) {
@@ -352,7 +352,7 @@ function commitEdit(next) {
     if (after.some(element => element.type === "image" && !oldIds.has(element.id))) {
       const payload = JSON.stringify(drawingSnapshot(next));
       if (new Blob([payload]).size > MAX_DRAWING_REQUEST) {
-        showImageError("This drawing is too large to add another image.");
+        showImageError("Adding this image would exceed the drawing's 24 MiB save limit.");
         return false;
       }
       imageError.hidden = true;

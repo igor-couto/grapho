@@ -24,7 +24,6 @@ const SCENE_VERSION: u32 = BACKGROUND_COLOR_VERSION;
 const LEGACY_FENCE: &str = "```grapho-drawing-v1";
 const SQUARE_SIZE: i32 = 1000;
 const MAX_COORDINATE: i32 = 65_535;
-const IMAGE_MAX_DATA_URL: usize = 1_500_000; // Match assets/doc/image.js.
 
 type Point = [i32; 2];
 type PencilStrokes = Vec<Vec<Point>>;
@@ -434,7 +433,6 @@ impl DrawingScene {
                         && start[0] < end[0]
                         && start[1] < end[1]
                         && alt.chars().count() <= 160
-                        && src.len() <= IMAGE_MAX_DATA_URL
                         && is_embedded_image(src)
                         && src
                             .split_once(',')

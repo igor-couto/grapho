@@ -5853,9 +5853,9 @@ async function checkDrawingTools(cdp, pressKey, getScene, saved, dataDir) {
     && inserted.src === photo && inserted.alt === "drawing photo" && await evaluate(cdp, `(() => {
       const canvas = document.getElementById("drawingCanvas").viewBox.baseVal;
       const image = document.querySelector('#drawingInk [data-type="image"]').getBBox();
-      return Math.abs(image.x + image.width / 2 - canvas.width / 2) < 2
-        && Math.abs(image.y + image.height / 2 - canvas.height / 2) < 2
-        && Math.abs(image.width / image.height - 2) < 0.02;
+      return Math.abs(image.x + image.width / 2 - canvas.x - canvas.width / 2) < 2
+        && Math.abs(image.y + image.height / 2 - canvas.y - canvas.height / 2) < 2
+        && image.width === 240 && image.height === 120;
     })()`), JSON.stringify({ start: inserted.start, end: inserted.end }));
   await pressKey("z", "KeyZ", 90, 2);
   check("undo removes an inserted image", !(await savedElements()).some(item => item.id === inserted.id));
@@ -5943,6 +5943,7 @@ async function checkDrawingTools(cdp, pressKey, getScene, saved, dataDir) {
   await waitForExpression(cdp, `document.querySelectorAll('#drawingInk [data-type="image"]').length === 2`, PAGE_TIMEOUT_MS);
   const dropped = (await savedElements()).at(-1);
   check("a file dropped after panning and zooming is embedded at the pointer", dropped.type === "image" && dropped.src === photo
+    && dropped.end[0] - dropped.start[0] === 240 && dropped.end[1] - dropped.start[1] === 120
     && dropped.id !== inserted.id && closeTo(dropped.start.map((value, i) => (value + dropped.end[i]) / 2), dropPoint));
 
   await choose("pencil");
@@ -5965,8 +5966,26 @@ async function checkDrawingTools(cdp, pressKey, getScene, saved, dataDir) {
   })()`));
 
   const imageCount = `document.querySelectorAll('#drawingInk [data-type="image"]').length`;
+  const screenshotWidth = 2400;
+  const screenshotHeight = 320;
   const paste = await evaluate(cdp, `(() => {
-    const bytes = Uint8Array.from(atob(${JSON.stringify(photo.split(",")[1])}), value => value.charCodeAt(0));
+    const canvas = document.createElement("canvas");
+    canvas.width = ${screenshotWidth};
+    canvas.height = ${screenshotHeight};
+    const ctx = canvas.getContext("2d");
+    const pixels = ctx.createImageData(canvas.width, canvas.height);
+    // A flat bitmap compresses too well to reach the old image size limit.
+    let color = 1;
+    for (let offset = 0; offset < pixels.data.length; offset += 4) {
+      color = (Math.imul(color, 1664525) + 1013904223) | 0;
+      pixels.data[offset] = color >>> 24;
+      pixels.data[offset + 1] = (color >>> 16) & 255;
+      pixels.data[offset + 2] = (color >>> 8) & 255;
+      pixels.data[offset + 3] = 255;
+    }
+    ctx.putImageData(pixels, 0, 0);
+    const src = canvas.toDataURL("image/png");
+    const bytes = Uint8Array.from(atob(src.split(",")[1]), value => value.charCodeAt(0));
     const clipboardData = new DataTransfer();
     clipboardData.items.add(new File([bytes], "pasted-screenshot.png", { type: "image/png" }));
     const pasteOn = target => !target.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData }));
@@ -5974,12 +5993,15 @@ async function checkDrawingTools(cdp, pressKey, getScene, saved, dataDir) {
     title.focus();
     const titleHandled = pasteOn(title);
     title.blur();
-    return { titleHandled, canvasHandled: pasteOn(document.body) };
+    return { src, titleHandled, canvasHandled: pasteOn(document.body) };
   })()`);
+  check("the clipboard fixture exceeds the old drawing image size limit", paste.src.length > 1_500_000);
   check("pasting a clipboard image imports it on the drawing and leaves title paste alone", paste.canvasHandled && !paste.titleHandled);
   await waitForExpression(cdp, `${imageCount} === 3`, PAGE_TIMEOUT_MS);
   const pasted = (await savedElements()).at(-1);
-  check("pasting a clipboard bitmap saves its pixels", pasted.type === "image" && pasted.src === photo && pasted.alt === "pasted screenshot");
+  check("a large clipboard image saves at its original dimensions with identical bytes",
+    pasted.type === "image" && pasted.src === paste.src && pasted.alt === "pasted screenshot"
+      && pasted.end[0] - pasted.start[0] === screenshotWidth && pasted.end[1] - pasted.start[1] === screenshotHeight);
 
   check("the selected drawing image can be copied and pasted back into the canvas", await evaluate(cdp, `(() => {
     const clipboardData = new DataTransfer();
@@ -5990,7 +6012,16 @@ async function checkDrawingTools(cdp, pressKey, getScene, saved, dataDir) {
   await waitForExpression(cdp, `${imageCount} === 4`, PAGE_TIMEOUT_MS);
   const copy = (await savedElements()).at(-1);
   check("the copied image saves as a separate object with the same pixels and description",
-    copy.type === "image" && copy.id !== pasted.id && copy.src === pasted.src && copy.alt === pasted.alt);
+    copy.type === "image" && copy.id !== pasted.id && copy.src === pasted.src && copy.alt === pasted.alt
+      && copy.end[0] - copy.start[0] === screenshotWidth && copy.end[1] - copy.start[1] === screenshotHeight);
+  await cdp.send("Page.reload");
+  await waitForExpression(cdp, `${saved} && ${imageCount} === 4`, PAGE_TIMEOUT_MS);
+  const reopened = await evaluate(cdp, `(() => {
+    const image = document.querySelector('[data-element-id="${pasted.id}"]');
+    return { src: image.getAttribute("href"), width: Number(image.getAttribute("width")), height: Number(image.getAttribute("height")) };
+  })()`);
+  check("reloading the drawing preserves the pasted image bytes and dimensions",
+    reopened.src === paste.src && reopened.width === screenshotWidth && reopened.height === screenshotHeight);
 }
 
 async function checkSpaces(cdp, base, dataDir) {

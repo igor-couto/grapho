@@ -264,7 +264,9 @@ shape styles. Version 5 styles arrows and stores their routes and arrowheads.
 Version 6 adds styled lines with optional intermediate vertices and closure.
 Version 7 styles pencil strokes and stores their pressure samples. Version 8
 styles text with three font presets. Version 9 embeds imported images in the
-scene, reusing the document editor's file preparation in `assets/doc/image.js`.
+scene. Draw embeds the supplied bitmap bytes and places one scene unit per
+source pixel, including for clipboard and drop imports. The whole drawing
+request is limited to 24 MiB.
 Version 10 allows signed coordinates so the area exposed by panning is drawable.
 Version 11 stores the canvas pattern. Drawings without a background field use
 dots. Version 12 stores optional background and pattern colors. Each omitted

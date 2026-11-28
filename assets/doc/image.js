@@ -118,11 +118,14 @@ function decode(src) {
   });
 }
 
-export async function prepareImage(file) {
+function checkImageType(file) {
   if (!IMAGE_TYPE.test(file.type)) {
     throw new Error("Use a PNG, JPEG, WebP, GIF, or AVIF image.");
   }
+}
 
+export async function prepareImage(file) {
+  checkImageType(file);
   const alt = imageAltFromName(file.name);
   let image;
   try {
@@ -175,9 +178,25 @@ export async function prepareImage(file) {
   }
 }
 
-export function prepareClipboardImage(clipboard) {
+async function originalImage(src, alt) {
+  const image = await decode(src);
+  return { src, alt, width: image.naturalWidth, height: image.naturalHeight };
+}
+
+const DRAWING_SIZE_ERROR = "This image would exceed the drawing's 24 MiB save limit.";
+
+export async function prepareDrawingImage(file, maxDataUrlLength) {
+  checkImageType(file);
+  const prefixLength = `data:${file.type};base64,`.length;
+  if (prefixLength + 4 * Math.ceil(file.size / 3) > maxDataUrlLength) {
+    throw new Error(DRAWING_SIZE_ERROR);
+  }
+  return originalImage(await readImageFile(file), imageAltFromName(file.name));
+}
+
+export function prepareClipboardImage(clipboard, maxDataUrlLength) {
   const file = [...clipboard.files].find(item => item.type.startsWith("image/"));
-  if (file) return prepareImage(file);
+  if (file) return prepareDrawingImage(file, maxDataUrlLength);
 
   const html = clipboard.getData("text/html");
   if (!html) return null;
@@ -186,18 +205,17 @@ export function prepareClipboardImage(clipboard) {
   template.innerHTML = html;
   for (const image of template.content.querySelectorAll("img[src]")) {
     const src = image.getAttribute("src");
-    if (src.length > IMAGE_MAX_DATA_URL) continue;
-    const match = /^data:(image\/[a-z]+);base64,(.+)$/.exec(src);
+    const match = /^data:(image\/[a-z]+);base64,/.exec(src);
     if (!match || !IMAGE_TYPE.test(match[1])) continue;
+    if (src.length > maxDataUrlLength) return Promise.reject(new Error(DRAWING_SIZE_ERROR));
+    const data = src.slice(match[0].length);
     try {
-      if (btoa(atob(match[2])) !== match[2]) continue;
+      if (!data || btoa(atob(data)) !== data) continue;
     } catch {
       continue;
     }
     const alt = Array.from(image.alt.trim()).slice(0, 160).join("") || "Image";
-    return decode(src).then(bitmap => ({
-      src, alt, width: bitmap.naturalWidth, height: bitmap.naturalHeight,
-    }));
+    return originalImage(src, alt);
   }
   return null;
 }
