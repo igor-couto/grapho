@@ -2,7 +2,7 @@ use super::{
     copy_document_files, directory_key, document_files_for, filename_key, folder_for, index_bytes,
     load_document, normalize_title, remove_copies, sanitize_document_content, valid_filename,
     write_data_file, Document, DocumentMetadata, FilenameSet, LibraryIndex, RelocateError, State,
-    Store, StoreError, INDEX_FILE,
+    Store, StoreError, INDEX_FILE, MARKDOWN_SUFFIX,
 };
 use crate::markdown;
 use serde::{Deserialize, Serialize};
@@ -148,7 +148,12 @@ impl Store {
                         .filter(|doc| doc.space_id == Some(id))
                     {
                         let filename = filenames
-                            .claim(&metadata.title, Some(&metadata.filename), None)
+                            .claim(
+                                &metadata.title,
+                                metadata.body_suffix(),
+                                Some(&metadata.filename),
+                                None,
+                            )
                             .await?;
                         copy_document_files(
                             metadata,
@@ -231,7 +236,12 @@ impl Store {
             }
             let mut filenames = FilenameSet::read(target).await?;
             let filename = filenames
-                .claim(&metadata.title, Some(&metadata.filename), None)
+                .claim(
+                    &metadata.title,
+                    metadata.body_suffix(),
+                    Some(&metadata.filename),
+                    None,
+                )
                 .await?;
             if let Err(error) =
                 copy_document_files(&metadata, &filename, &source, target, false, &mut created)
@@ -368,7 +378,7 @@ async fn read_import(
         let name = entry.file_name();
         let filename = name
             .to_str()
-            .filter(|name| valid_filename(name))
+            .filter(|name| valid_filename(name, MARKDOWN_SUFFIX))
             .ok_or_else(|| {
                 SpaceError::Import(format!(
                     "Rename “{}” to a portable Markdown filename and try again.",

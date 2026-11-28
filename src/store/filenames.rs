@@ -8,19 +8,25 @@ use super::DEFAULT_TITLE;
 
 // Leave room for the extension, duplicate suffix, and atomic-write suffix.
 const MAX_FILENAME_BYTES: usize = 200;
-const EXTENSION: &str = ".md";
+pub(super) const MARKDOWN_SUFFIX: &str = ".md";
+pub(super) const DRAWING_SUFFIX: &str = ".drawing.json";
 const INVALID_CHARS: &str = "<>:\"/\\|?*";
 
 pub(super) fn filename_key(name: &str) -> String {
     name.to_lowercase()
 }
 
-pub(super) fn valid_filename(name: &str) -> bool {
-    let Some((stem, extension)) = name.rsplit_once('.') else {
+pub(super) fn has_suffix(name: &str, suffix: &str) -> bool {
+    name.get(name.len().saturating_sub(suffix.len())..)
+        .is_some_and(|ending| ending.eq_ignore_ascii_case(suffix))
+}
+
+pub(super) fn valid_filename(name: &str, suffix: &str) -> bool {
+    if !has_suffix(name, suffix) {
         return false;
-    };
-    extension.eq_ignore_ascii_case("md")
-        && !stem.is_empty()
+    }
+    let stem = &name[..name.len() - suffix.len()];
+    !stem.is_empty()
         && stem == trim_stem(stem)
         && name.len() <= MAX_FILENAME_BYTES
         && !reserved(stem)
@@ -50,12 +56,14 @@ impl<'a> FilenameSet<'a> {
     pub(super) async fn claim(
         &mut self,
         title: &str,
+        suffix: &str,
         preferred: Option<&str>,
         owned: Option<&str>,
     ) -> io::Result<String> {
         let stem = title_stem(title);
-        let first = preferred.map_or_else(|| candidate(&stem, 1), str::to_owned);
-        let mut candidates = std::iter::once(first).chain((1..).map(|n| candidate(&stem, n)));
+        let first = preferred.map_or_else(|| candidate(&stem, 1, suffix), str::to_owned);
+        let mut candidates =
+            std::iter::once(first).chain((1..).map(|n| candidate(&stem, n, suffix)));
         loop {
             let name = candidates.next().expect("unbounded filename candidates");
             let key = filename_key(&name);
@@ -129,18 +137,18 @@ fn title_stem(title: &str) -> String {
     }
 }
 
-fn candidate(stem: &str, number: usize) -> String {
-    let suffix = if number == 1 {
+fn candidate(stem: &str, number: usize, extension: &str) -> String {
+    let duplicate = if number == 1 {
         String::new()
     } else {
         format!(" ({number})")
     };
-    let limit = MAX_FILENAME_BYTES - suffix.len() - EXTENSION.len();
+    let limit = MAX_FILENAME_BYTES - duplicate.len() - extension.len();
     let mut end = limit.min(stem.len());
     while !stem.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}{suffix}{EXTENSION}", trim_stem(&stem[..end]))
+    format!("{}{duplicate}{extension}", trim_stem(&stem[..end]))
 }
 
 #[cfg(test)]
@@ -149,6 +157,7 @@ mod tests {
 
     #[test]
     fn titles_become_portable_names_without_losing_readable_text() {
+        let candidate = |stem: &str, number| super::candidate(stem, number, MARKDOWN_SUFFIX);
         assert_eq!(
             candidate(&title_stem("Lessons: Week 1"), 1),
             "Lessons- Week 1.md"
@@ -160,9 +169,19 @@ mod tests {
             "Relatório de Física.md"
         );
         let long = candidate(&title_stem(&"📓".repeat(200)), 2);
-        assert!(valid_filename(&long));
+        assert!(valid_filename(&long, MARKDOWN_SUFFIX));
         assert!(long.ends_with(" (2).md"));
-        assert!(!valid_filename("../Notes.md"));
-        assert!(!valid_filename("folder\\Notes.md"));
+        assert!(!valid_filename("../Notes.md", MARKDOWN_SUFFIX));
+        assert!(!valid_filename("folder\\Notes.md", MARKDOWN_SUFFIX));
+    }
+
+    #[test]
+    fn drawing_names_keep_their_compound_suffix() {
+        let stem = title_stem(&"é".repeat(200));
+        let name = candidate(&stem, 2, DRAWING_SUFFIX);
+        assert!(name.ends_with(" (2).drawing.json"));
+        assert!(valid_filename(&name, DRAWING_SUFFIX));
+        assert!(!valid_filename("../Notes.drawing.json", DRAWING_SUFFIX));
+        assert!(!valid_filename("Notes.json", DRAWING_SUFFIX));
     }
 }

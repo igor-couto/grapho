@@ -2,7 +2,7 @@
 
 Grapho is a small writing app that runs in the browser. It is one Rust binary with
 no database, account system, or frontend build step. Documents are Markdown
-files on disk, with one metadata index for the library.
+files and drawings are JSON files, with one metadata index for the library.
 
 The home screen searches document titles and full text, highlights matching
 passages, and shows previews in grid view. The editor has the formatting I use
@@ -111,9 +111,14 @@ every browser and device that opens the library sees the same ones. Existing
 boards open in Markdown when Boards is off.
 
 Enable **Draw** under **Extensions**, then choose **Drawing** in **New Document**.
-Draw on the dotted canvas with a mouse, pen, or finger. The title and strokes
-save automatically. Grapho keeps the strokes in a fenced block in the drawing's
-Markdown file and uses the library index to open it as a drawing.
+Use a mouse, pen, or finger to sketch, add shapes, connect them with arrows,
+or write text. Select an object to move it, or use the eraser to remove it.
+Paste an image, drag an image file onto the canvas, or use **Add image** to
+embed a picture in the drawing.
+Choose **Background** under **More actions** to set the pattern and colors for
+that drawing.
+Drawings autosave to files such as `Workshop sketch.drawing.json`. Older
+pencil drawings open normally and keep their links.
 
 Every shortcut is listed on the **Shortcuts** page (the menu on any page). The
 most useful: `Ctrl+O` opens documents by title, `Ctrl+S` saves now,
@@ -218,9 +223,10 @@ bind-mounted host directory must be writable by that user.
 
 ## Data
 
-Each document's body is a Markdown file named after its title, such as
-`Project Notes.md`. Grapho replaces characters that filenames cannot use and
-adds a number when a name is taken. Renaming in Grapho changes the filename.
+Text documents and boards use Markdown bodies named after their title, such as
+`Project Notes.md`. Drawings use title-based `.drawing.json` files. Grapho
+replaces characters that filenames cannot use and adds a number when a name is
+taken. Renaming in Grapho changes the filename.
 The shared `metadata.json` keeps filenames, stable document IDs, Spaces, dates,
 paper widths, and image layout. Images sit beside the Markdown and use relative
 links. A few rich-text features, such as centered paragraphs, use HTML inside

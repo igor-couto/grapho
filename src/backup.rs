@@ -523,13 +523,10 @@ fn check_foreign_files<'a>(
     Ok(())
 }
 
-fn check_backup_index(bytes: &[u8]) -> Result<(), BackupError> {
-    if !store::is_backup_index(bytes) {
-        return Err(BackupError::invalid(
+fn read_backup_index(bytes: &[u8]) -> Result<store::LibraryIndex, BackupError> {
+    store::parse_backup_index(bytes).ok_or_else(|| BackupError::invalid(
             "That folder already holds a metadata.json file that is not a Grapho backup. Choose another folder.",
-        ));
-    }
-    Ok(())
+        ))
 }
 
 async fn sync_folder(
@@ -543,11 +540,14 @@ async fn sync_folder(
             .map_err(|error| BackupError::io(folder, error))?;
     }
     let index = folder.join(store::INDEX_FILE);
-    match tokio::fs::read(&index).await {
-        Ok(bytes) => check_backup_index(&bytes)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+    let previous = match tokio::fs::read(&index).await {
+        Ok(bytes) => Some(read_backup_index(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(BackupError::io(&index, error)),
-    }
+    };
+    let index_bytes = snapshot
+        .index_bytes(previous.as_ref())
+        .map_err(|error| BackupError::io(&index, error))?;
     let mut entries = tokio::fs::read_dir(folder)
         .await
         .map_err(|error| BackupError::io(folder, error))?;
@@ -577,14 +577,15 @@ async fn sync_folder(
             .await
             .map_err(|error| BackupError::io(folder, error))?;
     }
+    store::write_data_file(&index, &index_bytes)
+        .await
+        .map_err(|error| BackupError::io(folder, error))?;
     for name in names.iter().filter(|name| snapshot.obsolete(name)) {
         tokio::fs::remove_file(folder.join(name))
             .await
             .map_err(|error| BackupError::io(folder, error))?;
     }
-    store::write_data_file(&folder.join(store::INDEX_FILE), &snapshot.index)
-        .await
-        .map_err(|error| BackupError::io(folder, error))
+    Ok(())
 }
 
 async fn sync_ssh(
@@ -614,13 +615,18 @@ async fn sync_ssh(
         if seed {
             check_foreign_files(names.iter().map(String::as_str), &snapshot.known)?;
         }
-        if names.iter().any(|name| name == store::INDEX_FILE) {
-            let index = folder.join(store::INDEX_FILE);
+        let index = folder.join(store::INDEX_FILE);
+        let previous = if names.iter().any(|name| name == store::INDEX_FILE) {
             let bytes = tokio::fs::read(&index)
                 .await
                 .map_err(|error| BackupError::io(&index, error))?;
-            check_backup_index(&bytes)?;
-        }
+            Some(read_backup_index(&bytes)?)
+        } else {
+            None
+        };
+        let index_bytes = snapshot
+            .index_bytes(previous.as_ref())
+            .map_err(|error| BackupError::io(&index, error))?;
         let mut script = sftp::mkdir(&target.dir);
         for (name, bytes) in &snapshot.files {
             tokio::fs::write(folder.join(name), bytes)
@@ -628,16 +634,16 @@ async fn sync_ssh(
                 .map_err(|error| BackupError::io(&folder, error))?;
             script.push_str(&sftp::upload(name, &sftp::remote_path(&target.dir, name)));
         }
-        for name in names.iter().filter(|name| snapshot.obsolete(name)) {
-            script.push_str(&sftp::remove(&sftp::remote_path(&target.dir, name)));
-        }
-        tokio::fs::write(folder.join(store::INDEX_FILE), &snapshot.index)
+        tokio::fs::write(&index, &index_bytes)
             .await
             .map_err(|error| BackupError::io(&folder, error))?;
         script.push_str(&sftp::upload(
             store::INDEX_FILE,
             &sftp::remote_path(&target.dir, store::INDEX_FILE),
         ));
+        for name in names.iter().filter(|name| snapshot.obsolete(name)) {
+            script.push_str(&sftp::remove(&sftp::remote_path(&target.dir, name)));
+        }
         sftp::run(target, &folder, &script)
             .await
             .map_err(ssh_error)?;
@@ -672,12 +678,17 @@ fn sync_google(
         .iter()
         .map(|file| (file.name.as_str(), file.id.as_str()))
         .collect();
-    if let Some(index_id) = by_name.get(store::INDEX_FILE) {
+    let previous = if let Some(index_id) = by_name.get(store::INDEX_FILE) {
         let index = drive
             .download_text(&token, index_id)
             .map_err(google_error)?;
-        check_backup_index(index.as_bytes())?;
-    }
+        Some(read_backup_index(index.as_bytes())?)
+    } else {
+        None
+    };
+    let index_bytes = snapshot
+        .index_bytes(previous.as_ref())
+        .map_err(|error| google_error(error.to_string()))?;
     for (name, bytes) in &snapshot.files {
         drive
             .upload(
@@ -689,18 +700,18 @@ fn sync_google(
             )
             .map_err(google_error)?;
     }
-    for file in remote.iter().filter(|file| snapshot.obsolete(&file.name)) {
-        drive.delete(&token, &file.id).map_err(google_error)?;
-    }
     drive
         .upload(
             &token,
             by_name.get(store::INDEX_FILE).copied(),
             store::INDEX_FILE,
             folder_id,
-            &snapshot.index,
+            &index_bytes,
         )
         .map_err(google_error)?;
+    for file in remote.iter().filter(|file| snapshot.obsolete(&file.name)) {
+        drive.delete(&token, &file.id).map_err(google_error)?;
+    }
     Ok(())
 }
 

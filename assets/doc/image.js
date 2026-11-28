@@ -10,7 +10,10 @@
 // A 90-degree turn swaps the natural width and height, so the block that owns
 // the image has to take the new numbers from here rather than keep its old ones.
 
-export const IMAGE_MAX_DATA_URL = 1500000;
+const IMAGE_MAX_DATA_URL = 1500000;
+const IMAGE_MAX_EDGE = 1600;
+const IMAGE_PASSTHROUGH_BYTES = 600 * 1024;
+const IMAGE_TYPE = /^image\/(png|jpeg|webp|gif|avif)$/;
 
 const IMAGE_TRANSFORMS = {
   "rotate-90-clockwise": { quarterTurns: 1 },
@@ -53,7 +56,7 @@ export async function transformImage(src, action) {
   return { ...encodeTransformed(canvas, src), turned: swapped };
 }
 
-export function encodeCanvas(canvas, quality) {
+function encodeCanvas(canvas, quality) {
   const src = canvas.toDataURL("image/webp", quality);
   if (src.indexOf("data:image/webp") === 0) {
     return src;
@@ -113,4 +116,123 @@ function decode(src) {
     image.onerror = () => reject(new Error("That image couldn't be read."));
     image.src = src;
   });
+}
+
+export async function prepareImage(file) {
+  if (!IMAGE_TYPE.test(file.type)) {
+    throw new Error("Use a PNG, JPEG, WebP, GIF, or AVIF image.");
+  }
+
+  const alt = imageAltFromName(file.name);
+  let image;
+  try {
+    image = await decodeImage(file);
+  } catch (error) {
+    throw new Error("That image couldn't be read.");
+  }
+
+  // A large file is drawn into a canvas before it is stored, and a closed
+  // ImageBitmap cannot be drawn: Chrome throws "The image source is detached".
+  // Read the size and finish every draw while the bitmap is still alive.
+  const naturalWidth = image.width || image.naturalWidth || 0;
+  const naturalHeight = image.height || image.naturalHeight || 0;
+  try {
+    if (!naturalWidth || !naturalHeight) throw new Error("That image couldn't be read.");
+    if (file.size <= IMAGE_PASSTHROUGH_BYTES) {
+      return {
+        src: await readImageFile(file),
+        alt,
+        width: naturalWidth,
+        height: naturalHeight,
+      };
+    }
+
+    const scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(naturalWidth, naturalHeight));
+    let width = Math.max(1, Math.round(naturalWidth * scale));
+    let height = Math.max(1, Math.round(naturalHeight * scale));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext("2d").drawImage(image, 0, 0, width, height);
+
+    let src = encodeCanvas(canvas, 0.82);
+    if (src.length > IMAGE_MAX_DATA_URL) {
+      width = Math.max(1, Math.round(width * 0.72));
+      height = Math.max(1, Math.round(height * 0.72));
+      const smaller = scaleCanvas(canvas, width, height);
+      src = encodeCanvas(smaller, 0.7);
+    }
+    if (src.length > IMAGE_MAX_DATA_URL) {
+      throw new Error("That image is too large to embed, even after shrinking.");
+    }
+
+    return { src, alt, width, height };
+  } finally {
+    if (image.close) {
+      image.close();
+    }
+  }
+}
+
+export function prepareClipboardImage(clipboard) {
+  const file = [...clipboard.files].find(item => item.type.startsWith("image/"));
+  if (file) return prepareImage(file);
+
+  const html = clipboard.getData("text/html");
+  if (!html) return null;
+  // Clipboard HTML stays inert. Only a bounded, embedded bitmap is decoded.
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  for (const image of template.content.querySelectorAll("img[src]")) {
+    const src = image.getAttribute("src");
+    if (src.length > IMAGE_MAX_DATA_URL) continue;
+    const match = /^data:(image\/[a-z]+);base64,(.+)$/.exec(src);
+    if (!match || !IMAGE_TYPE.test(match[1])) continue;
+    try {
+      if (btoa(atob(match[2])) !== match[2]) continue;
+    } catch {
+      continue;
+    }
+    const alt = Array.from(image.alt.trim()).slice(0, 160).join("") || "Image";
+    return decode(src).then(bitmap => ({
+      src, alt, width: bitmap.naturalWidth, height: bitmap.naturalHeight,
+    }));
+  }
+  return null;
+}
+
+function decodeImage(file) {
+  if (window.createImageBitmap) {
+    return createImageBitmap(file).catch(() => decodeImageElement(file));
+  }
+  return decodeImageElement(file);
+}
+
+function decodeImageElement(file) {
+  return readImageFile(file).then(decode);
+}
+
+function readImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string" && reader.result.indexOf("data:image/") === 0) {
+        resolve(reader.result);
+      } else {
+        reject(new Error("That image couldn't be read."));
+      }
+    };
+    reader.onerror = () => reject(new Error("That image couldn't be read."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function imageAltFromName(name) {
+  const base = String(name || "")
+    .replace(/\.[^.]+$/, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return Array.from(base).slice(0, 160).join("") || "Image";
 }

@@ -11,6 +11,14 @@
 }
 
 @font-face {
+  font-family: "Kalam";
+  src: url("/assets/fonts/kalam-latin.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
   font-family: "Literata";
   src: url("/assets/fonts/literata-latin.woff2") format("woff2");
   font-style: normal;
@@ -2927,14 +2935,27 @@ html[data-theme="dark"] .toast.is-error {
   font-size: 0.875rem;
 }
 
+.drawing-page {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+}
+
+.drawing-header {
+  flex: none;
+}
+
 .drawing-main {
-  width: min(calc(100% - 32px), 800px, max(390px, calc(100dvh - 158px)));
-  margin: 0 auto;
-  padding: 20px 0 24px;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .drawing-title {
-  margin: 0 0 12px;
+  width: min(calc(100% - 248px), 36rem);
+  margin: 0 auto;
+  padding: 6px 0;
 }
 
 .drawing-title input {
@@ -2944,23 +2965,229 @@ html[data-theme="dark"] .toast.is-error {
   border-radius: 5px;
   background: var(--bg);
   color: var(--ink);
+  text-align: center;
   font: 600 clamp(1.375rem, 3.4vw, 1.875rem) / 1.3 var(--font-reading);
+}
+
+.drawing-toolbar {
+  display: grid;
+  grid-template-columns: repeat(11, 42px);
+  gap: 2px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.drawing-tool {
+  position: relative;
+  display: grid;
+  width: 100%;
+  height: 40px;
+  padding: 0;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  touch-action: manipulation;
+}
+
+.drawing-tool:hover,
+.drawing-tool[aria-expanded="true"] {
+  background: var(--bg-deep);
+  color: var(--ink);
+}
+
+.drawing-tool[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.drawing-tool:focus-visible {
+  outline-offset: 0;
+}
+
+.drawing-tool svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.65;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.drawing-tool kbd {
+  position: absolute;
+  right: 4px;
+  bottom: 2px;
+  color: var(--muted);
+  font: 500 9px/1 var(--font-ui);
+}
+
+.drawing-more-wrap,
+.drawing-surface {
+  position: relative;
+}
+
+.drawing-more-menu {
+  top: calc(100% + 6px);
+  right: 0;
+}
+
+.drawing-more-menu .menu-item:disabled {
+  background: var(--surface-raised);
+  color: var(--muted);
+  opacity: 0.6;
+  cursor: default;
+}
+
+@media (max-width: 850px) {
+  .drawing-toolbar {
+    grid-area: toolbar;
+    justify-self: center;
+  }
+}
+
+@media (max-width: 550px) {
+  .drawing-toolbar {
+    width: min(100%, 320px);
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+
+  .drawing-tool {
+    height: 44px;
+  }
+}
+
+.drawing-surface {
+  flex: 1;
+  min-height: 0;
 }
 
 .drawing-canvas {
   display: block;
   width: 100%;
-  height: auto;
-  aspect-ratio: 1;
-  outline: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--paper);
-  background-image: radial-gradient(circle, var(--line-strong) 0.75px, transparent 1px);
+  height: 100%;
+  box-shadow: inset 0 1px var(--line);
   background-size: 20px 20px;
   color: var(--ink);
   cursor: crosshair;
   touch-action: none;
   user-select: none;
+}
+
+.drawing-canvas,
+.drawing-background-preview {
+  background-color: var(--drawing-background-color, var(--paper));
+  background-image: radial-gradient(circle, var(--drawing-pattern-color, var(--line-strong)) 0.75px, transparent 1px);
+}
+
+:is(.drawing-canvas, .drawing-background-preview)[data-background="grid"] {
+  background-image: linear-gradient(to right, var(--drawing-pattern-color, var(--line-strong)) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--drawing-pattern-color, var(--line-strong)) 1px, transparent 1px);
+}
+
+:is(.drawing-canvas, .drawing-background-preview)[data-background="ruled"] {
+  background-image: linear-gradient(to bottom, var(--drawing-pattern-color, var(--line-strong)) 1px, transparent 1px);
+}
+
+:is(.drawing-canvas, .drawing-background-preview)[data-background="plain"] {
+  background-image: none;
+}
+
+.drawing-background-options,
+.drawing-background-colors {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.drawing-background-options {
+  min-width: 0;
+  margin: 18px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.drawing-background-options label {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 6px 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.drawing-background-options label:has(:checked) {
+  border-color: var(--accent);
+}
+
+.drawing-background-options input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.drawing-background-preview {
+  grid-column: 1 / -1;
+  height: 40px;
+  border-radius: 5px;
+  background-size: 12px 12px;
+  background-position: center;
+}
+
+.drawing-background-colors {
+  margin-top: 16px;
+}
+
+.drawing-background-colors label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.drawing-background-colors input {
+  width: 100%;
+  height: 38px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.drawing-background-colors input::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.drawing-background-colors input::-webkit-color-swatch {
+  border: 0;
+  border-radius: 5px;
+}
+
+.drawing-background-colors input::-moz-color-swatch {
+  border: 0;
+  border-radius: 5px;
+}
+
+.drawing-canvas[data-tool="select"] {
+  cursor: default;
+}
+
+.drawing-canvas[data-tool="select"] .drawing-ink > * {
+  cursor: move;
+}
+
+.drawing-canvas[data-tool="text"] {
+  cursor: text;
 }
 
 .drawing-ink {
@@ -2971,8 +3198,229 @@ html[data-theme="dark"] .toast.is-error {
   stroke-width: 2.5;
 }
 
-.drawing-ink path {
+.drawing-ink :is(path, rect, polygon, ellipse, line, polyline) {
   vector-effect: non-scaling-stroke;
+}
+
+#drawingSelection {
+  pointer-events: none;
+}
+
+.drawing-selection-box,
+.drawing-resize-handle {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.25px;
+  vector-effect: non-scaling-stroke;
+}
+
+.drawing-line-start {
+  fill: var(--paper);
+  stroke: var(--accent);
+  vector-effect: non-scaling-stroke;
+}
+
+.drawing-marquee {
+  fill: var(--accent);
+  fill-opacity: 0.1;
+  stroke: var(--accent);
+  stroke-width: 1px;
+  vector-effect: non-scaling-stroke;
+}
+
+.drawing-resize-handle {
+  fill: var(--paper);
+  pointer-events: all;
+  cursor: nwse-resize;
+}
+
+.drawing-resize-handle:is([data-handle="ne"], [data-handle="sw"]) {
+  cursor: nesw-resize;
+}
+
+.drawing-resize-handle:is([data-handle="start"], [data-handle="end"], [data-handle^="vertex-"]) {
+  cursor: move;
+}
+
+.drawing-canvas.is-panning,
+.drawing-canvas.is-panning [data-element-id],
+.drawing-canvas.is-panning .drawing-resize-handle {
+  cursor: grabbing;
+}
+
+.drawing-text-editor {
+  position: absolute;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: var(--drawing-background-color, var(--paper));
+  color: var(--ink);
+  font-family: var(--font-ui);
+  resize: none;
+  overflow: auto;
+  scrollbar-width: none;
+  white-space: pre;
+}
+
+.drawing-text-editor::-webkit-scrollbar {
+  display: none;
+}
+
+.drawing-title-row {
+  position: relative;
+}
+
+.drawing-style-toggle {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  min-height: 36px;
+  padding: 5px 10px;
+  gap: 5px;
+  background: var(--surface-raised);
+  font-size: 12px;
+}
+
+.drawing-style-toggle svg {
+  width: 16px;
+  height: 16px;
+}
+
+.drawing-style-panel {
+  position: absolute;
+  inset: 12px auto auto 12px;
+  display: grid;
+  gap: 12px;
+  width: min(208px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  padding: 12px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-sm);
+  font-size: 12px;
+}
+
+.drawing-style-panel fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.drawing-style-panel legend {
+  margin: 0 0 5px;
+  padding: 0;
+}
+
+.drawing-style-options {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.drawing-style-choice,
+.drawing-style-color {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.drawing-style-choice[aria-pressed="true"] {
+  outline: 1px solid var(--accent);
+}
+
+.drawing-style-choice:focus-visible,
+.drawing-style-color:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.drawing-style-choice svg {
+  width: 19px;
+  height: 19px;
+}
+
+.drawing-style-choice span {
+  font: 500 12px/1 var(--font-ui);
+}
+
+.drawing-style-choice.is-swatch,
+.drawing-style-color {
+  width: 25px;
+  height: 25px;
+  background-color: var(--swatch, var(--surface));
+}
+
+.drawing-style-choice.is-clear {
+  background-image: conic-gradient(var(--line) 25%, var(--surface) 0 50%, var(--line) 0 75%, var(--surface) 0);
+  background-size: 10px 10px;
+}
+
+.drawing-style-color {
+  margin-left: 2px;
+  padding: 2px;
+  cursor: pointer;
+}
+
+.drawing-arrowheads {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.drawing-arrowheads label {
+  display: grid;
+  gap: 3px;
+}
+
+.drawing-arrowheads select {
+  width: 100%;
+  min-height: 32px;
+  padding: 3px 2px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+
+.drawing-style-opacity {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px;
+}
+
+.drawing-style-opacity input {
+  grid-column: 1 / -1;
+  width: 100%;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+@media (max-width: 640px) {
+  .drawing-style-toggle {
+    width: 44px;
+    min-height: 44px;
+  }
+
+  .drawing-style-toggle span {
+    display: none;
+  }
+
+  .drawing-title {
+    width: min(calc(100% - 120px), 36rem);
+  }
 }
 
 .drawing-status {
@@ -2987,9 +3435,13 @@ html[data-theme="dark"] .toast.is-error {
   flex-wrap: wrap;
   align-items: baseline;
   gap: 10px;
-  margin-bottom: 12px;
+  padding: 4px 12px;
   color: var(--danger);
   font-size: 0.875rem;
+}
+
+#drawingImageError {
+  margin: 0;
 }
 
 .board-page {
@@ -3076,8 +3528,11 @@ html[data-theme="dark"] .toast.is-error {
 }
 
 .board-description {
+  max-height: min(12rem, 30dvh);
   margin-bottom: 24px;
+  overflow-y: auto;
   font-family: var(--font-reading);
+  font-size: 0.875rem;
 }
 
 .board-columns {

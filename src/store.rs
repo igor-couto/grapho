@@ -16,9 +16,14 @@ use uuid::Uuid;
 
 use crate::markdown::{self, ImageAttributes};
 
+mod drawing;
 mod filenames;
 mod spaces;
-use filenames::{filename_key, valid_filename, FilenameSet};
+use drawing::DrawingBody;
+pub(crate) use drawing::DrawingData;
+use filenames::{
+    filename_key, has_suffix, valid_filename, FilenameSet, DRAWING_SUFFIX, MARKDOWN_SUFFIX,
+};
 pub use spaces::{Space, SpaceError, SpaceSummary};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -27,8 +32,6 @@ const INDEX_VERSION: u32 = 2;
 const DEFAULT_TITLE: &str = "Untitled document";
 const DEFAULT_BOARD_TITLE: &str = "Untitled board";
 const DEFAULT_DRAWING_TITLE: &str = "Untitled drawing";
-const DRAWING_FENCE: &str = "```grapho-drawing-v1";
-const DRAWING_SIZE: u16 = 1000;
 pub(crate) const INDEX_FILE: &str = "metadata.json";
 /// The opt-in features the library can switch on. These are the only names the
 /// Extensions dialog, the API, and the stored file accept.
@@ -76,7 +79,7 @@ pub struct Document {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board_markdown: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub drawing_markdown: Option<String>,
+    drawing: Option<DrawingBody>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paper_width: Option<u32>,
     pub created_at: u64,
@@ -111,7 +114,7 @@ impl DocumentMetadata {
         Self {
             title: document.title.clone(),
             board: document.board_markdown.is_some(),
-            drawing: document.drawing_markdown.is_some(),
+            drawing: document.drawing.is_some(),
             filename,
             space_id: document.space_id,
             created_at: document.created_at,
@@ -134,7 +137,15 @@ impl DocumentMetadata {
             deleted_at: self.deleted_at,
             content,
             board_markdown: None,
-            drawing_markdown: None,
+            drawing: None,
+        }
+    }
+
+    fn body_suffix(&self) -> &'static str {
+        if self.drawing && has_suffix(&self.filename, DRAWING_SUFFIX) {
+            DRAWING_SUFFIX
+        } else {
+            MARKDOWN_SUFFIX
         }
     }
 }
@@ -145,26 +156,8 @@ pub(crate) enum DocumentKind {
     Drawing,
 }
 
-pub(crate) type PencilStrokes = Vec<Vec<[u16; 2]>>;
-
-fn valid_strokes(strokes: &PencilStrokes) -> bool {
-    strokes.iter().all(|stroke| {
-        !stroke.is_empty()
-            && stroke
-                .iter()
-                .all(|&[x, y]| x <= DRAWING_SIZE && y <= DRAWING_SIZE)
-    })
-}
-
-pub(crate) fn drawing_strokes(markdown: &str) -> Option<PencilStrokes> {
-    let markdown = markdown.trim();
-    let strokes =
-        serde_json::from_str(markdown.strip_prefix(DRAWING_FENCE)?.strip_suffix("```")?).ok()?;
-    valid_strokes(&strokes).then_some(strokes)
-}
-
 #[derive(Clone, Serialize, Deserialize)]
-struct LibraryIndex {
+pub(crate) struct LibraryIndex {
     version: u32,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     backup: bool,
@@ -189,7 +182,7 @@ pub(crate) struct BackupSnapshot {
     pub changed: HashSet<Uuid>,
     pub index_changed: bool,
     pub files: BTreeMap<String, Vec<u8>>,
-    pub index: Vec<u8>,
+    index: LibraryIndex,
 }
 
 impl BackupSnapshot {
@@ -197,6 +190,27 @@ impl BackupSnapshot {
     pub fn obsolete(&self, name: &str) -> bool {
         managed_file_id(name).is_some_and(|id| self.changed.contains(&id))
             && !self.files.contains_key(name)
+    }
+
+    pub fn index_bytes(&self, previous: Option<&LibraryIndex>) -> io::Result<Vec<u8>> {
+        let Some(previous) = previous else {
+            return index_bytes(&self.index);
+        };
+        let mut index = self.index.clone();
+        // A save can commit while another document's backup is queued. Keep
+        // the entries for bodies this batch has not copied yet, including a
+        // legacy drawing whose new file has a different suffix.
+        index.documents.retain(|id, entry| {
+            if self.changed.contains(id) {
+                return true;
+            }
+            if let Some(previous) = previous.documents.get(id) {
+                entry.clone_from(previous);
+                return true;
+            }
+            false
+        });
+        index_bytes(&index)
     }
 }
 
@@ -210,12 +224,30 @@ impl Document {
             title: DEFAULT_TITLE.to_owned(),
             content: String::new(),
             board_markdown: None,
-            drawing_markdown: None,
+            drawing: None,
             paper_width: None,
             created_at: now,
             updated_at: now,
             deleted_at: None,
         }
+    }
+
+    pub(crate) fn drawing_data(
+        &self,
+        version: Option<u32>,
+    ) -> Result<Option<DrawingData>, StoreError> {
+        self.drawing
+            .as_ref()
+            .map(|body| {
+                let scene = body.scene(self.id).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "couldn't read the stored drawing scene",
+                    )
+                })?;
+                DrawingData::for_client(scene, version)
+            })
+            .transpose()
     }
 }
 
@@ -266,6 +298,7 @@ pub enum StoreError {
     EmptyDraft,
     WrongDocumentFormat,
     InvalidDrawing,
+    DrawingClientTooOld,
     NoBoardLayout,
     BoardImages,
     UnknownSpace,
@@ -280,7 +313,10 @@ impl fmt::Display for StoreError {
         match self {
             Self::EmptyDraft => write!(f, "empty untitled draft"),
             Self::WrongDocumentFormat => write!(f, "document has another format"),
-            Self::InvalidDrawing => write!(f, "invalid pencil strokes"),
+            Self::InvalidDrawing => write!(f, "invalid or unsupported drawing scene"),
+            Self::DrawingClientTooOld => {
+                write!(f, "drawing contains elements this client cannot edit")
+            }
             Self::NoBoardLayout => write!(f, "document has no board columns"),
             Self::BoardImages => write!(f, "document has images a board cannot hold"),
             Self::UnknownSpace => write!(f, "space does not exist"),
@@ -301,6 +337,7 @@ impl std::error::Error for StoreError {
             Self::EmptyDraft
             | Self::WrongDocumentFormat
             | Self::InvalidDrawing
+            | Self::DrawingClientTooOld
             | Self::NoBoardLayout
             | Self::BoardImages
             | Self::UnknownSpace
@@ -714,7 +751,7 @@ impl Store {
             for name in document_files_for(metadata) {
                 let bytes = fs::read(folder.join(name)).await?;
                 let mirror_name = if name == metadata.filename {
-                    mirror_filename(*id)
+                    mirror_filename(*id, metadata.body_suffix())
                 } else {
                     name.to_owned()
                 };
@@ -725,14 +762,14 @@ impl Store {
         // Mirrors share a flat namespace. Stable body names let every
         // connector retry or remove copies by ID after a local rename.
         for (&id, metadata) in &mut index.documents {
-            metadata.filename = mirror_filename(id);
+            metadata.filename = mirror_filename(id, metadata.body_suffix());
         }
         Ok(BackupSnapshot {
             known,
             changed,
             index_changed,
             files,
-            index: index_bytes(&index)?,
+            index,
         })
     }
 
@@ -784,7 +821,10 @@ impl Store {
             title,
             content: source.content,
             board_markdown: source.board_markdown,
-            drawing_markdown: source.drawing_markdown,
+            drawing: source
+                .drawing
+                .map(|body| body.into_native(id))
+                .transpose()?,
             paper_width: source.paper_width,
             created_at: now,
             updated_at: now,
@@ -897,7 +937,7 @@ impl Store {
         if document.board_markdown.is_some() {
             return Ok(Some(document));
         }
-        if document.drawing_markdown.is_some() {
+        if document.drawing.is_some() {
             return Err(StoreError::WrongDocumentFormat);
         }
         let metadata = state.index.documents[&id].clone();
@@ -922,46 +962,49 @@ impl Store {
         &self,
         id: Uuid,
         title: &str,
-        strokes: &PencilStrokes,
+        data: DrawingData,
         draft_space: Option<Option<Uuid>>,
     ) -> Result<Option<String>, StoreError> {
-        if !valid_strokes(strokes) {
-            return Err(StoreError::InvalidDrawing);
-        }
         let title = normalize_title_or(title, DEFAULT_DRAWING_TITLE);
-        let json = serde_json::to_string(strokes).map_err(io::Error::other)?;
-        let source = format!("{DRAWING_FENCE}\n{json}\n```\n");
-
         let mut state = self.state.write().await;
         state.require_document_space(id)?;
-        let mut document = match state.documents.get(&id) {
+        let (mut document, previous) = match state.documents.get(&id) {
             Some(document) if document.deleted_at.is_some() => return Ok(None),
             Some(document) => {
-                let Some(previous) = &document.drawing_markdown else {
-                    return Err(StoreError::WrongDocumentFormat);
-                };
-                if previous == &source && document.title == title {
-                    return Ok(Some(title));
-                }
-                let mut document = document.clone();
-                document.updated_at = now_millis().max(document.updated_at.saturating_add(1));
-                document
+                let body = document
+                    .drawing
+                    .as_ref()
+                    .ok_or(StoreError::WrongDocumentFormat)?;
+                let previous = body.scene(id).ok_or(StoreError::InvalidDrawing)?;
+                (document.clone(), Some(previous))
             }
             None => {
                 let Some(space_id) = draft_space else {
                     return Ok(None);
                 };
                 state.require_space(space_id)?;
-                if title == DEFAULT_DRAWING_TITLE && strokes.is_empty() {
-                    return Err(StoreError::EmptyDraft);
-                }
                 let mut document = Document::blank(id);
                 document.space_id = space_id;
-                document
+                (document, None)
             }
         };
+
+        let scene = data.into_scene(previous)?;
+        if !scene.is_valid() {
+            return Err(StoreError::InvalidDrawing);
+        }
+        if document.drawing.is_none() && title == DEFAULT_DRAWING_TITLE && scene.is_empty() {
+            return Err(StoreError::EmptyDraft);
+        }
+        let body = DrawingBody::from_scene(&scene)?;
+        if document.drawing.as_ref() == Some(&body) && document.title == title {
+            return Ok(Some(title));
+        }
+        if document.drawing.is_some() {
+            document.updated_at = now_millis().max(document.updated_at.saturating_add(1));
+        }
         document.title.clone_from(&title);
-        document.drawing_markdown = Some(source);
+        document.drawing = Some(body);
         state.persist(document).await?;
         Ok(Some(title))
     }
@@ -987,9 +1030,7 @@ impl Store {
             _ => return Ok(None),
         };
 
-        if (document.board_markdown.is_some() || document.drawing_markdown.is_some())
-            && content.is_some()
-        {
+        if (document.board_markdown.is_some() || document.drawing.is_some()) && content.is_some() {
             return Err(StoreError::WrongDocumentFormat);
         }
 
@@ -1140,7 +1181,12 @@ impl Store {
                     })
                     .map(|entry| entry.filename.as_str());
                 let filename = filenames
-                    .claim(&metadata.title, Some(&metadata.filename), owned)
+                    .claim(
+                        &metadata.title,
+                        metadata.body_suffix(),
+                        Some(&metadata.filename),
+                        owned,
+                    )
                     .await?;
                 copy_document_files(
                     metadata,
@@ -1368,14 +1414,22 @@ impl State {
         let folder = self.folder_for(document.space_id).to_path_buf();
         let old_metadata = self.index.documents.get(&id);
         let old_name = old_metadata.map(|metadata| metadata.filename.as_str());
+        let suffix = document
+            .drawing
+            .as_ref()
+            .map_or(MARKDOWN_SUFFIX, DrawingBody::suffix);
         let filename = match old_metadata {
-            Some(old) if old.title == document.title && old.filename != mirror_filename(id) => {
+            Some(old)
+                if old.title == document.title
+                    && old.body_suffix() == suffix
+                    && old.filename != mirror_filename(id, suffix) =>
+            {
                 old.filename.clone()
             }
             _ => {
                 FilenameSet::read(&folder)
                     .await?
-                    .claim(&document.title, None, old_name)
+                    .claim(&document.title, suffix, None, old_name)
                     .await?
             }
         };
@@ -1385,27 +1439,34 @@ impl State {
         let mut old_body = None;
         let body_changed = self.documents.get(&id).is_none_or(|old| {
             old.board_markdown != document.board_markdown
-                || old.drawing_markdown != document.drawing_markdown
+                || old.drawing != document.drawing
                 || old.content != document.content
         });
         let image_attributes = if body_changed {
-            let body = match document
+            let stored_source = document
                 .board_markdown
-                .as_ref()
-                .or(document.drawing_markdown.as_ref())
-            {
-                Some(source) => markdown::Body {
-                    markdown: source.clone(),
-                    images: BTreeMap::new(),
-                    image_attributes: ImageAttributes::new(),
-                },
-                None => markdown::encode(id, &document.content),
+                .as_deref()
+                .or_else(|| document.drawing.as_ref().map(DrawingBody::source));
+            let (source, images, attributes) = match stored_source {
+                Some(source) => (
+                    Cow::Borrowed(source),
+                    BTreeMap::new(),
+                    ImageAttributes::new(),
+                ),
+                None => {
+                    let body = markdown::encode(id, &document.content);
+                    (
+                        Cow::Owned(body.markdown),
+                        body.images,
+                        body.image_attributes,
+                    )
+                }
             };
             if !new_path {
                 old_body = Some(fs::read(&path).await?);
             }
             let write = async {
-                for (name, bytes) in body.images {
+                for (name, bytes) in images {
                     let image = folder.join(name);
                     if !fs::symlink_metadata(&image)
                         .await
@@ -1416,18 +1477,18 @@ impl State {
                     }
                 }
                 if new_path {
-                    write_new_data_file(&path, body.markdown.as_bytes()).await?;
+                    write_new_data_file(&path, source.as_bytes()).await?;
                     created.push(path.clone());
                     Ok(())
                 } else {
-                    write_data_file(&path, body.markdown.as_bytes()).await
+                    write_data_file(&path, source.as_bytes()).await
                 }
             };
             if let Err(error) = write.await {
                 remove_copies(&created).await;
                 return Err(error.into());
             }
-            body.image_attributes
+            attributes
         } else {
             if new_path {
                 let previous = folder.join(old_name.expect("unchanged document has a body"));
@@ -1450,7 +1511,7 @@ impl State {
             }
             if let Some(bytes) = old_body {
                 if let Err(rollback) = write_data_file(&path, &bytes).await {
-                    eprintln!("could not roll back Markdown save for {id}: {rollback}");
+                    eprintln!("could not roll back document save for {id}: {rollback}");
                     return Err(error.into());
                 }
             }
@@ -1486,11 +1547,15 @@ async fn load_document(
         .await
         .map_err(|error| StoreError::Corrupt {
             path,
-            message: format!("could not read the document's Markdown file: {error}"),
+            message: format!("could not read the document's body file: {error}"),
         })?;
     if metadata.drawing {
         let mut document = metadata.document(id, String::new());
-        document.drawing_markdown = Some(source);
+        document.drawing = Some(if metadata.body_suffix() == DRAWING_SUFFIX {
+            DrawingBody::Json(source)
+        } else {
+            DrawingBody::LegacyMarkdown(source)
+        });
         return Ok(document);
     }
     if metadata.board {
@@ -1537,7 +1602,8 @@ async fn read_index(directory: &Path) -> Result<LibraryIndex, StoreError> {
     let mut filenames = HashSet::new();
     for (&id, metadata) in &index.documents {
         let folder = folder_for(directory, &index.spaces, metadata.space_id);
-        if !valid_filename(&metadata.filename)
+        if !valid_filename(&metadata.filename, metadata.body_suffix())
+            || (metadata.drawing && metadata.board)
             || !filenames.insert((folder, filename_key(&metadata.filename)))
             || metadata
                 .images
@@ -1569,7 +1635,10 @@ async fn read_uuid_markdown_index(
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if let Some(id) = mirror_document_id(Path::new(&name)) {
+        if let Some(id) = name
+            .strip_suffix(MARKDOWN_SUFFIX)
+            .and_then(canonical_document_id)
+        {
             let mut metadata = previous.remove(&id).unwrap_or_else(|| {
                 DocumentMetadata::from_document(
                     &Document::blank(id),
@@ -1607,9 +1676,9 @@ fn folder_for<'a>(
         .unwrap_or(directory)
 }
 
-pub(crate) fn is_backup_index(bytes: &[u8]) -> bool {
-    serde_json::from_slice::<LibraryIndex>(bytes)
-        .is_ok_and(|index| index.version == INDEX_VERSION && index.backup)
+pub(crate) fn parse_backup_index(bytes: &[u8]) -> Option<LibraryIndex> {
+    let index: LibraryIndex = serde_json::from_slice(bytes).ok()?;
+    (index.version == INDEX_VERSION && index.backup).then_some(index)
 }
 
 fn index_bytes(index: &LibraryIndex) -> io::Result<Vec<u8>> {
@@ -1674,10 +1743,14 @@ fn schema_version() -> u32 {
 
 /// Backup bodies use UUID names so the connectors can recognize old copies.
 pub(crate) fn mirror_document_id(path: &Path) -> Option<Uuid> {
-    if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
-        return None;
-    }
-    let stem = path.file_stem()?.to_str()?;
+    let name = path.file_name()?.to_str()?;
+    let stem = name
+        .strip_suffix(MARKDOWN_SUFFIX)
+        .or_else(|| name.strip_suffix(DRAWING_SUFFIX))?;
+    canonical_document_id(stem)
+}
+
+fn canonical_document_id(stem: &str) -> Option<Uuid> {
     let id = Uuid::parse_str(stem).ok()?;
     (id.to_string() == stem).then_some(id)
 }
@@ -1690,8 +1763,8 @@ pub(crate) fn managed_file_id(name: &str) -> Option<Uuid> {
     mirror_document_id(path).or_else(|| markdown::attachment_owner(name))
 }
 
-fn mirror_filename(id: Uuid) -> String {
-    format!("{id}.md")
+fn mirror_filename(id: Uuid, suffix: &str) -> String {
+    format!("{id}{suffix}")
 }
 
 fn document_files_for(metadata: &DocumentMetadata) -> impl Iterator<Item = &str> {
@@ -2197,7 +2270,7 @@ fn summarize(document: &Document, text: &str) -> DocumentSummary {
         space_id: document.space_id,
         title: document.title.clone(),
         board: document.board_markdown.is_some(),
-        drawing: document.drawing_markdown.is_some(),
+        drawing: document.drawing.is_some(),
         excerpt: make_excerpt(text),
         preview,
         word_count: text.split_whitespace().count(),
@@ -3378,19 +3451,19 @@ mod tests {
         let missing_id = Uuid::new_v4();
         let deleted_id = Uuid::new_v4();
         let unindexed_id = Uuid::new_v4();
-        let legacy_body = directory.join(mirror_filename(active_id));
+        let legacy_body = directory.join(mirror_filename(active_id, MARKDOWN_SUFFIX));
         let image = format!("{active_id}-{}.png", "0".repeat(64));
         let body = format!("Original notes.\n\n![Sketch]({image})\n");
         fs::write(&legacy_body, &body).await.unwrap();
         fs::write(directory.join(&image), [0]).await.unwrap();
         fs::write(
-            directory.join(mirror_filename(deleted_id)),
+            directory.join(mirror_filename(deleted_id, MARKDOWN_SUFFIX)),
             "Deleted notes.",
         )
         .await
         .unwrap();
         fs::write(
-            directory.join(mirror_filename(unindexed_id)),
+            directory.join(mirror_filename(unindexed_id, MARKDOWN_SUFFIX)),
             "Unindexed notes.",
         )
         .await
@@ -3581,6 +3654,127 @@ mod tests {
         );
         let summary = reopened.list().await.remove(0);
         assert_eq!(summary.excerpt, "Name Qty Tea 2");
+        fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_legacy_drawing_converts_on_save_and_keeps_its_link() {
+        let directory = temp_directory("drawing-migration");
+        let id = Uuid::new_v4();
+        let legacy = "```grapho-drawing-v1\r\n[[[2,3],[4,5]],[[8,9]]]\r\n```\r\n";
+        let old_path = directory.join("Sketch.md");
+        let occupied_path = directory.join("Sketch.drawing.json");
+        let new_path = directory.join("Sketch (2).drawing.json");
+        let mut document = Document::blank(id);
+        document.title = "Sketch".to_owned();
+        document.drawing = Some(DrawingBody::LegacyMarkdown(legacy.to_owned()));
+        let mut index = LibraryIndex::default();
+        index.documents.insert(
+            id,
+            DocumentMetadata::from_document(
+                &document,
+                "Sketch.md".to_owned(),
+                ImageAttributes::new(),
+            ),
+        );
+        fs::create_dir_all(&directory).await.unwrap();
+        fs::write(&old_path, legacy).await.unwrap();
+        fs::write(&occupied_path, b"unrelated file").await.unwrap();
+        fs::write(directory.join(INDEX_FILE), index_bytes(&index).unwrap())
+            .await
+            .unwrap();
+
+        let store = Store::load(directory.clone()).await.unwrap();
+        let original = store.get(id).await.unwrap();
+        let scene = serde_json::to_value(original.drawing_data(Some(1)).unwrap().unwrap()).unwrap();
+        assert_eq!(fs::read_to_string(&old_path).await.unwrap(), legacy);
+        let old_backup = store.backup_snapshot(None).await.unwrap();
+        let old_backup_index = parse_backup_index(&old_backup.index_bytes(None).unwrap()).unwrap();
+
+        let save = || {
+            store.save_drawing(
+                id,
+                &original.title,
+                serde_json::from_value(scene.clone()).unwrap(),
+                None,
+            )
+        };
+        let blocked = directory.join(".metadata.json.tmp");
+        fs::create_dir(&blocked).await.unwrap();
+        assert!(save().await.is_err());
+        assert_eq!(fs::read_to_string(&old_path).await.unwrap(), legacy);
+        assert!(!new_path.exists());
+        fs::remove_dir(blocked).await.unwrap();
+        assert_eq!(save().await.unwrap().as_deref(), Some("Sketch"));
+        assert!(!old_path.exists());
+        assert_eq!(fs::read(&occupied_path).await.unwrap(), b"unrelated file");
+
+        let reopened = Store::load(directory.clone()).await.unwrap();
+        let restored = reopened.get(id).await.unwrap();
+        assert_eq!(restored.created_at, original.created_at);
+        assert_eq!(
+            serde_json::to_value(restored.drawing_data(Some(1)).unwrap().unwrap()).unwrap(),
+            scene
+        );
+
+        // An unrelated batch keeps the old filename in the backup's index
+        // until the drawing's own batch copies the JSON version.
+        let unrelated = reopened.create().await.unwrap();
+        let snapshot = reopened
+            .backup_snapshot(Some(&HashSet::from([unrelated.id])))
+            .await
+            .unwrap();
+        let mirror =
+            parse_backup_index(&snapshot.index_bytes(Some(&old_backup_index)).unwrap()).unwrap();
+        let old_mirror_name = format!("{id}.md");
+        assert_eq!(mirror.documents[&id].filename, old_mirror_name);
+        assert!(!snapshot.obsolete(&old_mirror_name));
+        let snapshot = reopened
+            .backup_snapshot(Some(&HashSet::from([id])))
+            .await
+            .unwrap();
+        let mirror = parse_backup_index(&snapshot.index_bytes(Some(&mirror)).unwrap()).unwrap();
+        let new_mirror_name = format!("{id}.drawing.json");
+        assert_eq!(mirror.documents[&id].filename, new_mirror_name);
+        let body = fs::read(&new_path).await.unwrap();
+        assert_eq!(snapshot.files[&new_mirror_name], body);
+        assert!(snapshot.obsolete(&old_mirror_name));
+
+        let folder = directory.join("sketches");
+        reopened
+            .save_space(
+                None,
+                Space {
+                    name: "Sketches".to_owned(),
+                    folder: Some(folder.clone()),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+        let space = reopened.spaces().await[0].0;
+        fs::write(
+            folder.join("Sketch (2).drawing.json"),
+            b"another unrelated file",
+        )
+        .await
+        .unwrap();
+        reopened.move_document(id, Some(space)).await.unwrap();
+        assert!(!new_path.exists());
+        assert_eq!(
+            fs::read(folder.join("Sketch.drawing.json")).await.unwrap(),
+            body
+        );
+        assert_eq!(
+            Store::load(directory.clone())
+                .await
+                .unwrap()
+                .get(id)
+                .await
+                .unwrap()
+                .space_id,
+            Some(space)
+        );
         fs::remove_dir_all(directory).await.unwrap();
     }
 

@@ -41,6 +41,9 @@ pub fn find(path: &str) -> Option<Asset> {
         "board-drag.js" => script(include_bytes!("../assets/board-drag.js")),
         "board-markdown.js" => script(include_bytes!("../assets/board-markdown.js")),
         "draw.js" => script(include_bytes!("../assets/draw.js")),
+        "draw-geometry.js" => script(include_bytes!("../assets/draw-geometry.js")),
+        "draw-style.js" => script(include_bytes!("../assets/draw-style.js")),
+        "draw-tools.js" => script(include_bytes!("../assets/draw-tools.js")),
         "quick-open.js" => script(include_bytes!("../assets/quick-open.js")),
         "storage.js" => script(include_bytes!("../assets/storage.js")),
         "version.js" => script(include_bytes!("../assets/version.js")),
@@ -65,12 +68,20 @@ pub fn find(path: &str) -> Option<Asset> {
         "spellcheck/Typo-LICENSE.txt" => {
             plain_text(include_bytes!("../assets/spellcheck/Typo-LICENSE.txt"))
         }
-        "favicon.svg" => Asset {
+        "favicon.ico" => Asset {
             bytes: include_bytes!("../assets/favicon.ico"),
+            content_type: "image/x-icon",
+        },
+        "favicon.svg" => Asset {
+            bytes: include_bytes!("../assets/favicon.svg"),
             content_type: "image/svg+xml",
         },
         "fonts/inter-latin.woff2" => Asset {
             bytes: include_bytes!("../assets/fonts/inter-latin.woff2"),
+            content_type: "font/woff2",
+        },
+        "fonts/kalam-latin.woff2" => Asset {
+            bytes: include_bytes!("../assets/fonts/kalam-latin.woff2"),
             content_type: "font/woff2",
         },
         "fonts/literata-latin.woff2" => Asset {

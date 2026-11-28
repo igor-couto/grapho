@@ -5138,6 +5138,9 @@ async function checkDrawings(cdp, base, dataDir, pressKey) {
   const libraryUrl = base + "/?space=general";
   const pathCount = `document.querySelectorAll("#drawingInk path").length`;
   const saved = `document.getElementById("drawingStatus")?.textContent === "Saved"`;
+  const canvasBackground = `document.getElementById("drawingCanvas").dataset.background`;
+  const selectActive = `document.getElementById("drawingCanvas").dataset.tool === "select"
+    && document.querySelector('#drawingToolbar [aria-pressed="true"]')?.dataset.drawTool === "select"`;
   const eventStart = cdp.events.length;
   function point(x, y) {
     return evaluate(cdp, `(() => {
@@ -5145,7 +5148,36 @@ async function checkDrawings(cdp, base, dataDir, pressKey) {
       return { x: rect.left + rect.width * ${x}, y: rect.top + rect.height * ${y} };
     })()`);
   }
+  function openBackground() {
+    return evaluate(cdp, `(() => {
+      document.getElementById("drawingMore").click();
+      document.querySelector('[data-draw-action="background"]').click();
+    })()`);
+  }
+  function changeBackgroundColors(color, patternColor) {
+    return evaluate(cdp, `(() => {
+      const form = document.querySelector("#drawingBackgroundDialog form");
+      for (const [name, value] of Object.entries(${JSON.stringify({ color, patternColor })})) {
+        const input = form.elements.namedItem(name);
+        input.value = value;
+        input.dispatchEvent(new Event("input"));
+      }
+    })()`);
+  }
+  const fillsViewport = `(() => {
+    const canvas = document.getElementById("drawingCanvas");
+    const bounds = canvas.getBoundingClientRect();
+    const { a, d } = canvas.getScreenCTM();
+    const title = document.getElementById("drawingTitle");
+    const titleBounds = title.getBoundingClientRect();
+    return document.querySelector(".editor-header #drawingToolbar")
+      && Math.abs(titleBounds.left + titleBounds.width / 2 - innerWidth / 2) < 1
+      && getComputedStyle(title).textAlign === "center"
+      && bounds.left === 0 && Math.abs(bounds.right - innerWidth) < 1
+      && Math.abs(bounds.bottom - innerHeight) < 1 && Math.abs(a - d) < 0.001;
+  })()`;
 
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
   await cdp.send("Page.navigate", { url: libraryUrl });
   await waitForExpression(cdp, `document.getElementById("librarySpace")?.value === "general"`, PAGE_TIMEOUT_MS);
   await evaluate(cdp, `(() => {
@@ -5165,23 +5197,49 @@ async function checkDrawings(cdp, base, dataDir, pressKey) {
   const id = await evaluate(cdp, `location.pathname.split("/").at(-1)`);
   const drawingUrl = base + "/doc/" + id + "?space=general";
   const drawingApi = base + "/api/documents/" + id + "/drawing";
+  const getScene = () => fetch(drawingApi + "?scene=true&version=12").then((response) => response.json());
+  check("new drawings start with Select active", await evaluate(cdp, selectActive));
+  check("desktop drawing tools sit in the header above a centered title and full canvas", await evaluate(cdp, fillsViewport));
+  await openBackground();
+  check("a blank drawing offers background choices and focuses Dots by default", await evaluate(cdp, `(() => {
+    const dialog = document.getElementById("drawingBackgroundDialog");
+    return dialog.open && document.activeElement === dialog.querySelector('[value="dots"]')
+      && [...dialog.querySelectorAll('input[name="background"]')].map(input => input.value).join() === "dots,grid,ruled,plain";
+  })()`));
+  await evaluate(cdp, `document.querySelector('#drawingBackgroundDialog [value="plain"]').click()`);
+  await changeBackgroundColors("#123456", "#abcdef");
+  await pressKey("Escape", "Escape", 27);
+  check("dismissing the background dialog preserves the canvas and returns focus to More actions", await evaluate(cdp, `
+    !document.getElementById("drawingBackgroundDialog").open && ${canvasBackground} === "dots"
+    && document.activeElement.id === "drawingMore"`));
+  await pressKey("p", "KeyP", 80);
+  check("the drawing surface and canvas cannot receive focus", await evaluate(cdp, `(() => {
+    const title = document.getElementById("drawingTitle");
+    title.focus();
+    return [...document.querySelectorAll(".drawing-surface, .drawing-canvas")].every(element => {
+      element.focus();
+      return !element.hasAttribute("tabindex") && document.activeElement === title;
+    });
+  })()`));
   equal("the untouched drawing stays a draft", (await fetch(drawingApi)).status, 404);
   const start = await point(0.2, 0.2);
-  const end = await point(0.6, 0.4);
+  const end = await point(0.9, 0.4);
   await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", buttons: 1, clickCount: 1, ...start });
-  await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", buttons: 1, ...end });
+  check("drawing leaves the title field without focusing the canvas", await evaluate(cdp, `document.activeElement === document.body`));
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", button: "left", buttons: 1, ...end });
   check("the mouse stroke appears before it is committed", await evaluate(cdp, `document.querySelector("#drawingInk path")?.getAttribute("d").includes("L")`));
   equal("an in-progress stroke is still a draft", (await fetch(drawingApi)).status, 404);
   await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...end });
   await waitForExpression(cdp, saved, PAGE_TIMEOUT_MS);
-  const original = await fetch(drawingApi).then((response) => response.json());
-  check("the pencil stroke autosaves and the draft becomes a drawing", original.strokes.length === 1
-    && original.strokes[0].length >= 2 && (await evaluate(cdp, "location.href")) === drawingUrl);
+  const original = await getScene();
+  check("the pencil stroke autosaves and the draft becomes a drawing", original.elements.length === 1
+    && original.elements[0].points.length >= 2 && (await evaluate(cdp, "location.href")) === drawingUrl);
+  check("the right side of the desktop canvas accepts ink beyond the old square", original.elements[0].points.at(-1)[0] > 1000);
 
   await pressKey("z", "KeyZ", 90, 2);
   equal("Ctrl+Z undoes the full stroke", await evaluate(cdp, pathCount), 0);
   await waitForExpression(cdp, saved, PAGE_TIMEOUT_MS);
-  equal("undo saves the empty drawing", (await fetch(drawingApi).then((response) => response.json())).strokes.length, 0);
+  equal("undo saves the empty drawing", (await getScene()).elements.length, 0);
   await pressKey("Z", "KeyZ", 90, 10);
   equal("Ctrl+Shift+Z restores the stroke", await evaluate(cdp, pathCount), 1);
   const savedPath = await evaluate(cdp, `document.querySelector("#drawingInk path").getAttribute("d")`);
@@ -5191,17 +5249,94 @@ async function checkDrawings(cdp, base, dataDir, pressKey) {
     title.dispatchEvent(new Event("input"));
   })()`);
   await waitForExpression(cdp, saved, PAGE_TIMEOUT_MS);
-  const disk = await readFile(path.join(dataDir, "Release sketch.md"), "utf8");
-  equal("the drawing title and geometry are saved to disk", disk.split("\n")[1], JSON.stringify(original.strokes));
+  const drawingFile = path.join(dataDir, "Release sketch.drawing.json");
+  const disk = JSON.parse(await readFile(drawingFile, "utf8"));
+  equal("redo saves the original pencil element with the same ID", JSON.stringify(disk.elements), JSON.stringify(original.elements));
+  equal("the drawing file has the current scene version", disk.version, 12);
+
+  await openBackground();
+  await changeBackgroundColors("#254263", "#7cbfe8");
+  check("color changes preview both colors inside the dialog before Apply", await evaluate(cdp, `(() => {
+    const preview = getComputedStyle(document.querySelector('#drawingBackgroundDialog [data-background="grid"]'));
+    return preview.backgroundColor === "rgb(37, 66, 99)" && preview.backgroundImage.includes("rgb(124, 191, 232)")
+      && getComputedStyle(document.getElementById("drawingCanvas")).backgroundColor !== preview.backgroundColor;
+  })()`));
+  await evaluate(cdp, `(() => {
+    const dialog = document.getElementById("drawingBackgroundDialog");
+    dialog.querySelector('[value="grid"]').click();
+    dialog.querySelector('[type="submit"]').click();
+  })()`);
+  const customGrid = `(() => {
+    const style = getComputedStyle(document.getElementById("drawingCanvas"));
+    return ${canvasBackground} === "grid" && style.backgroundColor === "rgb(37, 66, 99)"
+      && style.backgroundImage.includes("rgb(124, 191, 232)");
+  })()`;
+  check("Apply updates the drawing pattern and both colors", await evaluate(cdp, customGrid));
+  await waitForExpression(cdp, saved, PAGE_TIMEOUT_MS);
+  const styledDisk = JSON.parse(await readFile(drawingFile, "utf8"));
+  check("the drawing file stores the selected background and colors", styledDisk.background === "grid"
+    && styledDisk.background_color === "#254263" && styledDisk.pattern_color === "#7cbfe8");
+  await pressKey("z", "KeyZ", 90, 2);
+  check("undo restores the previous pattern and theme colors", await evaluate(cdp, `
+    ${canvasBackground} === "dots" && !getComputedStyle(document.getElementById("drawingCanvas")).getPropertyValue("--drawing-background-color")`));
+  await pressKey("Z", "KeyZ", 90, 10);
+  check("redo reapplies the pattern and colors", await evaluate(cdp, customGrid));
+  equal("changing the background preserves the drawing", await evaluate(cdp, pathCount), 1);
+  await waitForExpression(cdp, saved, PAGE_TIMEOUT_MS);
 
   await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
   await cdp.send("Page.reload");
   await waitForExpression(cdp, `${saved} && innerWidth === 390`, PAGE_TIMEOUT_MS);
+  check("reloading a drawing resets the active tool to Select", await evaluate(cdp, selectActive));
+  await openBackground();
+  check("the saved pattern and colors reopen in a dialog that fits on a phone", await evaluate(cdp, `(() => {
+    const dialog = document.getElementById("drawingBackgroundDialog");
+    const bounds = dialog.getBoundingClientRect();
+    return dialog.open && ${customGrid} && dialog.querySelector('input:checked').value === "grid"
+      && dialog.querySelector('[name="color"]').value === "#254263" && dialog.querySelector('[name="patternColor"]').value === "#7cbfe8"
+      && bounds.left >= 0 && bounds.right <= innerWidth && bounds.top >= 0 && bounds.bottom <= innerHeight;
+  })()`));
+  await evaluate(cdp, `(() => {
+    document.getElementById("drawingBackgroundResetColors").click();
+    document.querySelector('#drawingBackgroundDialog [type="submit"]').click();
+  })()`);
+  await waitForExpression(cdp, saved, PAGE_TIMEOUT_MS);
+  const resetScene = await getScene();
+  check("resetting both colors saves a color-only edit and keeps Grid", resetScene.background === "grid"
+    && resetScene.background_color === undefined && resetScene.pattern_color === undefined);
   equal("the same stroke reopens at 390px", await evaluate(cdp, `document.querySelector("#drawingInk path")?.getAttribute("d")`), savedPath);
+  check("the phone canvas fills the viewport below its header and centered title", await evaluate(cdp, fillsViewport));
+  check("wide desktop ink is visible when reopened on a phone", await evaluate(cdp, `(() => {
+    const stroke = document.querySelector("#drawingInk path").getBoundingClientRect();
+    return stroke.left >= 0 && stroke.right <= innerWidth && stroke.bottom <= innerHeight;
+  })()`));
   check("the drawing fits without horizontal scrolling", await evaluate(cdp, `document.documentElement.scrollWidth === innerWidth`));
+  check("each drawing tool can be tapped at 390px", await evaluate(cdp, `(() => {
+    const buttons = [...document.querySelectorAll("#drawingToolbar [data-draw-tool], #drawingMore, #drawingAddImage")];
+    return buttons.length === 11 && buttons.every((button) => {
+      const { left, top, width, height } = button.getBoundingClientRect();
+      return width > 0 && height > 0 && button.contains(document.elementFromPoint(left + width / 2, top + height / 2));
+    });
+  })()`));
+  check("the arrow style panel opens within the phone viewport", await evaluate(cdp, `(() => {
+    document.querySelector('[data-draw-tool="arrow"]').click();
+    const panel = document.getElementById("drawingStylePanel");
+    const collapsed = panel.hidden;
+    document.getElementById("drawingStyleToggle").click();
+    const box = panel.getBoundingClientRect();
+    const swatch = panel.querySelector('[data-shape-style="stroke"] button');
+    const swatchBox = swatch.getBoundingClientRect();
+    const hit = document.elementFromPoint(swatchBox.left + swatchBox.width / 2, swatchBox.top + swatchBox.height / 2);
+    const showsArrowheads = !document.getElementById("drawingArrowheads").hidden;
+    document.getElementById("drawingStyleToggle").click();
+    document.querySelector('[data-draw-tool="pencil"]').click();
+    return collapsed && showsArrowheads
+      && box.width > 0 && box.left >= 0 && box.right <= innerWidth
+      && box.bottom <= innerHeight && swatch.contains(hit);
+  })()`));
   const touchStart = await point(0.25, 0.55);
-  const touchEnd = await point(0.5, 0.7);
+  const touchEnd = await point(0.5, 0.92);
   await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [touchStart] });
   await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [touchEnd] });
   await cdp.send("Input.dispatchTouchEvent", { type: "touchCancel", touchPoints: [] });
@@ -5211,7 +5346,9 @@ async function checkDrawings(cdp, base, dataDir, pressKey) {
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
   await evaluate(cdp, `document.getElementById("drawingLibraryLink").click()`);
   await waitForPage(cdp, libraryUrl, PAGE_TIMEOUT_MS);
-  equal("returning to the library saves a touch stroke", (await fetch(drawingApi).then((response) => response.json())).strokes.length, 2);
+  const phoneScene = await getScene();
+  equal("returning to the library saves a touch stroke", phoneScene.elements.length, 2);
+  check("the bottom of the phone canvas accepts ink beyond the old square", phoneScene.elements.at(-1).points.at(-1)[1] > 1000);
   const row = `[data-document-id="${id}"]`;
   await waitForExpression(cdp, `document.querySelector('${row}')`, PAGE_TIMEOUT_MS);
   check("the drawing has a pencil icon in the library", await evaluate(cdp, `document.querySelector('${row} .drawing-glyph-icon').getBoundingClientRect().width > 0`));
@@ -5223,10 +5360,637 @@ async function checkDrawings(cdp, base, dataDir, pressKey) {
   check("turning off Draw hides the creation option", await evaluate(cdp, `!document.getElementById("newDocument").hasAttribute("aria-haspopup")`));
   await cdp.send("Page.navigate", { url: drawingUrl });
   await waitForExpression(cdp, `${saved} && ${pathCount} === 2`, PAGE_TIMEOUT_MS);
+  await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  await waitForExpression(cdp, `(() => {
+    const canvas = document.getElementById("drawingCanvas");
+    const { width, height } = canvas.getBoundingClientRect();
+    const view = canvas.viewBox.baseVal;
+    return innerWidth === 1280 && Math.abs(view.width / view.height - width / height) < 0.001;
+  })()`, PAGE_TIMEOUT_MS);
+  await checkDrawingTools(cdp, pressKey, getScene, saved, dataDir);
+  await cdp.send("Emulation.clearDeviceMetricsOverride");
   check("browser reports no Draw script errors or policy violations", !cdp.events.slice(eventStart).some(({ method, params }) =>
     method === "Runtime.exceptionThrown" || (method === "Log.entryAdded" && params.entry.source === "security")));
+}
+
+async function checkDrawingTools(cdp, pressKey, getScene, saved, dataDir) {
+  function choose(tool) {
+    return evaluate(cdp, `document.querySelector('[data-draw-tool="${tool}"]').click()`);
+  }
+  async function gesture(from, to = from, modifiers = 0) {
+    const [start, end] = await evaluate(cdp, `(() => {
+      const matrix = document.getElementById("drawingCanvas").getScreenCTM();
+      return ${JSON.stringify([from, to])}.map(([x, y]) => {
+        const point = new DOMPoint(x, y).matrixTransform(matrix);
+        return { x: point.x, y: point.y };
+      });
+    })()`);
+    await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", buttons: 1, clickCount: 1, modifiers, ...start });
+    if (to !== from) await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", button: "left", buttons: 1, modifiers, ...end });
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, modifiers, ...end });
+  }
+  async function savedElements() {
+    await waitForExpression(cdp, saved, PAGE_TIMEOUT_MS);
+    return (await getScene()).elements;
+  }
+  function closeTo(actual, expected) {
+    return actual?.length === 2 && actual.every((coordinate, index) => Math.abs(coordinate - expected[index]) <= 4);
+  }
+
+  const shapes = [
+    ["rectangle", [40, 60], [180, 140]],
+    ["diamond", [290, 80], [470, 170]],
+    ["ellipse", [540, 80], [680, 170]],
+    ["arrow", [750, 90], [930, 160]],
+    ["line", [870, 340], [740, 260]],
+  ];
+  for (const [type, start, end] of shapes) {
+    await choose(type);
+    if (type === "rectangle") {
+      await evaluate(cdp, `if (!document.getElementById("drawingStylePanel").hidden) document.getElementById("drawingStyleToggle").click()`);
+    }
+    await gesture(start, end);
+  }
+  const scene = await savedElements();
+  for (const [type, start, end] of shapes) {
+    const shape = scene.find((element) => element.type === type);
+    check(`the ${type} tool saves both endpoints`, closeTo(shape?.start, start) && closeTo(shape?.end, end), JSON.stringify(shape));
+  }
+
+  await choose("rectangle");
+  await gesture([20, 820], [160, 880], 8); // Shift
+  const square = (await savedElements()).at(-1);
+  check("holding Shift constrains a rectangle to a square", square?.type === "rectangle"
+    && square.end[0] - square.start[0] === square.end[1] - square.start[1]);
+  await pressKey("z", "KeyZ", 90, 2);
+  await pressKey("v", "KeyV", 86);
+  equal("V activates Select", await evaluate(cdp, `document.querySelector('[data-draw-tool="select"]').getAttribute("aria-pressed")`), "true");
+  await gesture([270, 60], [700, 180]);
+  await pressKey("Delete", "Delete", 46);
+  equal("a marquee selects the enclosed shapes for deletion", JSON.stringify(await savedElements()),
+    JSON.stringify(scene.filter(({ type }) => type !== "ellipse" && type !== "diamond")));
+  await pressKey("z", "KeyZ", 90, 2);
+  await gesture([120, 100], [180, 225]);
+  const rectangleId = scene.find((element) => element.type === "rectangle")?.id;
+  const moved = (await savedElements()).find((element) => element.id === rectangleId);
+  check("dragging inside a rectangle moves both corners with its ID intact",
+    closeTo(moved?.start, [100, 185]) && closeTo(moved?.end, [240, 265]), JSON.stringify(moved));
+  await gesture([240, 265], [265, 305]);
+  const resized = (await savedElements()).find((element) => element.id === rectangleId);
+  check("dragging a selected corner resizes only that corner",
+    closeTo(resized?.start, [100, 185]) && closeTo(resized?.end, [265, 305]), JSON.stringify(resized));
+  await pressKey("z", "KeyZ", 90, 2);
+  equal("undo restores the rectangle before resizing", JSON.stringify((await savedElements()).find((element) => element.id === rectangleId)), JSON.stringify(moved));
+
+  await choose("text");
+  await gesture([720, 820]);
+  await waitForExpression(cdp, `document.activeElement?.id === "drawingTextEditor"`, PAGE_TIMEOUT_MS);
+  const oversizedLabel = ["Wide label ".repeat(48), ...Array(95).fill("More text")].join("\n");
+  await cdp.send("Input.insertText", { text: oversizedLabel });
+  const textHasNoOutline = `getComputedStyle(document.getElementById("drawingTextEditor")).outlineStyle === "none"
+    && !document.querySelector("#drawingSelection .drawing-selection-box")`;
+  check("typing a drawing label shows no selection outline", await evaluate(cdp, textHasNoOutline));
+  const textEditor = await evaluate(cdp, `(() => {
+    const editor = document.getElementById("drawingTextEditor");
+    editor.scrollLeft = 100;
+    editor.scrollTop = 100;
+    return {
+      scrollLeft: editor.scrollLeft, scrollTop: editor.scrollTop,
+      horizontalGutter: editor.offsetHeight - editor.clientHeight,
+      verticalGutter: editor.offsetWidth - editor.clientWidth,
+      scrollbarWidth: getComputedStyle(editor).scrollbarWidth,
+    };
+  })()`);
+  check("oversized drawing text stays scrollable without visible scrollbars",
+    textEditor.scrollLeft > 0 && textEditor.scrollTop > 0 && textEditor.horizontalGutter === 0
+    && textEditor.verticalGutter === 0 && textEditor.scrollbarWidth === "none", JSON.stringify(textEditor));
+  await pressKey("a", "KeyA", 65, 2);
+  await cdp.send("Input.insertText", { text: "First line\nSecond line" });
+  await pressKey("Enter", "Enter", 13, 2);
+  const label = (await savedElements()).find((element) => element.type === "text");
+  check("the text tool saves an editable multiline label", label?.text === "First line\nSecond line" && closeTo(label.at, [720, 820]), JSON.stringify(label));
+  await choose("text");
+  await gesture([730, 830]);
+  await waitForExpression(cdp, `document.activeElement?.id === "drawingTextEditor"`, PAGE_TIMEOUT_MS);
+  await pressKey("a", "KeyA", 65, 2);
+  await cdp.send("Input.insertText", { text: "Revised label" });
+  await pressKey("Enter", "Enter", 13, 2);
+  const beforeErase = await savedElements();
+  equal("editing a label preserves its identity", beforeErase.find((element) => element.id === label?.id)?.text, "Revised label");
+
+  await choose("select");
+  await gesture([730, 830]);
+  check("selecting a drawing label shows its selection outline", await evaluate(cdp, `
+    Number(document.querySelector("#drawingSelection .drawing-selection-box")?.getAttribute("x")) === ${label.at[0]}`));
+
+  await choose("eraser");
+  await gesture([275, 125], [710, 125]);
+  const erased = await savedElements();
+  equal("one eraser sweep removes both intersected shapes",
+    JSON.stringify(erased), JSON.stringify(beforeErase.filter(({ type }) => type !== "ellipse" && type !== "diamond")));
+  await pressKey("z", "KeyZ", 90, 2);
+  equal("one undo restores the complete eraser sweep", JSON.stringify(await savedElements()), JSON.stringify(beforeErase));
+  await pressKey("Z", "KeyZ", 90, 10);
+  equal("redo repeats the erase", JSON.stringify(await savedElements()), JSON.stringify(erased));
+
+  await cdp.send("Page.reload");
+  const renderedIds = `[...document.querySelectorAll("#drawingInk [data-element-id]")].map((element) => element.dataset.elementId)`;
+  await waitForExpression(cdp, `${saved} && ${renderedIds}.length > 0`, PAGE_TIMEOUT_MS);
+  equal("a mixed drawing reopens with the saved objects in order", JSON.stringify(await evaluate(cdp, renderedIds)), JSON.stringify(erased.map(({ id }) => id)));
+  equal("a reopened text object renders its edited label", await evaluate(cdp, `document.querySelector("#drawingInk text")?.textContent`), "Revised label");
+  async function moreAction(action) {
+    await evaluate(cdp, `document.getElementById("drawingMore").click()`);
+    await evaluate(cdp, `document.querySelector('[data-draw-action="${action}"]').click()`);
+  }
+  await moreAction("select-all");
+  await moreAction("duplicate");
+  const copies = await savedElements();
+  check("duplicating a selection gives each new object its own ID", copies.length === erased.length * 2
+    && new Set(copies.map(({ id }) => id)).size === copies.length);
+  await moreAction("delete");
+  equal("Delete removes only the selected copies", JSON.stringify(await savedElements()), JSON.stringify(erased));
+
+  await choose("ellipse");
+  await evaluate(cdp, `if (document.getElementById("drawingStylePanel").hidden) document.getElementById("drawingStyleToggle").click()`);
+  check("ellipse style omits corner controls", await evaluate(cdp,
+    `!document.getElementById("drawingStylePanel").hidden && document.getElementById("drawingStyleEdges").hidden`));
+  await choose("diamond");
+  check("diamond style includes corner controls", await evaluate(cdp, `!document.getElementById("drawingStyleEdges").hidden`));
+  await choose("rectangle");
+  const styleButton = (group, label) => evaluate(cdp,
+    `document.querySelector('[data-shape-style="${group}"] [aria-label="${label}"]').click()`);
+  await styleButton("stroke", "Blue");
+  await styleButton("fill", "Amber");
+  await styleButton("width", "Thick");
+  await styleButton("pattern", "Dotted");
+  await styleButton("roughness", "Sketchy");
+  await styleButton("edges", "Rounded corners");
+  await gesture([950, 550], [1200, 700]);
+  const styled = (await savedElements()).at(-1);
+  check("a new shape inherits the style panel choices", styled.type === "rectangle"
+    && styled.style?.stroke === "#307bd2" && styled.style.fill === "#f0c879"
+    && styled.style.width === 3 && styled.style.pattern === "dotted"
+    && styled.style.roughness === 1 && styled.style.edges === "rounded", JSON.stringify(styled));
+
+  await choose("select");
+  await gesture([1100, 620]);
+  await evaluate(cdp, `(() => {
+    const slider = document.getElementById("drawingStyleOpacity");
+    slider.value = 45;
+    slider.dispatchEvent(new Event("input"));
+    slider.dispatchEvent(new Event("change"));
+  })()`);
+  await styleButton("layers", "Send to back");
+  const restyled = (await savedElements())[0];
+  check("opacity and layer edits save on the selected shape", restyled.id === styled.id && restyled.style?.opacity === 45);
+  await pressKey("z", "KeyZ", 90, 2);
+  equal("undo restores the preceding layer order", (await savedElements()).at(-1).id, styled.id);
+  await cdp.send("Page.reload");
+  await waitForExpression(cdp, saved, PAGE_TIMEOUT_MS);
+  check("the saved SVG shape renders its stroke, fill, dash pattern and opacity", await evaluate(cdp, `(() => {
+    const shape = document.querySelector('[data-element-id="${styled.id}"]');
+    return shape?.tagName === "path" && shape.getAttribute("d").includes("Q")
+      && shape.getAttribute("d").includes("C") && shape.getAttribute("stroke") === "#307bd2"
+      && shape.getAttribute("fill") === "#f0c879" && shape.getAttribute("stroke-dasharray") === "0 12.5"
+      && shape.getAttribute("opacity") === "0.45";
+  })()`));
+
+  await pressKey("a", "KeyA", 65);
+  check("A opens the arrow panel with route and arrowheads", await evaluate(cdp, `(() => {
+    return !document.getElementById("drawingStylePanel").hidden
+      && !document.getElementById("drawingArrowType").hidden
+      && !document.getElementById("drawingArrowheads").hidden
+      && document.getElementById("drawingStyleBackground").hidden
+      && document.getElementById("drawingStyleEdges").hidden;
+  })()`));
+  const chooseHead = (end, value) => evaluate(cdp, `(() => {
+    const select = document.querySelector('[data-arrowhead="${end}_head"]');
+    select.value = "${value}";
+    select.dispatchEvent(new Event("change"));
+  })()`);
+  await styleButton("route", "Elbow arrow");
+  await styleButton("stroke", "Red");
+  await styleButton("pattern", "Dashed");
+  await chooseHead("start", "triangle");
+  await chooseHead("end", "bar");
+  await gesture([850, 430], [1200, 610]);
+  const arrow = (await savedElements()).at(-1);
+  check("new arrows save their route, style, and independent endpoints", arrow.type === "arrow"
+    && arrow.style?.route === "elbow" && arrow.style.start_head === "triangle" && arrow.style.end_head === "bar"
+    && arrow.style.stroke === "#d94b58" && arrow.style.pattern === "dashed", JSON.stringify(arrow));
+  await choose("select");
+  await gesture([990, 430]);
+  await chooseHead("end", "none");
+  const updatedArrow = (await savedElements()).find(({ id }) => id === arrow.id);
+  check("selecting the elbow route allows editing its arrowheads", updatedArrow?.style?.end_head === "none");
+  await cdp.send("Page.reload");
+  await waitForExpression(cdp, saved, PAGE_TIMEOUT_MS);
+  check("styled arrows render their stored route and endpoints on reload", await evaluate(cdp, `(() => {
+    const arrow = document.querySelector('[data-element-id="${arrow.id}"]');
+    const [shaft, heads] = arrow?.children ?? [];
+    return shaft?.getAttribute("d").split("L").length === 4
+      && heads?.getAttribute("d").split("M").length === 2
+      && arrow.getAttribute("stroke") === "#d94b58";
+  })()`));
+
+  await pressKey("l", "KeyL", 76);
+  check("L opens the line panel with Background and Edges", await evaluate(cdp, `(() => {
+    return !document.getElementById("drawingStylePanel").hidden
+      && !document.getElementById("drawingStyleBackground").hidden
+      && !document.getElementById("drawingStyleEdges").hidden
+      && document.getElementById("drawingArrowType").hidden;
+  })()`));
+  await styleButton("stroke", "Blue");
+  await styleButton("fill", "Amber");
+  await styleButton("edges", "Rounded corners");
+  await gesture([790, 570]);
+  await gesture([1060, 570]);
+  await gesture([1060, 780]);
+  await gesture([790, 570]);
+  const closedLine = (await savedElements()).at(-1);
+  check("clicking the first point closes a styled line", closedLine.type === "line" && closedLine.closed
+    && closedLine.vertices.length === 1 && closeTo(closedLine.vertices[0], [1060, 570])
+    && closedLine.style?.edges === "rounded" && closedLine.style.fill === "#f0c879", JSON.stringify(closedLine));
+  await gesture([730, 910]);
+  await gesture([940, 880]);
+  await gesture([1130, 910]);
+  await pressKey("Enter", "Enter", 13);
+  const openLine = (await savedElements()).at(-1);
+  check("Enter finishes an open line with its intermediate point", openLine.id !== closedLine.id
+    && !!openLine.vertices?.length && !openLine.closed);
+  await gesture([720, 840]);
+  await gesture([840, 850]);
+  await pressKey("Escape", "Escape", 27);
+  equal("Escape discards unfinished line segments", (await savedElements()).at(-1).id, openLine.id);
+  await cdp.send("Page.reload");
+  await waitForExpression(cdp, saved, PAGE_TIMEOUT_MS);
+  check("only the closed line paints its saved background on reload", await evaluate(cdp, `(() => {
+    const closed = document.querySelector('[data-element-id="${closedLine.id}"]');
+    const open = document.querySelector('[data-element-id="${openLine.id}"]');
+    return closed?.getAttribute("fill") === "#f0c879" && closed.getAttribute("d").endsWith("Z")
+      && closed.getAttribute("stroke-linejoin") === "round"
+      && open && !open.hasAttribute("fill") && !open.getAttribute("d").endsWith("Z");
+  })()`));
+  await choose("select");
+  await gesture([1060, 620]);
+  await gesture([1060, 570], [1120, 600]);
+  const editedLine = (await savedElements()).find(({ id }) => id === closedLine.id);
+  check("dragging a line handle edits its intermediate vertex", closeTo(editedLine?.vertices?.[0], [1120, 600]));
+
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+  await waitForExpression(cdp, "innerWidth === 390", PAGE_TIMEOUT_MS);
+  await choose("line");
+  const touchPoints = await evaluate(cdp, `(() => {
+    const box = document.getElementById("drawingCanvas").getBoundingClientRect();
+    return [[0.52, 0.2], [0.83, 0.2], [0.8, 0.44], [0.52, 0.2]].map(([x, y]) => ({
+      x: box.left + x * box.width, y: box.top + y * box.height,
+    }));
+  })()`);
+  for (const touchPoint of touchPoints) {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [touchPoint] });
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  }
+  const mobileLine = (await savedElements()).at(-1);
+  check("touch taps close a line at 390px", mobileLine.id !== openLine.id && mobileLine.closed === true);
   await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
-  await cdp.send("Emulation.clearDeviceMetricsOverride");
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  await waitForExpression(cdp, `(() => {
+    const canvas = document.getElementById("drawingCanvas");
+    const bounds = canvas.getBoundingClientRect();
+    return innerWidth === 1280 && Math.abs(bounds.width / bounds.height - canvas.viewBox.baseVal.width / canvas.viewBox.baseVal.height) < 0.001;
+  })()`, PAGE_TIMEOUT_MS);
+  await pressKey("p", "KeyP", 80);
+  check("P opens the pencil panel with Pressure and Background", await evaluate(cdp, `(() => {
+    return !document.getElementById("drawingStylePanel").hidden
+      && !document.getElementById("drawingStylePressure").hidden
+      && !document.getElementById("drawingStyleBackground").hidden
+      && document.getElementById("drawingStyleLayers").hidden
+      && document.getElementById("drawingStylePattern").hidden;
+  })()`));
+  await styleButton("stroke", "Red");
+  await styleButton("fill", "Amber");
+  await styleButton("width", "Thick");
+  await styleButton("pressure", "Pressure sensitive");
+  await evaluate(cdp, `(() => {
+    const slider = document.getElementById("drawingStyleOpacity");
+    slider.value = 65;
+    slider.dispatchEvent(new Event("change"));
+  })()`);
+  async function tracePencil(points, pointerType) {
+    const eventPoints = await evaluate(cdp, `(() => {
+      const matrix = document.getElementById("drawingCanvas").getScreenCTM();
+      return ${JSON.stringify(points)}.map(([x, y, force]) => {
+        const p = new DOMPoint(x, y).matrixTransform(matrix);
+        return { x: p.x, y: p.y, force };
+      });
+    })()`);
+    for (const [index, point] of eventPoints.entries()) {
+      const type = index === 0 ? "mousePressed" : "mouseMoved";
+      await cdp.send("Input.dispatchMouseEvent", { type, button: "left", buttons: 1, pointerType, ...point });
+    }
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseReleased", button: "left", pointerType, ...eventPoints.at(-1), force: 0,
+    });
+    return (await savedElements()).at(-1);
+  }
+  const pen = await tracePencil([[990, 310, 0.14], [1100, 310, 0.25], [1100, 480, 0.9], [1020, 500, 0.85]], "pen");
+  check("the pencil saves pen pressure samples and its style", pen.type === "pencil" && pen.style?.pressure === "variable"
+    && pen.style.stroke === "#d94b58" && pen.style.fill === "#f0c879" && pen.style.width === 3 && pen.style.opacity === 65
+    && pen.pressures.length === pen.points.length && pen.pressures[0] < 60 && pen.pressures.at(-1) > 190, JSON.stringify(pen));
+  const mouse = await tracePencil([[850, 710], [858, 710], [1020, 735], [1040, 755]], "mouse");
+  check("mouse strokes fall back to varying pressure", mouse.pressures?.length === mouse.points.length
+    && new Set(mouse.pressures).size > 1, JSON.stringify(mouse));
+  await cdp.send("Page.reload");
+  await waitForExpression(cdp, saved, PAGE_TIMEOUT_MS);
+  check("pencil pressure and background both render after reload", await evaluate(cdp, `(() => {
+    const stroke = document.querySelector('[data-element-id="${pen.id}"]');
+    const [background, outline] = stroke?.children ?? [];
+    const radii = [...(outline?.getAttribute("d") ?? "").matchAll(/A([0-9.]+)/g)].map(match => Number(match[1]));
+    return background?.getAttribute("fill") === "#f0c879" && outline?.getAttribute("fill") === "#d94b58"
+      && outline.getAttribute("stroke") === "none" && radii[0] > radii[1] * 1.5
+      && stroke.getAttribute("opacity") === "0.65";
+  })()`));
+  await choose("select");
+  await gesture([1070, 400]);
+  await styleButton("pressure", "Uniform pressure");
+  const uniform = (await savedElements()).find(({ id }) => id === pen.id);
+  check("selected strokes can switch to uniform width and retain their pressure samples",
+    uniform?.type === "pencil" && uniform.style?.pressure === undefined && Array.isArray(pen.pressures)
+    && JSON.stringify(uniform.pressures) === JSON.stringify(pen.pressures));
+
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+  await waitForExpression(cdp, "innerWidth === 390", PAGE_TIMEOUT_MS);
+  await choose("pencil");
+  await evaluate(cdp, `document.getElementById("drawingStyleToggle").click()`);
+  check("the pencil pressure controls fit at 390px", await evaluate(cdp, `(() => {
+    const controls = document.getElementById("drawingStylePressure").getBoundingClientRect();
+    return controls.width > 0 && controls.right <= innerWidth && controls.bottom <= innerHeight;
+  })()`));
+  await styleButton("pressure", "Pressure sensitive");
+  await evaluate(cdp, `document.getElementById("drawingStyleToggle").click()`);
+  const touchStroke = await evaluate(cdp, `(() => {
+    const box = document.getElementById("drawingCanvas").getBoundingClientRect();
+    return [[0.45, 0.7], [0.48, 0.7], [0.85, 0.75]].map(([x, y]) => ({
+      x: box.left + x * box.width, y: box.top + y * box.height,
+    }));
+  })()`);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [touchStroke[0]] });
+  for (const point of touchStroke.slice(1)) {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [point] });
+  }
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  const touchPencil = (await savedElements()).at(-1);
+  check("touch strokes also fall back to varying pressure", touchPencil.id !== mouse.id
+    && touchPencil.style?.pressure === "variable" && new Set(touchPencil.pressures).size > 1);
+  await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  await waitForExpression(cdp, `(() => {
+    const canvas = document.getElementById("drawingCanvas");
+    const bounds = canvas.getBoundingClientRect();
+    return innerWidth === 1280 && Math.abs(bounds.width / bounds.height - canvas.viewBox.baseVal.width / canvas.viewBox.baseVal.height) < 0.001;
+  })()`, PAGE_TIMEOUT_MS);
+  await pressKey("t", "KeyT", 84);
+  await evaluate(cdp, `if (document.getElementById("drawingStylePanel").hidden) document.getElementById("drawingStyleToggle").click()`);
+  check("T offers exactly Hand-drawn, Normal, and Code", await evaluate(cdp, `(() => {
+    const presets = [...document.querySelectorAll('[data-shape-style="font_family"] button')];
+    return !document.getElementById("drawingTextFamily").hidden
+      && document.getElementById("drawingStyleWidth").hidden
+      && presets.map(button => button.getAttribute("aria-label")).join() === "Hand-drawn,Normal,Code";
+  })()`));
+  await styleButton("font_family", "Hand-drawn");
+  await styleButton("font_size", "Extra large");
+  await styleButton("text_align", "Align center");
+  await styleButton("stroke", "Blue");
+  await gesture([870, 240]);
+  await cdp.send("Input.insertText", { text: "Engineering sketch\nDraft" });
+  const codePreset = await evaluate(cdp, `(() => {
+    const box = document.querySelector('[data-shape-style="font_family"] [aria-label="Code"]').getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  })()`);
+  await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", buttons: 1, clickCount: 1, ...codePreset });
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...codePreset });
+  check("switching fonts while typing keeps the label open in the chosen preset", await evaluate(cdp, `(() => {
+    const editor = document.getElementById("drawingTextEditor");
+    return !editor.hidden && editor.style.fontFamily.includes("monospace") && editor.style.textAlign === "center"
+      && editor.value === "Engineering sketch\\nDraft";
+  })()`));
+  await styleButton("font_family", "Hand-drawn");
+  await evaluate(cdp, `(() => {
+    const slider = document.getElementById("drawingStyleOpacity");
+    slider.value = 60;
+    slider.dispatchEvent(new Event("input"));
+    slider.dispatchEvent(new Event("change"));
+  })()`);
+  await evaluate(cdp, `document.getElementById("drawingTextEditor").focus()`);
+  await pressKey("Enter", "Enter", 13, 2);
+  const styledText = (await savedElements()).at(-1);
+  check("text saves its font, size, alignment and color", styledText.type === "text"
+    && styledText.style?.font_family === "hand_drawn" && styledText.style.font_size === "xl"
+    && styledText.style.text_align === "center" && styledText.style.stroke === "#307bd2"
+    && styledText.style.opacity === 60, JSON.stringify(styledText));
+  await choose("select");
+  await gesture([880, 250]);
+  await styleButton("layers", "Send to back");
+  equal("selected text can move behind the other layers", (await savedElements())[0].id, styledText.id);
+  await cdp.send("Page.reload");
+  await waitForExpression(cdp, saved, PAGE_TIMEOUT_MS);
+  await evaluate(cdp, `document.fonts.load("60px Kalam").then(() => true)`);
+  check("the bundled font and center alignment render after reload", await evaluate(cdp, `(() => {
+    const text = document.querySelector('[data-element-id="${styledText.id}"]');
+    return text?.getAttribute("font-family").includes("Kalam") && text.getAttribute("font-size") === "60"
+      && text.getAttribute("fill") === "#307bd2" && text.getAttribute("text-anchor") === "middle"
+      && text.getAttribute("opacity") === "0.6"
+      && text.children.length === 2 && Number(text.firstElementChild.getAttribute("x")) > ${styledText.at[0]}
+      && [...document.fonts].some(font => font.family === "Kalam" && font.status === "loaded");
+  })()`));
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await waitForExpression(cdp, "innerWidth === 390", PAGE_TIMEOUT_MS);
+  await choose("text");
+  check("all three font presets are reachable at 390px", await evaluate(cdp, `(() => {
+    document.getElementById("drawingStyleToggle").click();
+    const buttons = [...document.querySelectorAll('[data-shape-style="font_family"] button')];
+    return document.documentElement.scrollWidth === innerWidth && buttons.length === 3 && buttons.every(button => {
+      const box = button.getBoundingClientRect();
+      return box.width > 0 && button.contains(document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2));
+    });
+  })()`));
+
+  const photo = await evaluate(cdp, `(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 240;
+    canvas.height = 120;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#f0c879";
+    ctx.fillRect(0, 0, 240, 120);
+    ctx.fillStyle = "#307bd2";
+    ctx.fillRect(30, 30, 180, 60);
+    return canvas.toDataURL("image/png");
+  })()`);
+  const photoPath = path.join(dataDir, "drawing-photo.png");
+  await writeFile(photoPath, Buffer.from(photo.split(",")[1], "base64"));
+  await cdp.send("Page.setInterceptFileChooserDialog", { enabled: true });
+  try {
+    const start = cdp.events.length;
+    await evaluate(cdp, `document.getElementById("drawingTitle").focus()`);
+    await pressKey("i", "KeyI", 73);
+    check("I leaves the file picker closed while editing the drawing title",
+      !cdp.events.slice(start).some(e => e.method === "Page.fileChooserOpened"));
+    await evaluate(cdp, `document.getElementById("drawingTitle").blur()`);
+    await pressKey("i", "KeyI", 73);
+    const { root } = await cdp.send("DOM.getDocument", { depth: 0 });
+    const { nodeId } = await cdp.send("DOM.querySelector", { nodeId: root.nodeId, selector: "#drawingImageInput" });
+    check("I opens the drawing image picker at 390px", cdp.events.slice(start).some(e => e.method === "Page.fileChooserOpened"));
+    await cdp.send("DOM.setFileInputFiles", { nodeId, files: [photoPath] });
+    await waitForExpression(cdp, `document.querySelector('#drawingInk [data-type="image"]')`, PAGE_TIMEOUT_MS);
+  } finally {
+    await cdp.send("Page.setInterceptFileChooserDialog", { enabled: false });
+  }
+  const inserted = (await savedElements()).at(-1);
+  check("the picked photo is embedded and placed in the center", inserted.type === "image"
+    && inserted.src === photo && inserted.alt === "drawing photo" && await evaluate(cdp, `(() => {
+      const canvas = document.getElementById("drawingCanvas").viewBox.baseVal;
+      const image = document.querySelector('#drawingInk [data-type="image"]').getBBox();
+      return Math.abs(image.x + image.width / 2 - canvas.width / 2) < 2
+        && Math.abs(image.y + image.height / 2 - canvas.height / 2) < 2
+        && Math.abs(image.width / image.height - 2) < 0.02;
+    })()`), JSON.stringify({ start: inserted.start, end: inserted.end }));
+  await pressKey("z", "KeyZ", 90, 2);
+  check("undo removes an inserted image", !(await savedElements()).some(item => item.id === inserted.id));
+  await pressKey("Z", "KeyZ", 90, 10);
+  check("redo restores the same image", (await savedElements()).some(item => item.id === inserted.id && item.src === photo));
+  const center = inserted.start.map((value, i) => (value + inserted.end[i]) / 2);
+  await gesture(center, [center[0] + 25, center[1] + 40]);
+  const movedImage = (await savedElements()).at(-1);
+  check("the image moves like other drawing objects", closeTo(movedImage.start, [inserted.start[0] + 25, inserted.start[1] + 40]));
+  await gesture(movedImage.end, [movedImage.end[0] + 75, movedImage.end[1] + 30]);
+  const resizedImage = (await savedElements()).at(-1);
+  const [imageWidth, imageHeight] = resizedImage.end.map((value, i) => value - resizedImage.start[i]);
+  check("corner resizing keeps the image's aspect ratio", imageWidth > movedImage.end[0] - movedImage.start[0]
+    && Math.abs(imageWidth / imageHeight - 2) < 0.03);
+  await cdp.send("Page.reload");
+  await waitForExpression(cdp, saved, PAGE_TIMEOUT_MS);
+  check("the image reopens with the same pixels and size", await evaluate(cdp, `(() => {
+    const image = document.querySelector('[data-element-id="${inserted.id}"]');
+    return image?.getAttribute("href") === ${JSON.stringify(photo)}
+      && Number(image.getAttribute("width")) === ${imageWidth}
+      && Number(image.getAttribute("height")) === ${imageHeight};
+  })()`));
+
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  await waitForExpression(cdp, `(() => {
+    const canvas = document.getElementById("drawingCanvas");
+    const { width, height } = canvas.getBoundingClientRect();
+    return innerWidth === 1280 && Math.abs(width / height - canvas.viewBox.baseVal.width / canvas.viewBox.baseVal.height) < 0.001;
+  })()`, PAGE_TIMEOUT_MS);
+  await choose("select");
+  const beforePan = await savedElements();
+  const screenPicture = `(() => {
+    const { x, y } = document.querySelector('[data-element-id="${inserted.id}"]').getBoundingClientRect();
+    return [x, y];
+  })()`;
+  const originalPosition = await evaluate(cdp, screenPicture);
+  const { x, y } = await evaluate(cdp, `(() => {
+    const box = document.getElementById("drawingCanvas").getBoundingClientRect();
+    return { x: box.left + 300, y: box.top + 150 };
+  })()`);
+  await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "middle", buttons: 4, clickCount: 1, x, y });
+  check("middle press shows the grabbing hand", await evaluate(cdp, `getComputedStyle(document.getElementById("drawingCanvas")).cursor === "grabbing"`));
+  const end = { x: x + 100, y: y + 60 };
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", button: "middle", buttons: 4, ...end });
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "middle", clickCount: 1, ...end });
+  check("middle drag pans the image with the canvas", closeTo(await evaluate(cdp, screenPicture), [originalPosition[0] + 100, originalPosition[1] + 60]));
+  check("releasing middle restores the tool cursor without adding an undo step", await evaluate(cdp, `
+    getComputedStyle(document.getElementById("drawingCanvas")).cursor === "default" && document.getElementById("drawingUndo").disabled`));
+  equal("panning leaves the saved objects unchanged", JSON.stringify(await savedElements()), JSON.stringify(beforePan));
+  const cameraAtPointer = `(() => {
+    const canvas = document.getElementById("drawingCanvas");
+    const view = canvas.viewBox.baseVal;
+    const anchor = new DOMPoint(${x}, ${y}).matrixTransform(canvas.getScreenCTM().inverse());
+    return { x: view.x, y: view.y, width: view.width, anchor: [anchor.x, anchor.y] };
+  })()`;
+  const initialCamera = await evaluate(cdp, cameraAtPointer);
+  const wheel = (deltaX, deltaY) => cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX, deltaY });
+  await wheel(0, -120);
+  await waitForExpression(cdp, `${cameraAtPointer}.width < ${initialCamera.width}`, PAGE_TIMEOUT_MS);
+  const zoomed = await evaluate(cdp, cameraAtPointer);
+  check("wheel up zooms in around the pointer", initialCamera.anchor.every((value, index) => Math.abs(value - zoomed.anchor[index]) < 0.02));
+  await wheel(0, 120);
+  await waitForExpression(cdp, `Math.abs(${cameraAtPointer}.width - ${initialCamera.width}) < 0.02`, PAGE_TIMEOUT_MS);
+  const zoomedOut = await evaluate(cdp, cameraAtPointer);
+  check("wheel down zooms out around the same pointer", initialCamera.anchor.every((value, index) =>
+    Math.abs(value - zoomedOut.anchor[index]) < 0.02));
+  await wheel(80, 0);
+  await waitForExpression(cdp, `${cameraAtPointer}.x > ${initialCamera.x} + 10`, PAGE_TIMEOUT_MS);
+  const right = await evaluate(cdp, cameraAtPointer);
+  check("side wheel pans right without zooming or moving vertically", Math.abs(right.width - initialCamera.width) < 0.02
+    && Math.abs(right.y - initialCamera.y) < 0.02);
+  await wheel(-80, 0);
+  await waitForExpression(cdp, `Math.abs(${cameraAtPointer}.x - ${initialCamera.x}) < 0.02`, PAGE_TIMEOUT_MS);
+  equal("wheel gestures leave the saved drawing unchanged", JSON.stringify(await savedElements()), JSON.stringify(beforePan));
+  await gesture(resizedImage.start.map((coordinate, index) => (coordinate + resizedImage.end[index]) / 2));
+  check("the image is selectable after panning", await evaluate(cdp, `
+    Number(document.querySelector(".drawing-selection-box")?.getAttribute("x")) === ${resizedImage.start[0]}`));
+  await wheel(0, -60);
+  await waitForExpression(cdp, `${cameraAtPointer}.width < ${initialCamera.width}`, PAGE_TIMEOUT_MS);
+  const dropPoint = await evaluate(cdp, `${cameraAtPointer}.anchor`);
+  const dragData = { items: [], files: [photoPath], dragOperationsMask: 1 };
+  for (const type of ["dragEnter", "dragOver", "drop"]) {
+    await cdp.send("Input.dispatchDragEvent", { type, x, y, data: dragData });
+  }
+  await waitForExpression(cdp, `document.querySelectorAll('#drawingInk [data-type="image"]').length === 2`, PAGE_TIMEOUT_MS);
+  const dropped = (await savedElements()).at(-1);
+  check("a file dropped after panning and zooming is embedded at the pointer", dropped.type === "image" && dropped.src === photo
+    && dropped.id !== inserted.id && closeTo(dropped.start.map((value, i) => (value + dropped.end[i]) / 2), dropPoint));
+
+  await choose("pencil");
+  await evaluate(cdp, `if (!document.getElementById("drawingStylePanel").hidden) document.getElementById("drawingStyleToggle").click()`);
+  const negative = await evaluate(cdp, `(() => {
+    const view = document.getElementById("drawingCanvas").viewBox.baseVal;
+    return [Math.ceil(view.x) + 20, Math.ceil(view.y) + 20];
+  })()`);
+  await gesture(negative, [negative[0] + 55, negative[1] + 35]);
+  const newStroke = (await savedElements()).at(-1);
+  check("drawing after panning and zooming saves ink at the correct world coordinates",
+    newStroke.type === "pencil" && negative.every(value => value < 0) && closeTo(newStroke.points[0], negative));
+  await cdp.send("Page.reload");
+  await waitForExpression(cdp, saved, PAGE_TIMEOUT_MS);
+  check("the dropped image reopens with its saved pixels", await evaluate(cdp, `
+    document.querySelector('[data-element-id="${dropped.id}"]')?.getAttribute("href") === ${JSON.stringify(photo)}`));
+  check("reopening fits strokes outside the original canvas origin", await evaluate(cdp, `(() => {
+    const box = document.querySelector('[data-element-id="${newStroke.id}"]').getBoundingClientRect();
+    return box.width > 0 && box.left >= -1 && box.right <= innerWidth;
+  })()`));
+
+  const imageCount = `document.querySelectorAll('#drawingInk [data-type="image"]').length`;
+  const paste = await evaluate(cdp, `(() => {
+    const bytes = Uint8Array.from(atob(${JSON.stringify(photo.split(",")[1])}), value => value.charCodeAt(0));
+    const clipboardData = new DataTransfer();
+    clipboardData.items.add(new File([bytes], "pasted-screenshot.png", { type: "image/png" }));
+    const pasteOn = target => !target.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData }));
+    const title = document.getElementById("drawingTitle");
+    title.focus();
+    const titleHandled = pasteOn(title);
+    title.blur();
+    return { titleHandled, canvasHandled: pasteOn(document.body) };
+  })()`);
+  check("pasting a clipboard image imports it on the drawing and leaves title paste alone", paste.canvasHandled && !paste.titleHandled);
+  await waitForExpression(cdp, `${imageCount} === 3`, PAGE_TIMEOUT_MS);
+  const pasted = (await savedElements()).at(-1);
+  check("pasting a clipboard bitmap saves its pixels", pasted.type === "image" && pasted.src === photo && pasted.alt === "pasted screenshot");
+
+  check("the selected drawing image can be copied and pasted back into the canvas", await evaluate(cdp, `(() => {
+    const clipboardData = new DataTransfer();
+    const options = { bubbles: true, cancelable: true, clipboardData };
+    const copied = !document.body.dispatchEvent(new ClipboardEvent("copy", options));
+    return copied && !document.body.dispatchEvent(new ClipboardEvent("paste", options));
+  })()`));
+  await waitForExpression(cdp, `${imageCount} === 4`, PAGE_TIMEOUT_MS);
+  const copy = (await savedElements()).at(-1);
+  check("the copied image saves as a separate object with the same pixels and description",
+    copy.type === "image" && copy.id !== pasted.id && copy.src === pasted.src && copy.alt === pasted.alt);
 }
 
 async function checkSpaces(cdp, base, dataDir) {

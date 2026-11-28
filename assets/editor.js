@@ -31,7 +31,7 @@ import {
   setMark as setSourceMark,
   toggleList as toggleSourceList,
 } from "./doc/markdown-edit.js";
-import { IMAGE_MAX_DATA_URL, encodeCanvas, transformImage } from "./doc/image.js";
+import { prepareImage, transformImage } from "./doc/image.js";
 import { cacheImageSize, ensureFonts, loadMissingImages, tableCellEntryAtOffset } from "./doc/layout.js";
 import { buildPdf } from "./doc/pdf.js";
 import { Spellcheck } from "./doc/spellcheck.js";
@@ -111,8 +111,6 @@ const linkLongDate = new Intl.DateTimeFormat(undefined, {
 });
 
 const DEFAULT_TITLE = "Untitled document";
-const IMAGE_MAX_EDGE = 1600;
-const IMAGE_PASSTHROUGH_BYTES = 600 * 1024;
 const IMAGE_DOWNLOAD_EXTENSIONS = {
   "image/png": "png",
   "image/jpeg": "jpg",
@@ -2483,110 +2481,6 @@ async function addImages(files) {
     showToast(added === 1 ? "Image added." : added + " images added.");
   }
   editor.focusEditor();
-}
-
-async function prepareImage(file) {
-  if (!/^image\/(png|jpeg|webp|gif|avif)$/.test(file.type)) {
-    throw new Error("Use a PNG, JPEG, WebP, GIF, or AVIF image.");
-  }
-
-  const alt = imageAltFromName(file.name);
-  let image;
-  try {
-    image = await decodeImage(file);
-  } catch (error) {
-    throw new Error("That image couldn't be read.");
-  }
-
-  // A large file is drawn into a canvas before it is stored, and a closed
-  // ImageBitmap cannot be drawn: Chrome throws "The image source is detached".
-  // Read the size and finish every draw while the bitmap is still alive.
-  const naturalWidth = image.width || image.naturalWidth || 0;
-  const naturalHeight = image.height || image.naturalHeight || 0;
-  try {
-    if (file.size <= IMAGE_PASSTHROUGH_BYTES) {
-      return {
-        src: await readImageFile(file),
-        alt,
-        width: naturalWidth,
-        height: naturalHeight,
-      };
-    }
-
-    const scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(naturalWidth, naturalHeight));
-    const width = Math.max(1, Math.round(naturalWidth * scale));
-    const height = Math.max(1, Math.round(naturalHeight * scale));
-
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    canvas.getContext("2d").drawImage(image, 0, 0, width, height);
-
-    let src = encodeCanvas(canvas, 0.82);
-    if (src.length > IMAGE_MAX_DATA_URL) {
-      const smaller = document.createElement("canvas");
-      smaller.width = Math.max(1, Math.round(width * 0.72));
-      smaller.height = Math.max(1, Math.round(height * 0.72));
-      smaller.getContext("2d").drawImage(canvas, 0, 0, smaller.width, smaller.height);
-      src = encodeCanvas(smaller, 0.7);
-    }
-    if (src.length > IMAGE_MAX_DATA_URL) {
-      throw new Error("That image is too large to embed, even after shrinking.");
-    }
-
-    return { src, alt, width, height };
-  } finally {
-    if (image.close) {
-      image.close();
-    }
-  }
-}
-
-function decodeImage(file) {
-  if (window.createImageBitmap) {
-    return createImageBitmap(file).catch(() => decodeImageElement(file));
-  }
-  return decodeImageElement(file);
-}
-
-function decodeImageElement(file) {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const image = new Image();
-    image.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(image);
-    };
-    image.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("That image couldn't be read."));
-    };
-    image.src = url;
-  });
-}
-
-function readImageFile(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === "string" && reader.result.indexOf("data:image/") === 0) {
-        resolve(reader.result);
-      } else {
-        reject(new Error("That image couldn't be read."));
-      }
-    };
-    reader.onerror = () => reject(new Error("That image couldn't be read."));
-    reader.readAsDataURL(file);
-  });
-}
-
-function imageAltFromName(name) {
-  const base = String(name || "")
-    .replace(/\.[^.]+$/, "")
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return base.slice(0, 160) || "Image";
 }
 
 function openImageMenu(entry) {

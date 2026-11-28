@@ -20,7 +20,7 @@ Documents are stored in %LOCALAPPDATA%\Grapho unless GRAPHO_DATA_DIR is set. An 
     <projectSourceUrl>https://github.com/igor-couto/grapho</projectSourceUrl>
     <docsUrl>https://github.com/igor-couto/grapho#readme</docsUrl>
     <bugTrackerUrl>https://github.com/igor-couto/grapho/issues</bugTrackerUrl>
-    <iconUrl>https://raw.githubusercontent.com/igor-couto/grapho/main/assets/favicon.ico</iconUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/igor-couto/grapho@v0.1.1/assets/favicon.svg</iconUrl>
     <licenseUrl>https://github.com/igor-couto/grapho/blob/main/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <copyright>Copyright (C) Igor Couto</copyright>

@@ -5,8 +5,8 @@ are an AI coding agent.
 
 ## Scope
 
-Grapho is a single-user document editor: one Rust binary, plain browser assets,
-and Markdown documents on disk. It should stay easy to run and easy to understand.
+Grapho is a single-user document editor with one Rust binary and plain browser
+assets. It stores Markdown documents and JSON drawings on disk.
 
 Do not add accounts, sharing, collaboration, a database, or a frontend framework
 unless the user asks for them. The current features are the product, not a
@@ -84,6 +84,7 @@ src/main.rs       configuration, CLI, startup, graceful shutdown
 src/api.rs        routes, static assets, security headers, same-origin check
 src/auth.rs       password gate: Argon2id, sessions, throttling, cookies
 src/store.rs      document model, library persistence, HTML sanitization
+src/store/drawing.rs  versioned drawing scenes and legacy drawing decoding
 src/markdown.rs   Markdown bodies, GFM pipe tables, and relative image attachments on disk
 src/settings.rs   data folder rules and the remembered folder choice
 src/backup.rs     backup connectors: a background mirror of every save
@@ -105,7 +106,7 @@ assets/shortcuts.html  the page listing every editor and app shortcut
 assets/storage.html  the page for the data folder and backup connectors
 assets/icons/     standalone SVG sources for the icons the pages inline
 assets/pretext/   vendored text layout engine (MIT); do not edit
-assets/fonts/     bundled Inter/Literata files and their licenses
+assets/fonts/     bundled Inter/Literata/Kalam files and their licenses
 build.rs          git tag, commit, and commit date for /version
 Dockerfile        static musl binary on a scratch runtime image
 compose.yaml      local container: loopback port and grapho-data volume
@@ -118,10 +119,10 @@ Data flow is deliberately simple:
 1. The browser loads static HTML/CSS/JS. When a password is configured, every
    page and API call also needs a session cookie.
 2. The UI uses the JSON API for document operations.
-3. The Rust store keeps documents in an in-memory map. A title-based `.md` file
-   holds the body. The shared `metadata.json` maps stable UUIDs to filenames and
-   stores titles, dates, deletion state and layout. Relative links point to image
-   files beside the Markdown.
+3. The Rust store keeps documents in an in-memory map. A title-based `.md` or
+   `.drawing.json` file holds the body. The shared `metadata.json` maps stable
+   UUIDs to filenames and stores titles, dates, deletion state and layout.
+   Relative links point to image files beside the Markdown.
 4. The store reads the indexed files and sanitizes Markdown on startup. Keep the
    index versioned and use `#[serde(default)]` when adding optional fields.
    Version 1 Markdown indexes discover bodies and attachments by UUID on read.
@@ -175,9 +176,10 @@ save, an SSH server reached over SFTP, or a Google Drive folder. A OneDrive or
 Dropbox folder works through its desktop sync client, and a mounted network share
 works like any other folder. Adding one seeds the whole library through the
 worker, then each create, update, delete, or restore queues a job. `backup.rs`
-reads a committed snapshot, writes the changed bodies and attachments, removes
-deleted copies, then updates the active library index. It collapses a burst of saves into one write per
-document and records the last failure per connector for the page to show.
+reads a committed snapshot and copies changed bodies and attachments. It writes
+the index before removing obsolete copies, and carries forward the previous
+index entries for bodies that this batch has yet to copy. It collapses a burst
+of saves into one write per document and records the last failure per connector.
 Failed batches keep their document IDs in `backup-retries.json` beside the
 settings. The next document change retries each affected connector from the
 current store state, including after a restart. Copies run off the request path,
@@ -246,11 +248,32 @@ and when the document has images, because a board body's index entry drops the
 attachment files. The answer is the library summary, so the card updates in
 place, and a document that is already a board is left alone.
 
-Draw adds a Drawing option to the same picker. Its SVG view box is a square
-from 0 to 1000 on each axis. Complete strokes are arrays of integer coordinate
-pairs saved in a versioned fence in the document's Markdown body. The index
-marks drawings so the normal document URL serves the pencil canvas. Draw only
-controls creation in the picker. Existing drawings can always open and save.
+Draw adds a Drawing option to the same picker. A `.drawing.json` body holds
+an ordered list of elements with stable UUIDs and integer coordinates.
+Version 3 extends the coordinate range to fit the editor viewport, using a
+uniform SVG scale with at least 1000 units on each axis. Version 4 adds optional
+shape styles. Version 5 styles arrows and stores their routes and arrowheads.
+Version 6 adds styled lines with optional intermediate vertices and closure.
+Version 7 styles pencil strokes and stores their pressure samples. Version 8
+styles text with three font presets. Version 9 embeds imported images in the
+scene, reusing the document editor's file preparation in `assets/doc/image.js`.
+Version 10 allows signed coordinates so the area exposed by panning is drawable.
+Version 11 stores the canvas pattern. Drawings without a background field use
+dots. Version 12 stores optional background and pattern colors. Each omitted
+color uses the current theme. The drawing page requests `?scene=true&version=12`
+and fits the saved scene on opening. Middle-button dragging and horizontal
+scrolling pan the viewport.
+Vertical scrolling zooms around the pointer. The view lives in memory. The store
+rejects a legacy write when the saved scene contains data that the older client
+could not represent.
+Older fenced Markdown drawings convert on their next successful drawing save.
+Draw controls creation in the picker, and existing drawings can always open
+and save. `assets/draw-geometry.js` renders and hit-tests the shapes.
+`assets/draw-style.js` handles the shape panel. Style and layer changes use
+the same history as drawing gestures, and layer order follows the scene array.
+`assets/draw-tools.js` previews pointer gestures and commits each finished
+edit once. Unfinished click-to-draw lines stay in the preview until the user
+finishes or closes the path. `assets/draw.js` owns history and serialized autosave.
 
 The home page shows documents as rows or as grid cards. A grid card leads with a
 miniature of the document's beginning. The miniature is not an image and is not
@@ -838,7 +861,9 @@ is private.
   the script downloads the release zip, verifies its SHA256, and shims the
   binary inside the zip's top-level folder. Pushing to community.chocolatey.org
   needs a verified account and an API key, and the package goes through human
-  moderation.
+  moderation. The `iconUrl` must be a CDN URL, not raw.githubusercontent.com
+  (a moderation requirement); pin jsDelivr to the release tag, e.g.
+  `https://cdn.jsdelivr.net/gh/igor-couto/grapho@v<version>/assets/favicon.svg`.
 - `.github/workflows/apt.yml` builds the apt repository from a release's `.deb`
   files and deploys it to GitHub Pages, which must be enabled with "GitHub
   Actions" as the source. `release.yml` calls it after publishing, and

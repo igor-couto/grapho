@@ -280,14 +280,20 @@ mod tests {
             "Removing /backups/grapho/2f9c1f2e-0000-4000-8000-000000000000.md\n",
             "sftp> -ls -1 \"/backups/grapho\"\n",
             "/backups/grapho/6f9c1f2e-0000-4000-8000-000000000000.md\n",
+            "/backups/grapho/7a9c1f2e-0000-4000-8000-000000000000.drawing.json\n",
             "/backups/grapho/notes.txt\n",
             "/backups/grapho/.hidden.json\n",
             "\n"
         );
 
         let ids = parse_listing(output);
-        assert_eq!(ids.len(), 1);
-        assert_eq!(ids[0], "6f9c1f2e-0000-4000-8000-000000000000.md");
+        assert_eq!(
+            ids,
+            [
+                "6f9c1f2e-0000-4000-8000-000000000000.md",
+                "7a9c1f2e-0000-4000-8000-000000000000.drawing.json",
+            ]
+        );
     }
 
     #[test]

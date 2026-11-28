@@ -24,9 +24,9 @@ use crate::drive::{self, Drive, OAuthStore, Pending};
 use crate::secrets::{Secret, Secrets};
 use crate::settings::{self, BackupLocation, BackupTarget, Source};
 use crate::store::{
-    drawing_strokes, summary_for, DeletedDocument, Document, DocumentKind, DocumentMatch,
-    DocumentSummary, PencilStrokes, RelocateError, SharedStore, Space, SpaceError, SpaceSummary,
-    StoreError, EXTENSION_NAMES,
+    summary_for, DeletedDocument, Document, DocumentKind, DocumentMatch, DocumentSummary,
+    DrawingData, RelocateError, SharedStore, Space, SpaceError, SpaceSummary, StoreError,
+    EXTENSION_NAMES,
 };
 
 const BODY_LIMIT_BYTES: usize = 24 * 1024 * 1024;
@@ -623,22 +623,31 @@ async fn convert_document_to_board(
 #[derive(Deserialize, Serialize)]
 struct DrawingDocument {
     title: String,
-    strokes: PencilStrokes,
+    #[serde(flatten)]
+    data: DrawingData,
+}
+
+#[derive(Deserialize)]
+struct DrawingSelection {
+    #[serde(default)]
+    scene: bool,
+    version: Option<u32>,
 }
 
 async fn get_drawing(
     State(state): State<AppState>,
     Path(raw_id): Path<String>,
+    Query(selection): Query<DrawingSelection>,
 ) -> Result<Json<DrawingDocument>, ApiError> {
     let id = parse_document_id(&raw_id).ok_or_else(ApiError::not_found)?;
     state.store.require_document_space(id).await?;
     let document = state.store.get(id).await.ok_or_else(ApiError::not_found)?;
-    let source = document.drawing_markdown.ok_or_else(ApiError::not_found)?;
-    let strokes = drawing_strokes(&source)
-        .ok_or_else(|| ApiError::server_error("Grapho couldn't read this drawing."))?;
+    let data = document
+        .drawing_data(selection.scene.then_some(selection.version.unwrap_or(1)))?
+        .ok_or_else(ApiError::not_found)?;
     Ok(Json(DrawingDocument {
         title: document.title,
-        strokes,
+        data,
     }))
 }
 
@@ -654,7 +663,7 @@ async fn save_drawing(
         .save_drawing(
             id,
             &request.title,
-            &request.strokes,
+            request.data,
             selection.draft.then_some(selection.space),
         )
         .await?
@@ -1914,7 +1923,15 @@ impl From<StoreError> for ApiError {
             };
         }
         if matches!(error, StoreError::InvalidDrawing) {
-            return Self::bad_request("The drawing contains invalid pencil strokes.");
+            return Self::bad_request(
+                "The drawing scene is invalid or uses an unsupported version.",
+            );
+        }
+        if matches!(error, StoreError::DrawingClientTooOld) {
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: "This drawing contains tools from a newer version of Draw. Reload the page to edit it.".to_owned(),
+            };
         }
         if matches!(error, StoreError::NoBoardLayout) {
             return Self::bad_request(
@@ -2709,15 +2726,26 @@ mod tests {
             .unwrap();
         let api_path = format!("/api/documents/{id}");
         let drawing_path = format!("{api_path}/drawing");
+        let scene_path = format!("{drawing_path}?scene=true");
         let create_path = format!("{drawing_path}?draft=true");
-        let drawing =
-            json!({ "title": "Pencil sketch", "strokes": [[[0, 22], [1000, 50]], [[28, 42]]] });
+        let scene = json!({ "version": 1, "elements": [
+            { "id": Uuid::new_v4(), "type": "pencil", "points": [[0, 22], [1000, 50]] },
+            { "id": Uuid::new_v4(), "type": "pencil", "points": [[28, 42]] }
+        ] });
+        let mut drawing = scene.clone();
+        drawing["title"] = json!("Pencil sketch");
+        let mut unsupported = drawing.clone();
+        unsupported["version"] = json!(u32::MAX);
+        let mut duplicate_id = drawing.clone();
+        duplicate_id["elements"][1]["id"] = drawing["elements"][0]["id"].clone();
 
         assert_eq!(request(get(draft_path)).await.status(), StatusCode::OK);
         for invalid in [
             json!({ "title": "Untitled drawing", "strokes": [] }),
             json!({ "title": "Pencil sketch", "strokes": [[[1001, 0]]] }),
             json!({ "title": "Pencil sketch", "strokes": [[]] }),
+            unsupported,
+            duplicate_id,
         ] {
             assert_eq!(
                 request(put_json(&create_path, invalid)).await.status(),
@@ -2739,7 +2767,16 @@ mod tests {
             .await
             .unwrap();
         assert!(String::from_utf8_lossy(&html).contains("id=\"drawingCanvas\""));
-        assert_eq!(json_body(request(get(&drawing_path)).await).await, drawing);
+        assert_eq!(json_body(request(get(&scene_path)).await).await, drawing);
+        let legacy =
+            json!({ "title": "Pencil sketch", "strokes": [[[0, 22], [1000, 50]], [[28, 42]]] });
+        assert_eq!(json_body(request(get(&drawing_path)).await).await, legacy);
+        assert_eq!(
+            request(put_json(&drawing_path, legacy)).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(json_body(request(get(&scene_path)).await).await, drawing);
+        assert!(directory.join("Pencil sketch.drawing.json").is_file());
         assert_eq!(
             request(put_json(
                 &api_path,
@@ -2752,6 +2789,7 @@ mod tests {
 
         let renamed = request(put_json(&api_path, json!({ "title": "In the library" }))).await;
         assert_eq!(renamed.status(), StatusCode::OK);
+        assert!(!directory.join("Pencil sketch.drawing.json").exists());
         let listing =
             json_body(request(get("/api/documents/search?q=in%20the%20library")).await).await;
         assert_eq!(listing["matches"][0]["drawing"], true);
@@ -2761,9 +2799,10 @@ mod tests {
         assert_eq!(copy["drawing"], true);
         let copy_id = copy["id"].as_str().unwrap();
         let copy =
-            json_body(request(get(&format!("/api/documents/{copy_id}/drawing"))).await).await;
+            json_body(request(get(&format!("/api/documents/{copy_id}/drawing?scene=true"))).await)
+                .await;
         assert_eq!(copy["title"], "In the library (copy)");
-        assert_eq!(copy["strokes"], drawing["strokes"]);
+        assert_eq!(copy["elements"], drawing["elements"]);
         assert_eq!(
             request(delete_request(&api_path)).await.status(),
             StatusCode::NO_CONTENT
@@ -2782,14 +2821,370 @@ mod tests {
         let reopened = Store::load(directory.clone()).await.unwrap();
         let restored = reopened.get(id).await.unwrap();
         assert_eq!(restored.title, "In the library");
-        let source = restored.drawing_markdown.unwrap();
+        let restored_data =
+            serde_json::to_value(restored.drawing_data(Some(1)).unwrap().unwrap()).unwrap();
+        assert_eq!(restored_data, scene);
+        let source = fs::read(directory.join("In the library.drawing.json"))
+            .await
+            .unwrap();
         assert_eq!(
-            source,
-            "```grapho-drawing-v1\n[[[0,22],[1000,50]],[[28,42]]]\n```\n"
+            serde_json::from_slice::<serde_json::Value>(&source).unwrap(),
+            scene
         );
         let mirror = reopened.backup_snapshot(None).await.unwrap();
-        assert_eq!(mirror.files[&format!("{id}.md")], source.as_bytes());
+        assert_eq!(mirror.files[&format!("{id}.drawing.json")], source);
         fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn drawing_tools_round_trip_and_reject_lossy_pencil_saves() {
+        use serde_json::json;
+
+        let (app, directory) = test_app(None).await;
+        let request = |request| async { app.clone().oneshot(request).await.unwrap() };
+        let id = Uuid::new_v4();
+        let path = format!("/api/documents/{id}/drawing");
+        let editor_path = format!("{path}?scene=true&version=2");
+        let pencil = json!({ "id": Uuid::new_v4(), "type": "pencil", "points": [[1, 2]] });
+        let old = json!({ "title": "Diagram", "version": 1, "elements": [pencil] });
+        let mut drawing = old.clone();
+        drawing["version"] = json!(2);
+        assert_eq!(
+            request(put_json(&format!("{path}?draft=true"), old.clone()))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(json_body(request(get(&editor_path)).await).await, drawing);
+        let elements = drawing["elements"].as_array_mut().unwrap();
+        for kind in ["rectangle", "diamond", "ellipse", "arrow", "line"] {
+            elements.push(json!({
+                "id": Uuid::new_v4(), "type": kind, "start": [1000, 0], "end": [0, 812]
+            }));
+        }
+        elements.push(json!({
+            "id": Uuid::new_v4(), "type": "text", "at": [0, 1000], "text": "<hello>\nworld"
+        }));
+        let mut invalid = drawing.clone();
+        invalid["version"] = json!(1);
+        assert_eq!(
+            request(put_json(&path, invalid)).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        let mut invalid = drawing.clone();
+        invalid["elements"][1]["end"] = json!([0, 1001]);
+        assert_eq!(
+            request(put_json(&path, invalid)).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        let mut invalid = drawing.clone();
+        invalid["elements"][6]["text"] = json!("");
+        assert_eq!(
+            request(put_json(&path, invalid)).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            request(put_json(&path, drawing.clone())).await.status(),
+            StatusCode::OK
+        );
+
+        let v1_path = format!("{path}?scene=true");
+        for (endpoint, stale) in [
+            (&v1_path, old),
+            (&path, json!({ "title": "Stale title", "strokes": [] })),
+        ] {
+            assert_eq!(request(get(endpoint)).await.status(), StatusCode::CONFLICT);
+            assert_eq!(
+                request(put_json(&path, stale)).await.status(),
+                StatusCode::CONFLICT
+            );
+        }
+        assert_eq!(json_body(request(get(&editor_path)).await).await, drawing);
+        let reopened = Store::load(directory.clone()).await.unwrap();
+        let stored = reopened.get(id).await.unwrap();
+        assert_eq!(stored.title, drawing["title"].as_str().unwrap());
+        let scene = serde_json::to_value(stored.drawing_data(Some(2)).unwrap().unwrap()).unwrap();
+        assert_eq!(scene["version"], 2);
+        assert_eq!(scene["elements"], drawing["elements"]);
+
+        let v3_path = format!("{path}?scene=true&version=3");
+        let mut expanded = drawing.clone();
+        expanded["version"] = json!(3);
+        // Opening the square drawing with the new editor keeps its coordinates.
+        assert_eq!(json_body(request(get(&v3_path)).await).await, expanded);
+        expanded["elements"][1]["end"] = json!([1600, 1400]);
+        assert_eq!(
+            request(put_json(&path, expanded.clone())).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            request(get(&editor_path)).await.status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            request(put_json(&path, drawing)).await.status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(json_body(request(get(&v3_path)).await).await, expanded);
+        let v4_path = format!("{path}?scene=true&version=4");
+        assert_eq!(
+            request(put_json(&path, {
+                let mut invalid = expanded.clone();
+                invalid["version"] = json!(4);
+                invalid["elements"][3]["style"] = json!({ "edges": "rounded" });
+                invalid
+            }))
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let mut styled = expanded.clone();
+        styled["version"] = json!(4);
+        styled["elements"][1]["style"] = json!({
+            "stroke": "#123456", "fill": "#fedcba", "width": 3, "pattern": "dotted",
+            "roughness": 1, "edges": "rounded", "opacity": 45
+        });
+        let mut invalid_color = styled.clone();
+        invalid_color["elements"][1]["style"]["stroke"] = json!("url(#paint)");
+        assert_eq!(
+            request(put_json(&path, invalid_color)).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            request(put_json(&path, styled.clone())).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(request(get(&v3_path)).await.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            request(put_json(&path, expanded)).await.status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(json_body(request(get(&v4_path)).await).await, styled);
+
+        let v5_path = format!("{path}?scene=true&version=5");
+        let mut arrows = styled.clone();
+        arrows["version"] = json!(5);
+        arrows["elements"][4]["style"] = json!({
+            "route": "elbow", "start_head": "triangle", "end_head": "bar", "stroke": "#d94b58"
+        });
+        let mut invalid = arrows.clone();
+        invalid["elements"][4]["style"]["fill"] = json!("#ffffff");
+        assert_eq!(
+            request(put_json(&path, invalid)).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            request(put_json(&path, arrows.clone())).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(request(get(&v4_path)).await.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            request(put_json(&path, styled)).await.status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(json_body(request(get(&v5_path)).await).await, arrows);
+
+        let v6_path = format!("{path}?scene=true&version=6");
+        let mut lines = arrows.clone();
+        lines["version"] = json!(6);
+        lines["elements"][5]["vertices"] = json!([[420, 280]]);
+        lines["elements"][5]["closed"] = json!(true);
+        lines["elements"][5]["style"] = json!({ "fill": "#f0c879", "edges": "rounded" });
+        let mut invalid = lines.clone();
+        invalid["elements"][5]["vertices"] = json!([]);
+        assert_eq!(
+            request(put_json(&path, invalid)).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            request(put_json(&path, lines.clone())).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(request(get(&v5_path)).await.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            request(put_json(&path, arrows)).await.status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(json_body(request(get(&v6_path)).await).await, lines);
+
+        let v7_path = format!("{path}?scene=true&version=7");
+        let mut pencil_style = lines.clone();
+        pencil_style["version"] = json!(7);
+        pencil_style["elements"][0]["style"] = json!({ "stroke": "#d94b58", "fill": "#f0c879", "width": 3, "pressure": "variable", "opacity": 65 });
+        pencil_style["elements"][0]["pressures"] = json!([125]);
+        let mut invalid = pencil_style.clone();
+        invalid["elements"][0]["pressures"] = json!([125, 230]);
+        assert_eq!(
+            request(put_json(&path, invalid)).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            request(put_json(&path, pencil_style.clone()))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(request(get(&v6_path)).await.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            request(put_json(&path, lines)).await.status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(json_body(request(get(&v7_path)).await).await, pencil_style);
+
+        let v8_path = format!("{path}?scene=true&version=8");
+        let mut text_style = pencil_style.clone();
+        text_style["version"] = json!(8);
+        text_style["elements"][6]["style"] = json!({
+            "stroke": "#307bd2", "font_family": "hand_drawn", "font_size": "xl", "text_align": "right", "opacity": 60
+        });
+        let mut invalid = text_style.clone();
+        invalid["elements"][6]["style"]["font_family"] = json!("custom");
+        assert_eq!(
+            request(put_json(&path, invalid)).await.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            request(put_json(&path, text_style.clone())).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(request(get(&v7_path)).await.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            request(put_json(&path, pencil_style)).await.status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(json_body(request(get(&v8_path)).await).await, text_style);
+
+        let v9_path = format!("{path}?scene=true&version=9");
+        let mut picture_scene = text_style.clone();
+        picture_scene["version"] = json!(9);
+        picture_scene["elements"].as_array_mut().unwrap().push(json!({
+            "id": Uuid::new_v4(), "type": "image", "start": [480, 250], "end": [720, 370], "alt": "Photo",
+            "src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/1i9fWwAAAABJRU5ErkJggg=="
+        }));
+        for invalid_src in [
+            "https://example.com/photo.png",
+            "data:image/svg+xml;base64,PHN2Zz4=",
+            "data:image/png;base64,broken?",
+        ] {
+            let mut invalid = picture_scene.clone();
+            invalid["elements"][7]["src"] = json!(invalid_src);
+            assert_eq!(
+                request(put_json(&path, invalid)).await.status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(
+            request(put_json(&path, picture_scene.clone()))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(request(get(&v8_path)).await.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            request(put_json(&path, text_style)).await.status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(json_body(request(get(&v9_path)).await).await, picture_scene);
+
+        let v10_path = format!("{path}?scene=true&version=10");
+        let mut panned_scene = picture_scene.clone();
+        panned_scene["version"] = json!(10);
+        panned_scene["elements"][7]["start"] = json!([-150, -220]);
+        panned_scene["elements"][7]["end"] = json!([90, -100]);
+        assert_eq!(
+            request(put_json(&path, panned_scene.clone()))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(request(get(&v9_path)).await.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            request(put_json(&path, picture_scene)).await.status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(json_body(request(get(&v10_path)).await).await, panned_scene);
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn drawing_background_can_save_a_blank_canvas_and_blocks_older_clients() {
+        use serde_json::json;
+
+        let (app, directory) = test_app(None).await;
+        let request = |request| async { app.clone().oneshot(request).await.unwrap() };
+        let id = Uuid::new_v4();
+        let path = format!("/api/documents/{id}/drawing");
+        let current = format!("{path}?scene=true&version=11");
+        let previous = format!("{path}?scene=true&version=10");
+        let scene = json!({
+            "title": "Untitled drawing", "version": 11, "elements": [], "background": "ruled"
+        });
+        assert_eq!(
+            request(put_json(&format!("{path}?draft=true"), scene.clone()))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(request(get(&previous)).await.status(), StatusCode::CONFLICT);
+        let stale = json!({ "title": "Stale title", "version": 10, "elements": [] });
+        assert_eq!(
+            request(put_json(&path, stale)).await.status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(json_body(request(get(&current)).await).await, scene);
+
+        let mut upgraded = scene.clone();
+        upgraded["version"] = json!(12);
+        assert_eq!(
+            json_body(request(get(&format!("{path}?scene=true&version=12"))).await).await,
+            upgraded
+        );
+
+        let mut reset = scene;
+        reset["background"] = json!("dots");
+        assert_eq!(
+            request(put_json(&path, reset)).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            json_body(request(get(&previous)).await).await,
+            json!({ "title": "Untitled drawing", "version": 10, "elements": [] })
+        );
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn drawing_background_colors_round_trip_and_reject_invalid_or_lossy_saves() {
+        use serde_json::json;
+
+        let (app, directory) = test_app(None).await;
+        let request = |request| async { app.clone().oneshot(request).await.unwrap() };
+        let id = Uuid::new_v4();
+        let path = format!("/api/documents/{id}/drawing");
+        let scene = json!({
+            "title": "Untitled drawing", "version": 12, "elements": [],
+            "background_color": "#254263", "pattern_color": "#7cbfe8"
+        });
+        assert_eq!(
+            request(put_json(&format!("{path}?draft=true"), scene.clone()))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let stale = json!({ "title": "Untitled drawing", "version": 11, "elements": [] });
+        assert_eq!(
+            request(put_json(&path, stale)).await.status(),
+            StatusCode::CONFLICT
+        );
+        let mut invalid = scene.clone();
+        invalid["pattern_color"] = json!("transparent");
+        assert_eq!(
+            request(put_json(&path, invalid)).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        let reopened = request(get(&format!("{path}?scene=true&version=12"))).await;
+        assert_eq!(json_body(reopened).await, scene);
+        tokio::fs::remove_dir_all(directory).await.unwrap();
     }
 
     #[tokio::test]
